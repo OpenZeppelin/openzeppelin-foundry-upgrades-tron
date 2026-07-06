@@ -1,0 +1,8 @@
+node_modules/
+out/
+cache/
+lib/
+.DS_Store
+
+# local agent instructions (never commit)
+CLAUDE.local.md
