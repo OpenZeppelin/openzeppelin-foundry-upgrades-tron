@@ -27,6 +27,21 @@ library Core {
         ToolFailure
     }
 
+    function upgradeProxy(address proxy, string memory contractName, bytes memory data, Options memory opts) internal {
+        address newImplementation = prepareUpgrade(contractName, opts);
+        upgradeProxyTo(proxy, newImplementation, data);
+    }
+
+    function upgradeProxy(
+        address proxy,
+        string memory contractName,
+        bytes memory data,
+        Options memory opts,
+        address tryCaller
+    ) internal tryPrank(tryCaller) {
+        upgradeProxy(proxy, contractName, data, opts);
+    }
+
     function upgradeProxyTo(address proxy, address newImplementation, bytes memory data) internal {
         Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
         address admin = address(uint160(uint256(vm.load(proxy, ADMIN_SLOT))));
@@ -57,6 +72,20 @@ library Core {
         IUpgradeableBeacon(beacon).upgradeTo(newImplementation);
     }
 
+    function upgradeBeacon(address beacon, string memory contractName, Options memory opts) internal {
+        address newImplementation = prepareUpgrade(contractName, opts);
+        upgradeBeaconTo(beacon, newImplementation);
+    }
+
+    function upgradeBeacon(
+        address beacon,
+        string memory contractName,
+        Options memory opts,
+        address tryCaller
+    ) internal tryPrank(tryCaller) {
+        upgradeBeacon(beacon, contractName, opts);
+    }
+
     function upgradeBeaconTo(
         address beacon,
         address newImplementation,
@@ -75,6 +104,11 @@ library Core {
 
     function getBeaconAddress(address proxy) internal view returns (address) {
         return address(uint160(uint256(Vm(Utils.CHEATCODE_ADDRESS).load(proxy, BEACON_SLOT))));
+    }
+
+    function inferProxyAdmin(address account) internal view returns (bool) {
+        (bool success, bytes memory returndata) = account.staticcall(abi.encodeWithSignature("owner()"));
+        return success && returndata.length == 32;
     }
 
     modifier tryPrank(address caller) {
@@ -128,12 +162,38 @@ library Core {
         _validate(contractName, opts, false);
     }
 
+    function deployImplementation(string memory contractName, Options memory opts) internal returns (address) {
+        validateImplementation(contractName, opts);
+        return deploy(contractName, opts.constructorData);
+    }
+
     /**
      * @dev Validates implementation safety and storage compatibility with an
      * explicit or annotated reference contract.
      */
     function validateUpgrade(string memory contractName, Options memory opts) internal {
         _validate(contractName, opts, true);
+    }
+
+    function prepareUpgrade(string memory contractName, Options memory opts) internal returns (address) {
+        validateUpgrade(contractName, opts);
+        return deploy(contractName, opts.constructorData);
+    }
+
+    function deploy(string memory contractName, bytes memory constructorData) internal returns (address) {
+        string memory artifactPath = Utils.getContractInfo(contractName, Utils.getOutDir()).artifactPath;
+        bytes memory creationCode = Vm(Utils.CHEATCODE_ADDRESS).getCode(artifactPath);
+        address deployedAddress = _deployFromBytecode(abi.encodePacked(creationCode, constructorData));
+        if (deployedAddress == address(0)) {
+            revert(string.concat("Failed to deploy contract ", contractName));
+        }
+        return deployedAddress;
+    }
+
+    function _deployFromBytecode(bytes memory bytecode) private returns (address deployedAddress) {
+        assembly ("memory-safe") {
+            deployedAddress := create(0, add(bytecode, 32), mload(bytecode))
+        }
     }
 
     /**

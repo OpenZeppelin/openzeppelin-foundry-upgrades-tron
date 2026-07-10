@@ -6,7 +6,161 @@ import {TransparentUpgradeableProxy} from "openzeppelin-tron-solidity/contracts/
 import {UpgradeableBeacon} from "openzeppelin-tron-solidity/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol";
 
+import {Vm} from "forge-std/Vm.sol";
+import {Options} from "./Options.sol";
 import {Core} from "./internal/Core.sol";
+import {Utils} from "./internal/Utils.sol";
+
+/**
+ * @dev Validated deployment and upgrade helpers for TRON Virtual Machine
+ * proxies. Requires OpenZeppelin Contracts for TRON v5 or later.
+ */
+library Upgrades {
+    function deployUUPSProxy(
+        string memory contractName,
+        bytes memory initializerData,
+        Options memory opts
+    ) internal returns (address) {
+        address implementation = deployImplementation(contractName, opts);
+        return UnsafeUpgrades.deployUUPSProxy(implementation, initializerData);
+    }
+
+    function deployUUPSProxy(string memory contractName, bytes memory initializerData) internal returns (address) {
+        Options memory opts;
+        return deployUUPSProxy(contractName, initializerData, opts);
+    }
+
+    function deployTransparentProxy(
+        string memory contractName,
+        address initialOwner,
+        bytes memory initializerData,
+        Options memory opts
+    ) internal returns (address) {
+        if (!opts.unsafeSkipAllChecks && !opts.unsafeSkipProxyAdminCheck && Core.inferProxyAdmin(initialOwner)) {
+            revert(
+                string.concat(
+                    "`initialOwner` must not be a ProxyAdmin contract. If the contract at address ",
+                    Vm(Utils.CHEATCODE_ADDRESS).toString(initialOwner),
+                    " is not a ProxyAdmin contract and you are sure that this contract is able to call functions on an actual ProxyAdmin, skip this check with the `unsafeSkipProxyAdminCheck` option."
+                )
+            );
+        }
+
+        address implementation = deployImplementation(contractName, opts);
+        return UnsafeUpgrades.deployTransparentProxy(implementation, initialOwner, initializerData);
+    }
+
+    function deployTransparentProxy(
+        string memory contractName,
+        address initialOwner,
+        bytes memory initializerData
+    ) internal returns (address) {
+        Options memory opts;
+        return deployTransparentProxy(contractName, initialOwner, initializerData, opts);
+    }
+
+    function upgradeProxy(address proxy, string memory contractName, bytes memory data, Options memory opts) internal {
+        Core.upgradeProxy(proxy, contractName, data, opts);
+    }
+
+    function upgradeProxy(address proxy, string memory contractName, bytes memory data) internal {
+        Options memory opts;
+        Core.upgradeProxy(proxy, contractName, data, opts);
+    }
+
+    function upgradeProxy(
+        address proxy,
+        string memory contractName,
+        bytes memory data,
+        Options memory opts,
+        address tryCaller
+    ) internal {
+        Core.upgradeProxy(proxy, contractName, data, opts, tryCaller);
+    }
+
+    function upgradeProxy(address proxy, string memory contractName, bytes memory data, address tryCaller) internal {
+        Options memory opts;
+        Core.upgradeProxy(proxy, contractName, data, opts, tryCaller);
+    }
+
+    function deployBeacon(
+        string memory contractName,
+        address initialOwner,
+        Options memory opts
+    ) internal returns (address) {
+        address implementation = deployImplementation(contractName, opts);
+        return UnsafeUpgrades.deployBeacon(implementation, initialOwner);
+    }
+
+    function deployBeacon(string memory contractName, address initialOwner) internal returns (address) {
+        Options memory opts;
+        return deployBeacon(contractName, initialOwner, opts);
+    }
+
+    function upgradeBeacon(address beacon, string memory contractName, Options memory opts) internal {
+        Core.upgradeBeacon(beacon, contractName, opts);
+    }
+
+    function upgradeBeacon(address beacon, string memory contractName) internal {
+        Options memory opts;
+        Core.upgradeBeacon(beacon, contractName, opts);
+    }
+
+    function upgradeBeacon(
+        address beacon,
+        string memory contractName,
+        Options memory opts,
+        address tryCaller
+    ) internal {
+        Core.upgradeBeacon(beacon, contractName, opts, tryCaller);
+    }
+
+    function upgradeBeacon(address beacon, string memory contractName, address tryCaller) internal {
+        Options memory opts;
+        Core.upgradeBeacon(beacon, contractName, opts, tryCaller);
+    }
+
+    function deployBeaconProxy(address beacon, bytes memory initializerData) internal returns (address) {
+        Options memory opts;
+        return deployBeaconProxy(beacon, initializerData, opts);
+    }
+
+    function deployBeaconProxy(
+        address beacon,
+        bytes memory initializerData,
+        Options memory
+    ) internal returns (address) {
+        return UnsafeUpgrades.deployBeaconProxy(beacon, initializerData);
+    }
+
+    function validateImplementation(string memory contractName, Options memory opts) internal {
+        Core.validateImplementation(contractName, opts);
+    }
+
+    function deployImplementation(string memory contractName, Options memory opts) internal returns (address) {
+        return Core.deployImplementation(contractName, opts);
+    }
+
+    function validateUpgrade(string memory contractName, Options memory opts) internal {
+        Core.validateUpgrade(contractName, opts);
+    }
+
+    function prepareUpgrade(string memory contractName, Options memory opts) internal returns (address) {
+        return Core.prepareUpgrade(contractName, opts);
+    }
+
+    function getAdminAddress(address proxy) internal view returns (address) {
+        return Core.getAdminAddress(proxy);
+    }
+
+    function getImplementationAddress(address proxy) internal view returns (address) {
+        return Core.getImplementationAddress(proxy);
+    }
+
+    function getBeaconAddress(address proxy) internal view returns (address) {
+        return Core.getBeaconAddress(proxy);
+    }
+}
 
 /**
  * @dev Deploys and manages upgradeable contracts from Forge tests without
