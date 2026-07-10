@@ -42,6 +42,12 @@ contract LayoutV2_Bad {
     uint256 private b;
 }
 
+contract LayoutV2_Ok {
+    uint256 private a;
+    uint256 private b;
+    uint256 private c;
+}
+
 /// @custom:oz-upgrades-from LayoutV1
 contract LayoutV2_Renamed {
     uint256 private oldA;
@@ -53,6 +59,13 @@ contract LayoutV2_UpgradesFrom_Bad {
     uint256 private a;
     uint256 private c;
     uint256 private b;
+}
+
+/// @custom:oz-upgrades-from LayoutV1
+contract LayoutV2_UpgradesFrom_Ok {
+    uint256 private a;
+    uint256 private b;
+    uint256 private c;
 }
 
 contract NamespacedV1 {
@@ -104,6 +117,14 @@ contract NamespacedV2_UpgradesFrom_Ok {
 contract HasWarningAndError {
     uint256 private immutable x = 1;
 
+    function unsafe() public {
+        (bool success, ) = msg.sender.delegatecall("");
+        success;
+    }
+}
+
+contract AnnotatedUnsafe {
+    /// @custom:oz-upgrades-unsafe-allow delegatecall
     function unsafe() public {
         (bool success, ) = msg.sender.delegatecall("");
         success;

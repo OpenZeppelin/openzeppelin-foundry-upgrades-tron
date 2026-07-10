@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+import {console} from "forge-std/console.sol";
+import {Vm} from "forge-std/Vm.sol";
+
 import {Options} from "../Options.sol";
 import {ArtifactProvenance} from "./ArtifactProvenance.sol";
 import {Utils} from "./Utils.sol";
@@ -15,6 +18,23 @@ library Core {
         Success,
         ValidationFailure,
         ToolFailure
+    }
+
+    /**
+     * @dev Validates that an implementation is upgrade safe. Setting
+     * `unsafeSkipAllChecks` is an explicit escape hatch and returns before
+     * artifact lookup, provenance verification, or CLI execution.
+     */
+    function validateImplementation(string memory contractName, Options memory opts) internal {
+        _validate(contractName, opts, false);
+    }
+
+    /**
+     * @dev Validates implementation safety and storage compatibility with an
+     * explicit or annotated reference contract.
+     */
+    function validateUpgrade(string memory contractName, Options memory opts) internal {
+        _validate(contractName, opts, true);
     }
 
     /**
@@ -99,5 +119,31 @@ library Core {
         }
 
         return inputs;
+    }
+
+    function _validate(string memory contractName, Options memory opts, bool requireReference) private {
+        if (opts.unsafeSkipAllChecks) return;
+
+        string[] memory inputs = buildValidateCommand(contractName, opts, requireReference);
+        Vm.FfiResult memory result = Utils.runAsBashCommand(inputs);
+        string memory stdout = string(result.stdout);
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+
+        if (result.exitCode == 0 && vm.contains(stdout, "SUCCESS")) {
+            _logWarnings(result.stderr);
+            return;
+        }
+
+        if (result.exitCode != 0 && vm.contains(stdout, "FAILED")) {
+            _logWarnings(result.stderr);
+            revert(string.concat("Upgrade safety validation failed:\n", stdout));
+        }
+
+        string memory diagnostic = result.stderr.length == 0 ? stdout : string(result.stderr);
+        revert(string.concat("Failed to run upgrade safety validation: ", diagnostic));
+    }
+
+    function _logWarnings(bytes memory warnings) private pure {
+        if (warnings.length != 0) console.log(string(warnings));
     }
 }

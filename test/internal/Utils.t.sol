@@ -65,6 +65,9 @@ contract UtilsTest is Test {
         assertEq(Utils.getOutDir(), "out");
         vm.setEnv("FOUNDRY_OUT", "custom out");
         assertEq(Utils.getOutDir(), "custom out");
+        // Environment mutations are process-global and can otherwise leak
+        // into concurrently executed validation suites.
+        vm.setEnv("FOUNDRY_OUT", "out");
     }
 
     function testBuildInfoDirectorySelection() public pure {
