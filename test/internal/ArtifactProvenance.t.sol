@@ -184,6 +184,14 @@ contract ArtifactProvenanceTest is Test {
         );
     }
 
+    function testUnrelatedRemappingsFileFallsBackToStandardForgeInstall() public view {
+        string memory root = _helperFixture("unrelated-remappings");
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot(root, ""),
+            string.concat(root, "/lib/openzeppelin-foundry-upgrades-tron/src/internal/artifact-provenance.cjs")
+        );
+    }
+
     function testResolvesNpmInstallWithoutRemappingsFile() public view {
         string memory root = _helperFixture("npm-install");
         assertEq(
@@ -206,6 +214,11 @@ contract ArtifactProvenanceTest is Test {
     function testRejectsAmbiguousStandardInstallCandidates() public {
         vm.expectPartialRevert(ArtifactProvenance.AmbiguousProvenanceHelperCandidates.selector);
         invoker.resolveHelperPathFromProjectRoot(_helperFixture("ambiguous"), "");
+    }
+
+    function testAmbiguousPackageRemappingsFailBeforeStandardCandidateDiscovery() public {
+        vm.expectPartialRevert(ArtifactProvenance.AmbiguousProvenanceRemapping.selector);
+        invoker.resolveHelperPathFromProjectRoot(_helperFixture("ambiguous-remappings"), "");
     }
 
     function testRejectsMissingStandardInstallCandidate() public {

@@ -10,6 +10,8 @@ import {Utils, ContractInfo} from "./Utils.sol";
  * FFI so real Forge build-info files do not exhaust EVM memory.
  */
 library ArtifactProvenance {
+    string private constant PROVENANCE_REMAPPING = "openzeppelin-foundry-upgrades-tron/=";
+
     error BuildInfoNotFound(string fullyQualifiedName);
     error AmbiguousBuildInfo(string fullyQualifiedName);
     error CreationBytecodeMismatch(string fullyQualifiedName);
@@ -109,7 +111,10 @@ library ArtifactProvenance {
         Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
         string memory remappingsFile = Utils.joinPath(projectRoot, "remappings.txt");
         if (vm.exists(remappingsFile)) {
-            return resolveHelperPathFromRemappings(vm.readFile(remappingsFile), projectRoot);
+            string memory remappings = vm.readFile(remappingsFile);
+            if (_containsProvenanceRemapping(remappings)) {
+                return resolveHelperPathFromRemappings(remappings, projectRoot);
+            }
         }
 
         string[3] memory candidates = [
@@ -143,19 +148,26 @@ library ArtifactProvenance {
         string memory remappings,
         string memory projectRoot
     ) internal pure returns (string memory) {
-        string memory prefix = "openzeppelin-foundry-upgrades-tron/=";
         string[] memory lines = Vm(Utils.CHEATCODE_ADDRESS).split(remappings, "\n");
         string memory target;
         uint256 matches;
         for (uint256 i = 0; i < lines.length; ++i) {
-            if (_startsWith(lines[i], prefix)) {
-                target = _trimTrailingWhitespace(_substring(lines[i], bytes(prefix).length));
+            if (_startsWith(lines[i], PROVENANCE_REMAPPING)) {
+                target = _trimTrailingWhitespace(_substring(lines[i], bytes(PROVENANCE_REMAPPING).length));
                 ++matches;
             }
         }
         if (matches == 0 || bytes(target).length == 0) revert ProvenanceRemappingNotFound();
         if (matches != 1) revert AmbiguousProvenanceRemapping();
         return Utils.joinPath(Utils.resolvePath(target, projectRoot), "internal/artifact-provenance.cjs");
+    }
+
+    function _containsProvenanceRemapping(string memory remappings) private pure returns (bool) {
+        string[] memory lines = Vm(Utils.CHEATCODE_ADDRESS).split(remappings, "\n");
+        for (uint256 i = 0; i < lines.length; ++i) {
+            if (_startsWith(lines[i], PROVENANCE_REMAPPING)) return true;
+        }
+        return false;
     }
 
     function _startsWith(string memory value, string memory prefix) private pure returns (bool) {

@@ -1,0 +1,2 @@
+openzeppelin-foundry-upgrades-tron/=lib/first/src/
+openzeppelin-foundry-upgrades-tron/=lib/second/src/
