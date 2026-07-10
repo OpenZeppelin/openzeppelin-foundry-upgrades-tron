@@ -28,10 +28,10 @@ library Utils {
     }
 
     function getContractInfo(string memory contractName, string memory outDir) internal returns (ContractInfo memory) {
-        _assertSafeContractName(contractName);
+        assertSafeContractName(contractName);
         Vm vm = Vm(CHEATCODE_ADDRESS);
         ContractInfo memory info;
-        info.shortName = _toShortName(contractName);
+        info.shortName = getShortName(contractName);
 
         string memory artifactPath;
         if (contractName.endsWith(".json")) {
@@ -122,7 +122,7 @@ library Utils {
         if (normalized.endsWith("/artifacts/contracts") || normalized.endsWith("\\artifacts\\contracts")) {
             return string.concat(_withoutSuffix(normalized, "contracts"), "build-info");
         }
-        return string.concat(normalized, "/build-info");
+        return joinPath(normalized, "build-info");
     }
 
     function getBuildInfoFile(
@@ -169,10 +169,43 @@ library Utils {
     }
 
     function absolutePath(string memory path) internal view returns (string memory) {
-        if (bytes(path).length > 0 && bytes(path)[0] == bytes1("/")) {
-            return _trimTrailingSeparators(path);
+        return resolvePath(path, Vm(CHEATCODE_ADDRESS).projectRoot());
+    }
+
+    function isAbsolutePath(string memory path) internal pure returns (bool) {
+        bytes memory value = bytes(path);
+        if (value.length > 0 && value[0] == "/") return true;
+        if (value.length > 1 && value[0] == "\\" && value[1] == "\\") return true;
+        if (value.length > 2) {
+            bool drive = (value[0] >= 0x41 && value[0] <= 0x5a) || (value[0] >= 0x61 && value[0] <= 0x7a);
+            if (drive && value[1] == ":" && (value[2] == "/" || value[2] == "\\")) return true;
         }
-        return string.concat(Vm(CHEATCODE_ADDRESS).projectRoot(), "/", _trimTrailingSeparators(path));
+        return false;
+    }
+
+    function resolvePath(string memory path, string memory root) internal pure returns (string memory) {
+        string memory normalized = _trimTrailingSeparators(path);
+        if (isAbsolutePath(normalized)) return normalized;
+        return joinPath(root, normalized);
+    }
+
+    function joinPath(string memory base, string memory child) internal pure returns (string memory) {
+        string memory normalizedBase = _trimTrailingSeparators(base);
+        bool backslash = _usesBackslashSeparator(normalizedBase);
+        string memory separator = backslash ? "\\" : "/";
+        string memory normalizedChild = backslash ? Vm(CHEATCODE_ADDRESS).replace(child, "/", "\\") : child;
+        return string.concat(normalizedBase, separator, normalizedChild);
+    }
+
+    function basename(string memory path) internal pure returns (string memory) {
+        bytes memory value = bytes(path);
+        uint256 start;
+        for (uint256 i = 0; i < value.length; ++i) {
+            if (value[i] == "/" || value[i] == "\\") start = i + 1;
+        }
+        bytes memory name = new bytes(value.length - start);
+        for (uint256 i = start; i < value.length; ++i) name[i - start] = value[i];
+        return string(name);
     }
 
     function findJsonFiles(string memory directory) internal returns (string[] memory) {
@@ -202,18 +235,16 @@ library Utils {
         revert(_invalidNameMessage(name));
     }
 
-    function _toShortName(string memory name) private pure returns (string memory) {
+    function getShortName(string memory name) internal pure returns (string memory) {
         Vm vm = Vm(CHEATCODE_ADDRESS);
         if (name.endsWith(".sol") && name.count(".sol") == 1) {
-            string[] memory parts = vm.split(name, "/");
-            return vm.replace(parts[parts.length - 1], ".sol", "");
+            return vm.replace(basename(name), ".sol", "");
+        }
+        if (name.endsWith(".json") && name.count(".json") == 1) {
+            return vm.replace(basename(name), ".json", "");
         }
         if (name.count(":") == 1) {
             return vm.split(name, ":")[1];
-        }
-        if (name.endsWith(".json") && name.count(".json") == 1) {
-            string[] memory parts = vm.split(name, "/");
-            return vm.replace(parts[parts.length - 1], ".json", "");
         }
         revert(_invalidNameMessage(name));
     }
@@ -227,7 +258,7 @@ library Utils {
             );
     }
 
-    function _assertSafeContractName(string memory name) private pure {
+    function assertSafeContractName(string memory name) internal pure {
         bytes memory value = bytes(name);
         for (uint256 i = 0; i < value.length; ++i) {
             bytes1 c = value[i];
@@ -239,6 +270,7 @@ library Utils {
                     c == "-" ||
                     c == "." ||
                     c == "/" ||
+                    c == "\\" ||
                     c == ":" ||
                     c == "@" ||
                     c == " ";
@@ -310,6 +342,12 @@ library Utils {
         bytes memory result = new bytes(raw.length - ending.length);
         for (uint256 i = 0; i < result.length; ++i) result[i] = raw[i];
         return string(result);
+    }
+
+    function _usesBackslashSeparator(string memory value) private pure returns (bool) {
+        bytes memory raw = bytes(value);
+        if (raw.length > 1 && raw[0] == "\\" && raw[1] == "\\") return true;
+        return raw.length > 2 && raw[1] == ":" && raw[2] == "\\";
     }
 
     function _jsonKey(string memory prefix, string memory key) internal pure returns (string memory) {

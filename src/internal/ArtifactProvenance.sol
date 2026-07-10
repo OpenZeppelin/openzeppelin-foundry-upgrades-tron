@@ -20,6 +20,9 @@ library ArtifactProvenance {
     error SourceContentHashMismatch(string sourceName, bytes32 expected, bytes32 actual);
     error ArtifactOutsideOutputDirectory(string artifact, string outputDirectory);
     error BuildInfoIdentityMismatch(string expected, string actual);
+    error ProvenanceRemappingNotFound();
+    error AmbiguousProvenanceRemapping();
+    error ProvenanceHelperNotFound(string path);
     error ProvenanceToolFailure(string reason);
 
     uint8 private constant BUILD_INFO_NOT_FOUND = 1;
@@ -44,19 +47,17 @@ library ArtifactProvenance {
     function assertMatch(string memory contractName, string memory outDir) internal returns (bytes32) {
         ContractInfo memory info = Utils.getContractInfo(contractName, outDir);
         string memory absoluteOutDir = Utils.absoluteOutDir(outDir);
+        string memory helperPath = resolveHelperPath();
 
-        string[] memory inputs = new string[](9);
+        string[] memory inputs = new string[](8);
         inputs[0] = "node";
-        inputs[1] = "-e";
-        inputs[2] = Utils.shellQuote(
-            "let p;try{p=require.resolve('@openzeppelin/foundry-upgrades-tron/src/internal/artifact-provenance.cjs')}catch{p=require('node:path').resolve('src/internal/artifact-provenance.cjs')}require(p).main(process.argv.slice(1))"
-        );
-        inputs[3] = Utils.shellQuote(absoluteOutDir);
-        inputs[4] = Utils.shellQuote(info.artifactPath);
-        inputs[5] = Utils.shellQuote(info.contractPath);
-        inputs[6] = Utils.shellQuote(info.shortName);
-        inputs[7] = Utils.shellQuote(string.concat(info.contractPath, ":", info.shortName));
-        inputs[8] = "2>/dev/null";
+        inputs[1] = Utils.shellQuote(helperPath);
+        inputs[2] = Utils.shellQuote(absoluteOutDir);
+        inputs[3] = Utils.shellQuote(info.artifactPath);
+        inputs[4] = Utils.shellQuote(info.contractPath);
+        inputs[5] = Utils.shellQuote(info.shortName);
+        inputs[6] = Utils.shellQuote(string.concat(info.contractPath, ":", info.shortName));
+        inputs[7] = "2>/dev/null";
 
         Vm.FfiResult memory result = Utils.runAsBashCommand(inputs);
         if (result.exitCode != 0 || result.stdout.length == 0) {
@@ -82,5 +83,68 @@ library ArtifactProvenance {
         if (code == ARTIFACT_OUTSIDE_OUTPUT) revert ArtifactOutsideOutputDirectory(detailA, detailB);
         if (code == BUILD_INFO_IDENTITY_MISMATCH) revert BuildInfoIdentityMismatch(detailA, detailB);
         revert ProvenanceToolFailure(detailA);
+    }
+
+    function resolveHelperPath() internal returns (string memory) {
+        string[] memory command = new string[](2);
+        command[0] = "forge";
+        command[1] = "remappings";
+        Vm.FfiResult memory result = Utils.runAsBashCommand(command);
+        if (result.exitCode != 0) revert ProvenanceToolFailure(string(result.stderr));
+        string memory helper = resolveHelperPathFromRemappings(
+            string(result.stdout),
+            Vm(Utils.CHEATCODE_ADDRESS).projectRoot()
+        );
+        if (!Vm(Utils.CHEATCODE_ADDRESS).exists(helper)) revert ProvenanceHelperNotFound(helper);
+        return helper;
+    }
+
+    function resolveHelperPathFromRemappings(
+        string memory remappings,
+        string memory projectRoot
+    ) internal pure returns (string memory) {
+        string memory prefix = "openzeppelin-foundry-upgrades-tron/=";
+        string[] memory lines = Vm(Utils.CHEATCODE_ADDRESS).split(remappings, "\n");
+        string memory target;
+        uint256 matches;
+        for (uint256 i = 0; i < lines.length; ++i) {
+            if (_startsWith(lines[i], prefix)) {
+                target = _trimTrailingWhitespace(_substring(lines[i], bytes(prefix).length));
+                ++matches;
+            }
+        }
+        if (matches == 0 || bytes(target).length == 0) revert ProvenanceRemappingNotFound();
+        if (matches != 1) revert AmbiguousProvenanceRemapping();
+        return Utils.joinPath(Utils.resolvePath(target, projectRoot), "internal/artifact-provenance.cjs");
+    }
+
+    function _startsWith(string memory value, string memory prefix) private pure returns (bool) {
+        bytes memory subject = bytes(value);
+        bytes memory expected = bytes(prefix);
+        if (subject.length < expected.length) return false;
+        for (uint256 i = 0; i < expected.length; ++i) {
+            if (subject[i] != expected[i]) return false;
+        }
+        return true;
+    }
+
+    function _substring(string memory value, uint256 start) private pure returns (string memory) {
+        bytes memory subject = bytes(value);
+        bytes memory result = new bytes(subject.length - start);
+        for (uint256 i = start; i < subject.length; ++i) result[i - start] = subject[i];
+        return string(result);
+    }
+
+    function _trimTrailingWhitespace(string memory value) private pure returns (string memory) {
+        bytes memory subject = bytes(value);
+        uint256 length = subject.length;
+        while (
+            length > 0 && (subject[length - 1] == 0x0d || subject[length - 1] == 0x20 || subject[length - 1] == 0x09)
+        ) {
+            --length;
+        }
+        bytes memory result = new bytes(length);
+        for (uint256 i = 0; i < length; ++i) result[i] = subject[i];
+        return string(result);
     }
 }

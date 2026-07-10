@@ -94,6 +94,35 @@ contract UtilsTest is Test {
         assertEq(Utils.shellQuote("it's safe"), "'it'\\''s safe'");
     }
 
+    function testClassifiesPosixWindowsDriveAndUncAbsolutePaths() public pure {
+        assertTrue(Utils.isAbsolutePath("/tmp/out"));
+        assertTrue(Utils.isAbsolutePath("C:/project/out"));
+        assertTrue(Utils.isAbsolutePath("C:\\project\\out"));
+        assertTrue(Utils.isAbsolutePath("\\\\server\\share\\out"));
+        assertFalse(Utils.isAbsolutePath("project/out"));
+        assertFalse(Utils.isAbsolutePath("C:project\\out"));
+    }
+
+    function testResolvesRelativeAndPreservesAbsolutePathForms() public pure {
+        assertEq(Utils.resolvePath("src/internal/helper.cjs", "/tmp/project"), "/tmp/project/src/internal/helper.cjs");
+        assertEq(Utils.resolvePath("C:/project/out", "/tmp/project"), "C:/project/out");
+        assertEq(Utils.resolvePath("C:\\project\\out", "/tmp/project"), "C:\\project\\out");
+        assertEq(Utils.resolvePath("\\\\server\\share\\out", "/tmp/project"), "\\\\server\\share\\out");
+    }
+
+    function testParsesBasenameAndArtifactShortNameWithBothSeparators() public pure {
+        assertEq(Utils.basename("/tmp/out/Widget.json"), "Widget.json");
+        assertEq(Utils.basename("C:\\project\\out\\Widget.json"), "Widget.json");
+        assertEq(Utils.basename("\\\\server\\share\\Widget.json"), "Widget.json");
+        assertEq(Utils.getShortName("C:\\project\\out\\Widget.sol\\Widget.json"), "Widget");
+    }
+
+    function testWindowsBackslashesAreAllowedButShellControlsRemainRejected() public {
+        Utils.assertSafeContractName("C:\\project files\\out\\Widget.sol\\Widget.json");
+        vm.expectRevert(abi.encodeWithSelector(Utils.UnsafeContractName.selector, "C:\\out\\Widget.json;touch PWNED"));
+        invoker.assertSafeContractName("C:\\out\\Widget.json;touch PWNED");
+    }
+
     function testUniqueRecursiveArtifactLookupAndPathWithSpaces() public {
         ContractInfo memory info = Utils.getContractInfo(
             "SpaceWidget.sol:SpaceWidget",
@@ -135,6 +164,10 @@ contract UtilsTest is Test {
 }
 
 contract UtilsInvoker {
+    function assertSafeContractName(string memory name) external pure {
+        Utils.assertSafeContractName(name);
+    }
+
     function getContractInfo(string memory name, string memory outDir) external returns (ContractInfo memory) {
         return Utils.getContractInfo(name, outDir);
     }

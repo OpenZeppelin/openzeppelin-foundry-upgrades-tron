@@ -47,21 +47,42 @@ function semanticVersion(version) {
   return version.split('+', 1)[0];
 }
 
+function isWindowsAbsolute(value) {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value);
+}
+
+function isAbsolutePath(value) {
+  return path.posix.isAbsolute(value) || isWindowsAbsolute(value);
+}
+
+function pathFlavor(value) {
+  return isWindowsAbsolute(value) ? path.win32 : path.posix;
+}
+
+function resolvePath(value, root = process.cwd()) {
+  if (isWindowsAbsolute(value)) return path.win32.normalize(value);
+  if (path.posix.isAbsolute(value)) return path.posix.normalize(value);
+  const flavor = pathFlavor(root);
+  return flavor.resolve(root, value);
+}
+
 function buildInfoDirectory(outputDirectory) {
-  const normalized = path.resolve(outputDirectory);
-  const suffix = `${path.sep}artifacts${path.sep}contracts`;
-  return normalized.endsWith(suffix)
-    ? path.join(normalized.slice(0, -'contracts'.length), 'build-info')
-    : path.join(normalized, 'build-info');
+  const normalized = resolvePath(outputDirectory);
+  const flavor = pathFlavor(normalized);
+  const parent = flavor.dirname(normalized);
+  return flavor.basename(normalized) === 'contracts' && flavor.basename(parent) === 'artifacts'
+    ? flavor.join(parent, 'build-info')
+    : flavor.join(normalized, 'build-info');
 }
 
 function findJsonFiles(directory) {
   if (!fs.existsSync(directory)) return [];
   const files = [];
+  const flavor = pathFlavor(directory);
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const entryPath = path.join(directory, entry.name);
+    const entryPath = flavor.join(directory, entry.name);
     if (entry.isDirectory()) files.push(...findJsonFiles(entryPath));
-    else if (entry.isFile() && entry.name.endsWith('.json')) files.push(path.resolve(entryPath));
+    else if (entry.isFile() && entry.name.endsWith('.json')) files.push(resolvePath(entryPath));
   }
   return files.sort();
 }
@@ -77,8 +98,9 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) {
       return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, 'valid Hardhat buildInfoId', id ?? '') };
     }
-    const mainPath = path.resolve(directory, `${id}.json`);
-    const outputPath = path.resolve(directory, `${id}.output.json`);
+    const flavor = pathFlavor(directory);
+    const mainPath = flavor.join(directory, `${id}.json`);
+    const outputPath = flavor.join(directory, `${id}.output.json`);
     if (!fs.existsSync(mainPath) || !fs.existsSync(outputPath)) {
       return { error: response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName) };
     }
@@ -147,8 +169,9 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
 }
 
 function isWithin(parent, child) {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+  const flavor = isWindowsAbsolute(parent) || isWindowsAbsolute(child) ? path.win32 : path.posix;
+  const relative = flavor.relative(parent, child);
+  return relative === '' || (!relative.startsWith(`..${flavor.sep}`) && relative !== '..' && !flavor.isAbsolute(relative));
 }
 
 function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName, fullyQualifiedName]) {
@@ -156,8 +179,8 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
     return response(CODE.toolFailure, ZERO_HASH, 'Expected output directory, artifact, source, contract, and FQN');
   }
 
-  const outputDirectory = path.resolve(outputDirectoryArg);
-  const artifactPath = path.resolve(artifactPathArg);
+  const outputDirectory = resolvePath(outputDirectoryArg);
+  const artifactPath = resolvePath(artifactPathArg);
   if (!isWithin(outputDirectory, artifactPath)) {
     return response(CODE.artifactOutsideOutput, ZERO_HASH, artifactPath, outputDirectory);
   }
@@ -242,4 +265,14 @@ function main(args) {
 
 if (require.main === module) main(process.argv.slice(2));
 
-module.exports = { CODE, buildInfoDirectory, findJsonFiles, loadBuildInfo, main, normalizeBytecode, verify };
+module.exports = {
+  CODE,
+  buildInfoDirectory,
+  findJsonFiles,
+  isAbsolutePath,
+  loadBuildInfo,
+  main,
+  normalizeBytecode,
+  resolvePath,
+  verify,
+};

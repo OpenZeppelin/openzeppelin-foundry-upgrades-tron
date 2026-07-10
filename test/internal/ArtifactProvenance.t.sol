@@ -119,6 +119,49 @@ contract ArtifactProvenanceTest is Test {
         invoker.assertMatch("test/fixtures/provenance/valid/out/Widget.sol/Widget.json", _fixture("valid-copy/out"));
     }
 
+    function testResolvesLocalAndInstalledRemappingTargets() public pure {
+        string memory root = "/tmp/consumer project";
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromRemappings(
+                "openzeppelin-foundry-upgrades-tron/=src/\nforge-std/=lib/forge-std/src/\n",
+                root
+            ),
+            "/tmp/consumer project/src/internal/artifact-provenance.cjs"
+        );
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromRemappings(
+                "openzeppelin-foundry-upgrades-tron/=lib/openzeppelin-foundry-upgrades-tron/src/\n",
+                root
+            ),
+            "/tmp/consumer project/lib/openzeppelin-foundry-upgrades-tron/src/internal/artifact-provenance.cjs"
+        );
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromRemappings(
+                "openzeppelin-foundry-upgrades-tron/=lib/openzeppelin-foundry-upgrades-tron/src/\r\n",
+                "C:\\consumer project"
+            ),
+            "C:\\consumer project\\lib\\openzeppelin-foundry-upgrades-tron\\src\\internal\\artifact-provenance.cjs"
+        );
+    }
+
+    function testRejectsMissingOrAmbiguousProvenanceRemapping() public {
+        vm.expectPartialRevert(ArtifactProvenance.ProvenanceRemappingNotFound.selector);
+        invoker.resolveHelperPathFromRemappings("forge-std/=lib/forge-std/src/\n", "/tmp/project");
+
+        vm.expectPartialRevert(ArtifactProvenance.AmbiguousProvenanceRemapping.selector);
+        invoker.resolveHelperPathFromRemappings(
+            "openzeppelin-foundry-upgrades-tron/=src/\nopenzeppelin-foundry-upgrades-tron/=lib/package/src/\n",
+            "/tmp/project"
+        );
+    }
+
+    function testResolvedHelperExistsForCurrentCheckout() public {
+        assertEq(
+            ArtifactProvenance.resolveHelperPath(),
+            string.concat(vm.projectRoot(), "/src/internal/artifact-provenance.cjs")
+        );
+    }
+
     function _fixture(string memory suffix) private view returns (string memory) {
         return string.concat(vm.projectRoot(), "/test/fixtures/provenance/", suffix);
     }
@@ -127,5 +170,12 @@ contract ArtifactProvenanceTest is Test {
 contract ProvenanceInvoker {
     function assertMatch(string memory name, string memory outDir) external returns (bytes32) {
         return ArtifactProvenance.assertMatch(name, outDir);
+    }
+
+    function resolveHelperPathFromRemappings(
+        string memory remappings,
+        string memory projectRoot
+    ) external pure returns (string memory) {
+        return ArtifactProvenance.resolveHelperPathFromRemappings(remappings, projectRoot);
     }
 }
