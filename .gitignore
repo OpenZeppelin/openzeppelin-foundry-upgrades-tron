@@ -1,7 +1,20 @@
-node_modules/
-out/
+# Compiler files
 cache/
-lib/
+out/
+
+# Development broadcast logs
+broadcast/
+
+# Environment files
+.env
+
+# Node modules
+node_modules/
+
+# NPM package files
+*.tgz
+
+# Operating system files
 .DS_Store
 
 # local agent instructions (never commit)

@@ -1,0 +1,9 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["node_modules", "lib"]
+solc_version = "0.8.22"
+ffi = true
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
