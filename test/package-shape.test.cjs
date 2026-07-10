@@ -13,7 +13,7 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.deepEqual(pkg.files, ['src/**/*', 'rpc/**/*']);
   assert.equal(pkg.engines.node, '>=20');
   assert.equal(pkg.scripts.test, 'npm run test:package && npm run test:solidity && npm run test:rpc');
-  assert.equal(pkg.scripts['test:package'], 'node --test test/package-shape.test.cjs');
+  assert.equal(pkg.scripts['test:package'], 'node scripts/test-package.cjs');
   assert.equal(pkg.scripts['test:solidity'], 'node scripts/test-solidity.cjs');
   assert.equal(pkg.scripts['test:rpc'], 'node scripts/test-rpc.cjs');
   assert.equal(pkg.scripts.lint, 'node scripts/lint.cjs');
