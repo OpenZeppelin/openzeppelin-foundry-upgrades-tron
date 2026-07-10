@@ -9,6 +9,7 @@ import {Core} from "openzeppelin-foundry-upgrades-tron/internal/Core.sol";
 import {Versions} from "openzeppelin-foundry-upgrades-tron/internal/Versions.sol";
 
 import {OptionsApiShape} from "../contracts/Validations.sol";
+import {RawUpgradeVersionResponder} from "../contracts/MalformedUpgradeVersion.sol";
 
 contract CoreTest is Test {
     string private constant TARGET = "Validations.sol:OptionsApiShape";
@@ -26,6 +27,54 @@ contract CoreTest is Test {
         assertEq(uint256(Core.ValidationResult.Success), 0);
         assertEq(uint256(Core.ValidationResult.ValidationFailure), 1);
         assertEq(uint256(Core.ValidationResult.ToolFailure), 2);
+    }
+
+    function testUpgradeVersionRejectsThirtyThreeByteResponse() public {
+        assertEq(Core.getUpgradeInterfaceVersion(address(new RawUpgradeVersionResponder(new bytes(33)))), "");
+    }
+
+    function testUpgradeVersionRejectsNinetyFiveByteResponse() public {
+        assertEq(
+            Core.getUpgradeInterfaceVersion(
+                address(new RawUpgradeVersionResponder(_truncate(abi.encode("5.0.0"), 95)))
+            ),
+            ""
+        );
+    }
+
+    function testUpgradeVersionRejectsBadDynamicOffset() public {
+        bytes memory response = abi.encode("5.0.0");
+        assembly {
+            mstore(add(response, 0x20), 0x40)
+        }
+
+        assertEq(Core.getUpgradeInterfaceVersion(address(new RawUpgradeVersionResponder(response))), "");
+    }
+
+    function testUpgradeVersionRejectsOversizedStringLength() public {
+        bytes memory response = new bytes(64);
+        assembly {
+            mstore(add(response, 0x20), 0x20)
+            mstore(add(response, 0x40), not(0))
+        }
+
+        assertEq(Core.getUpgradeInterfaceVersion(address(new RawUpgradeVersionResponder(response))), "");
+    }
+
+    function testUpgradeVersionRejectsTruncatedStringPadding() public {
+        assertEq(
+            Core.getUpgradeInterfaceVersion(
+                address(new RawUpgradeVersionResponder(_truncate(abi.encode("5.0.0"), 69)))
+            ),
+            ""
+        );
+    }
+
+    function testUpgradeVersionAcceptsCanonicalStringEncoding() public {
+        assertEq(
+            Core.getUpgradeInterfaceVersion(address(new RawUpgradeVersionResponder(abi.encode("5.0.0")))),
+            "5.0.0"
+        );
     }
 
     function testClassifiesExactStandaloneSuccessLine() public pure {
@@ -229,6 +278,12 @@ contract CoreTest is Test {
 
     function _fixture(string memory suffix) private view returns (string memory) {
         return string.concat(vm.projectRoot(), "/test/fixtures/provenance/", suffix);
+    }
+
+    function _truncate(bytes memory input, uint256 length) private pure returns (bytes memory output) {
+        require(length <= input.length);
+        output = new bytes(length);
+        for (uint256 i = 0; i < length; ++i) output[i] = input[i];
     }
 
     function _buildValidateCommand(Options memory opts, bool requireReference) private returns (string[] memory) {

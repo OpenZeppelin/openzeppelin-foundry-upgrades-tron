@@ -10,6 +10,11 @@ import {Greeter} from "./contracts/Greeter.sol";
 import {GreeterV2} from "./contracts/GreeterV2.sol";
 import {GreeterProxiable} from "./contracts/GreeterProxiable.sol";
 import {GreeterV2Proxiable} from "./contracts/GreeterV2Proxiable.sol";
+import {
+    LegacyMalformedUpgradeProxy,
+    LegacyMalformedProxyAdmin,
+    LegacyAdminManagedProxy
+} from "./contracts/MalformedUpgradeVersion.sol";
 
 contract UnsafeUpgradesTest is Test {
     address private constant OWNER = address(0xA11CE);
@@ -143,8 +148,35 @@ contract UnsafeUpgradesTest is Test {
         assertEq(Greeter(proxy).greeting(), "");
     }
 
+    function testMalformedVersionProbeDoesNotBlockLegacyProxyUpgrade() public {
+        LegacyMalformedUpgradeProxy proxy = new LegacyMalformedUpgradeProxy(_badOffsetVersionResponse());
+        address newImplementation = address(new Greeter());
+
+        UnsafeUpgrades.upgradeProxy(address(proxy), newImplementation, bytes(""));
+
+        assertEq(proxy.upgradedTo(), newImplementation);
+    }
+
+    function testMalformedVersionProbeDoesNotBlockLegacyAdminUpgrade() public {
+        LegacyMalformedProxyAdmin admin = new LegacyMalformedProxyAdmin(_badOffsetVersionResponse());
+        LegacyAdminManagedProxy proxy = new LegacyAdminManagedProxy(address(admin));
+        address newImplementation = address(new Greeter());
+
+        UnsafeUpgrades.upgradeProxy(address(proxy), newImplementation, bytes(""));
+
+        assertEq(admin.upgradedProxy(), address(proxy));
+        assertEq(admin.upgradedTo(), newImplementation);
+    }
+
     function deployUUPSWithoutInitialization(address implementation) external returns (address) {
         return UnsafeUpgrades.deployUUPSProxy(implementation, bytes(""));
+    }
+
+    function _badOffsetVersionResponse() private pure returns (bytes memory response) {
+        response = abi.encode("5.0.0");
+        assembly {
+            mstore(add(response, 0x20), 0x40)
+        }
     }
 
     function deployTransparentWithoutInitialization(address implementation) external returns (address) {

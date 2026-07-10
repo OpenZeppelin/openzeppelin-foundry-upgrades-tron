@@ -91,11 +91,32 @@ library Core {
         (bool success, bytes memory returndata) = target.staticcall(
             abi.encodeWithSignature("UPGRADE_INTERFACE_VERSION()")
         );
-        return success && returndata.length > 32 ? abi.decode(returndata, (string)) : "";
+        return success && _isCanonicalAbiString(returndata) ? abi.decode(returndata, (string)) : "";
     }
 
     function _usesV5UpgradeInterface(address target) private view returns (bool) {
         return keccak256(bytes(getUpgradeInterfaceVersion(target))) == keccak256(bytes("5.0.0"));
+    }
+
+    function _isCanonicalAbiString(bytes memory encoded) private pure returns (bool) {
+        if (encoded.length < 64) return false;
+
+        uint256 offset;
+        uint256 stringLength;
+        assembly {
+            offset := mload(add(encoded, 0x20))
+            stringLength := mload(add(encoded, 0x40))
+        }
+
+        if (offset != 32 || stringLength > encoded.length - 64) return false;
+
+        uint256 paddedLength = (stringLength + 31) & ~uint256(31);
+        if (paddedLength != encoded.length - 64) return false;
+
+        for (uint256 i = 64 + stringLength; i < encoded.length; ++i) {
+            if (encoded[i] != 0) return false;
+        }
+        return true;
     }
 
     /**
