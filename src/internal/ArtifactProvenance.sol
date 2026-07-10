@@ -22,6 +22,7 @@ library ArtifactProvenance {
     error BuildInfoIdentityMismatch(string expected, string actual);
     error ProvenanceRemappingNotFound();
     error AmbiguousProvenanceRemapping();
+    error ProvenanceRemappingFileNotFound(string path);
     error ProvenanceHelperNotFound(string path);
     error ProvenanceToolFailure(string reason);
 
@@ -85,18 +86,29 @@ library ArtifactProvenance {
         revert ProvenanceToolFailure(detailA);
     }
 
-    function resolveHelperPath() internal returns (string memory) {
-        string[] memory command = new string[](2);
-        command[0] = "forge";
-        command[1] = "remappings";
-        Vm.FfiResult memory result = Utils.runAsBashCommand(command);
-        if (result.exitCode != 0) revert ProvenanceToolFailure(string(result.stderr));
-        string memory helper = resolveHelperPathFromRemappings(
-            string(result.stdout),
-            Vm(Utils.CHEATCODE_ADDRESS).projectRoot()
+    function resolveHelperPath() internal view returns (string memory) {
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        string memory helper = resolveHelperPathFromProjectRoot(
+            vm.projectRoot(),
+            vm.envOr("OPENZEPPELIN_FOUNDRY_UPGRADES_TRON_PATH", string(""))
         );
-        if (!Vm(Utils.CHEATCODE_ADDRESS).exists(helper)) revert ProvenanceHelperNotFound(helper);
+        if (!vm.exists(helper)) revert ProvenanceHelperNotFound(helper);
         return helper;
+    }
+
+    function resolveHelperPathFromProjectRoot(
+        string memory projectRoot,
+        string memory explicitSourcePath
+    ) internal view returns (string memory) {
+        if (bytes(explicitSourcePath).length != 0) {
+            return
+                Utils.joinPath(Utils.resolvePath(explicitSourcePath, projectRoot), "internal/artifact-provenance.cjs");
+        }
+
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        string memory remappingsFile = Utils.joinPath(projectRoot, "remappings.txt");
+        if (!vm.exists(remappingsFile)) revert ProvenanceRemappingFileNotFound(remappingsFile);
+        return resolveHelperPathFromRemappings(vm.readFile(remappingsFile), projectRoot);
     }
 
     function resolveHelperPathFromRemappings(

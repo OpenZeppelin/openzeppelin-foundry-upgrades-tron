@@ -155,10 +155,24 @@ contract ArtifactProvenanceTest is Test {
         );
     }
 
-    function testResolvedHelperExistsForCurrentCheckout() public {
+    function testResolvedHelperExistsForCurrentCheckout() public view {
         assertEq(
             ArtifactProvenance.resolveHelperPath(),
             string.concat(vm.projectRoot(), "/src/internal/artifact-provenance.cjs")
+        );
+    }
+
+    function testResolvesHelperFromProjectRemappingsFileWithoutNestedForge() public view {
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot(vm.projectRoot(), ""),
+            string.concat(vm.projectRoot(), "/src/internal/artifact-provenance.cjs")
+        );
+    }
+
+    function testExplicitPackageSourcePathSupportsNonFileRemappingSetups() public view {
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot("/tmp/consumer", "/opt/package/src/"),
+            "/opt/package/src/internal/artifact-provenance.cjs"
         );
     }
 
