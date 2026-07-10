@@ -8,16 +8,94 @@ import {Options} from "../Options.sol";
 import {ArtifactProvenance} from "./ArtifactProvenance.sol";
 import {Utils} from "./Utils.sol";
 import {Versions} from "./Versions.sol";
+import {IUpgradeableProxy} from "./interfaces/IUpgradeableProxy.sol";
+import {IProxyAdmin} from "./interfaces/IProxyAdmin.sol";
+import {IUpgradeableBeacon} from "./interfaces/IUpgradeableBeacon.sol";
 
 /**
  * @dev Internal implementation helpers. Applications should use the public
  * upgrades library rather than importing this library directly.
  */
 library Core {
+    bytes32 private constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+    bytes32 private constant ADMIN_SLOT = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+    bytes32 private constant BEACON_SLOT = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
+
     enum ValidationResult {
         Success,
         ValidationFailure,
         ToolFailure
+    }
+
+    function upgradeProxyTo(address proxy, address newImplementation, bytes memory data) internal {
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        address admin = address(uint160(uint256(vm.load(proxy, ADMIN_SLOT))));
+
+        if (admin == address(0)) {
+            if (_usesV5UpgradeInterface(proxy) || data.length != 0) {
+                IUpgradeableProxy(proxy).upgradeToAndCall(newImplementation, data);
+            } else {
+                IUpgradeableProxy(proxy).upgradeTo(newImplementation);
+            }
+        } else if (_usesV5UpgradeInterface(admin) || data.length != 0) {
+            IProxyAdmin(admin).upgradeAndCall(proxy, newImplementation, data);
+        } else {
+            IProxyAdmin(admin).upgrade(proxy, newImplementation);
+        }
+    }
+
+    function upgradeProxyTo(
+        address proxy,
+        address newImplementation,
+        bytes memory data,
+        address tryCaller
+    ) internal tryPrank(tryCaller) {
+        upgradeProxyTo(proxy, newImplementation, data);
+    }
+
+    function upgradeBeaconTo(address beacon, address newImplementation) internal {
+        IUpgradeableBeacon(beacon).upgradeTo(newImplementation);
+    }
+
+    function upgradeBeaconTo(
+        address beacon,
+        address newImplementation,
+        address tryCaller
+    ) internal tryPrank(tryCaller) {
+        upgradeBeaconTo(beacon, newImplementation);
+    }
+
+    function getAdminAddress(address proxy) internal view returns (address) {
+        return address(uint160(uint256(Vm(Utils.CHEATCODE_ADDRESS).load(proxy, ADMIN_SLOT))));
+    }
+
+    function getImplementationAddress(address proxy) internal view returns (address) {
+        return address(uint160(uint256(Vm(Utils.CHEATCODE_ADDRESS).load(proxy, IMPLEMENTATION_SLOT))));
+    }
+
+    function getBeaconAddress(address proxy) internal view returns (address) {
+        return address(uint160(uint256(Vm(Utils.CHEATCODE_ADDRESS).load(proxy, BEACON_SLOT))));
+    }
+
+    modifier tryPrank(address caller) {
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        try vm.startPrank(caller) {
+            _;
+            vm.stopPrank();
+        } catch {
+            _;
+        }
+    }
+
+    function getUpgradeInterfaceVersion(address target) internal view returns (string memory) {
+        (bool success, bytes memory returndata) = target.staticcall(
+            abi.encodeWithSignature("UPGRADE_INTERFACE_VERSION()")
+        );
+        return success && returndata.length > 32 ? abi.decode(returndata, (string)) : "";
+    }
+
+    function _usesV5UpgradeInterface(address target) private view returns (bool) {
+        return keccak256(bytes(getUpgradeInterfaceVersion(target))) == keccak256(bytes("5.0.0"));
     }
 
     /**
