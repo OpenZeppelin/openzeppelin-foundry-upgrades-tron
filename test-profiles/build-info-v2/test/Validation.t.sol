@@ -12,7 +12,7 @@ contract HistoricalValidationTest is Test {
         assertEq(implementation.x(), "");
 
         Options memory opts;
-        opts.referenceBuildInfoDir = "test_artifacts/build-info-v1";
+        opts.referenceBuildInfoDir = vm.envString("REFERENCE_BUILD_INFO_DIR");
         Core.validateUpgrade("MyContract.sol", opts);
     }
 }

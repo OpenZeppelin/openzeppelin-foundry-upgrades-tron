@@ -121,20 +121,44 @@ library Core {
         return inputs;
     }
 
+    /**
+     * @dev Classifies upgrades-core output using standalone marker lines. A
+     * marker embedded in a contract name, path, or diagnostic is not valid.
+     * Conflicting markers and markers paired with the wrong exit code are tool
+     * failures.
+     */
+    function classifyValidationResult(int32 exitCode, bytes memory stdout) internal pure returns (ValidationResult) {
+        bool successMarker;
+        bool failedMarker;
+        uint256 lineStart;
+
+        for (uint256 i = 0; i <= stdout.length; ++i) {
+            if (i == stdout.length || stdout[i] == 0x0a) {
+                successMarker = successMarker || _lineEquals(stdout, lineStart, i, "SUCCESS");
+                failedMarker = failedMarker || _lineEquals(stdout, lineStart, i, "FAILED");
+                lineStart = i + 1;
+            }
+        }
+
+        if (exitCode == 0 && successMarker && !failedMarker) return ValidationResult.Success;
+        if (exitCode != 0 && failedMarker && !successMarker) return ValidationResult.ValidationFailure;
+        return ValidationResult.ToolFailure;
+    }
+
     function _validate(string memory contractName, Options memory opts, bool requireReference) private {
         if (opts.unsafeSkipAllChecks) return;
 
         string[] memory inputs = buildValidateCommand(contractName, opts, requireReference);
         Vm.FfiResult memory result = Utils.runAsBashCommand(inputs);
         string memory stdout = string(result.stdout);
-        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        ValidationResult classification = classifyValidationResult(result.exitCode, result.stdout);
 
-        if (result.exitCode == 0 && vm.contains(stdout, "SUCCESS")) {
+        if (classification == ValidationResult.Success) {
             _logWarnings(result.stderr);
             return;
         }
 
-        if (result.exitCode != 0 && vm.contains(stdout, "FAILED")) {
+        if (classification == ValidationResult.ValidationFailure) {
             _logWarnings(result.stderr);
             revert(string.concat("Upgrade safety validation failed:\n", stdout));
         }
@@ -145,5 +169,24 @@ library Core {
 
     function _logWarnings(bytes memory warnings) private pure {
         if (warnings.length != 0) console.log(string(warnings));
+    }
+
+    function _lineEquals(
+        bytes memory output,
+        uint256 start,
+        uint256 end,
+        bytes memory marker
+    ) private pure returns (bool) {
+        while (start < end && _isLineWhitespace(output[start])) ++start;
+        while (end > start && _isLineWhitespace(output[end - 1])) --end;
+        if (end - start != marker.length) return false;
+        for (uint256 i = 0; i < marker.length; ++i) {
+            if (output[start + i] != marker[i]) return false;
+        }
+        return true;
+    }
+
+    function _isLineWhitespace(bytes1 character) private pure returns (bool) {
+        return character == 0x20 || character == 0x09 || character == 0x0d;
     }
 }

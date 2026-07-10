@@ -28,6 +28,56 @@ contract CoreTest is Test {
         assertEq(uint256(Core.ValidationResult.ToolFailure), 2);
     }
 
+    function testClassifiesExactStandaloneSuccessLine() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(0, bytes("report\n \tSUCCESS\r \n"))),
+            uint256(Core.ValidationResult.Success)
+        );
+    }
+
+    function testClassifiesExactStandaloneFailedLine() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(1, bytes("details\n\tFAILED\r\n"))),
+            uint256(Core.ValidationResult.ValidationFailure)
+        );
+    }
+
+    function testDiagnosticSubstringsCannotSpoofSuccessMarker() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(0, bytes("validated MySUCCESSContract"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+    }
+
+    function testDiagnosticSubstringsCannotSpoofFailedMarker() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(1, bytes("operation FAILED unexpectedly"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+    }
+
+    function testRequiresMarkerToMatchExitCode() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(0, bytes("FAILED\n"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+        assertEq(
+            uint256(Core.classifyValidationResult(1, bytes("SUCCESS\n"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+    }
+
+    function testConflictingStandaloneMarkersAreToolFailure() public pure {
+        assertEq(
+            uint256(Core.classifyValidationResult(0, bytes("SUCCESS\nFAILED\n"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+        assertEq(
+            uint256(Core.classifyValidationResult(1, bytes("SUCCESS\nFAILED\n"))),
+            uint256(Core.ValidationResult.ToolFailure)
+        );
+    }
+
     function testOptionsApiShapeUsesEverySupportedNonDefenderField() public {
         Options memory opts = new OptionsApiShape().allSupportedOptions();
 

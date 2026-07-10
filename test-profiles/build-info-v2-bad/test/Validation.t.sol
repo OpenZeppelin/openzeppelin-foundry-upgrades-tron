@@ -15,7 +15,7 @@ contract HistoricalValidationBadTest is Test {
         assertTrue(address(implementation) != address(0));
 
         Options memory opts;
-        opts.referenceBuildInfoDir = "test_artifacts/build-info-v1";
+        opts.referenceBuildInfoDir = vm.envString("REFERENCE_BUILD_INFO_DIR");
 
         HistoricalValidationInvoker validator = new HistoricalValidationInvoker();
         try validator.validateUpgrade("MyContract.sol", opts) {
