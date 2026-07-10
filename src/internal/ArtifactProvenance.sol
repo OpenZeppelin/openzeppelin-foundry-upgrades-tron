@@ -22,7 +22,8 @@ library ArtifactProvenance {
     error BuildInfoIdentityMismatch(string expected, string actual);
     error ProvenanceRemappingNotFound();
     error AmbiguousProvenanceRemapping();
-    error ProvenanceRemappingFileNotFound(string path);
+    error ProvenanceHelperCandidatesNotFound(string projectRoot, string environmentVariable);
+    error AmbiguousProvenanceHelperCandidates(string first, string second, string environmentVariable);
     error ProvenanceHelperNotFound(string path);
     error ProvenanceToolFailure(string reason);
 
@@ -107,8 +108,35 @@ library ArtifactProvenance {
 
         Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
         string memory remappingsFile = Utils.joinPath(projectRoot, "remappings.txt");
-        if (!vm.exists(remappingsFile)) revert ProvenanceRemappingFileNotFound(remappingsFile);
-        return resolveHelperPathFromRemappings(vm.readFile(remappingsFile), projectRoot);
+        if (vm.exists(remappingsFile)) {
+            return resolveHelperPathFromRemappings(vm.readFile(remappingsFile), projectRoot);
+        }
+
+        string[3] memory candidates = [
+            Utils.joinPath(projectRoot, "lib/openzeppelin-foundry-upgrades-tron/src/internal/artifact-provenance.cjs"),
+            Utils.joinPath(
+                projectRoot,
+                "node_modules/@openzeppelin/foundry-upgrades-tron/src/internal/artifact-provenance.cjs"
+            ),
+            Utils.joinPath(projectRoot, "src/internal/artifact-provenance.cjs")
+        ];
+        string memory matchPath;
+        for (uint256 i = 0; i < candidates.length; ++i) {
+            if (vm.exists(candidates[i])) {
+                if (bytes(matchPath).length != 0) {
+                    revert AmbiguousProvenanceHelperCandidates(
+                        matchPath,
+                        candidates[i],
+                        "OPENZEPPELIN_FOUNDRY_UPGRADES_TRON_PATH"
+                    );
+                }
+                matchPath = candidates[i];
+            }
+        }
+        if (bytes(matchPath).length == 0) {
+            revert ProvenanceHelperCandidatesNotFound(projectRoot, "OPENZEPPELIN_FOUNDRY_UPGRADES_TRON_PATH");
+        }
+        return matchPath;
     }
 
     function resolveHelperPathFromRemappings(

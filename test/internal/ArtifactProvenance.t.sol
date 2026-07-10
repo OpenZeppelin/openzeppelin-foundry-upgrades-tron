@@ -176,8 +176,49 @@ contract ArtifactProvenanceTest is Test {
         );
     }
 
+    function testResolvesForgeInstallWithoutRemappingsFile() public view {
+        string memory root = _helperFixture("forge-install");
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot(root, ""),
+            string.concat(root, "/lib/openzeppelin-foundry-upgrades-tron/src/internal/artifact-provenance.cjs")
+        );
+    }
+
+    function testResolvesNpmInstallWithoutRemappingsFile() public view {
+        string memory root = _helperFixture("npm-install");
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot(root, ""),
+            string.concat(
+                root,
+                "/node_modules/@openzeppelin/foundry-upgrades-tron/src/internal/artifact-provenance.cjs"
+            )
+        );
+    }
+
+    function testResolvesPackageLocalHelperWithoutRemappingsFile() public view {
+        string memory root = _helperFixture("package-local");
+        assertEq(
+            ArtifactProvenance.resolveHelperPathFromProjectRoot(root, ""),
+            string.concat(root, "/src/internal/artifact-provenance.cjs")
+        );
+    }
+
+    function testRejectsAmbiguousStandardInstallCandidates() public {
+        vm.expectPartialRevert(ArtifactProvenance.AmbiguousProvenanceHelperCandidates.selector);
+        invoker.resolveHelperPathFromProjectRoot(_helperFixture("ambiguous"), "");
+    }
+
+    function testRejectsMissingStandardInstallCandidate() public {
+        vm.expectPartialRevert(ArtifactProvenance.ProvenanceHelperCandidatesNotFound.selector);
+        invoker.resolveHelperPathFromProjectRoot(_fixture("valid/out"), "");
+    }
+
     function _fixture(string memory suffix) private view returns (string memory) {
         return string.concat(vm.projectRoot(), "/test/fixtures/provenance/", suffix);
+    }
+
+    function _helperFixture(string memory suffix) private view returns (string memory) {
+        return string.concat(vm.projectRoot(), "/test/fixtures/helper-resolution/", suffix);
     }
 }
 
@@ -191,5 +232,12 @@ contract ProvenanceInvoker {
         string memory projectRoot
     ) external pure returns (string memory) {
         return ArtifactProvenance.resolveHelperPathFromRemappings(remappings, projectRoot);
+    }
+
+    function resolveHelperPathFromProjectRoot(
+        string memory projectRoot,
+        string memory explicitSourcePath
+    ) external view returns (string memory) {
+        return ArtifactProvenance.resolveHelperPathFromProjectRoot(projectRoot, explicitSourcePath);
     }
 }
