@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import {Test} from "forge-std/Test.sol";
 import {ArtifactProvenance} from "openzeppelin-foundry-upgrades-tron/internal/ArtifactProvenance.sol";
+import {MyContractName} from "../contracts/MyContractFile.sol";
 
 contract ArtifactProvenanceTest is Test {
     ProvenanceInvoker private invoker;
@@ -25,6 +26,7 @@ contract ArtifactProvenanceTest is Test {
             abi.encode(
                 outDir,
                 string.concat(outDir, "/build-info/build.json"),
+                "0.8.22+commit.4fc1097e",
                 "0.8.22+commit.4fc1097e",
                 "0.8.22",
                 "0.8.22",
@@ -58,6 +60,23 @@ contract ArtifactProvenanceTest is Test {
     function testRejectsSameSemverWithDifferentCompilerBuild() public {
         vm.expectPartialRevert(ArtifactProvenance.CompilerBuildMismatch.selector);
         invoker.assertMatch("Widget.sol:Widget", _fixture("compiler-build-mismatch/out"));
+    }
+
+    function testRejectsOutputMetadataCompilerBuildMismatchWhenTopLevelIsSemanticOnly() public {
+        vm.expectPartialRevert(ArtifactProvenance.CompilerBuildMismatch.selector);
+        invoker.assertMatch("Widget.sol:Widget", _fixture("output-compiler-mismatch/out"));
+    }
+
+    function testSupportsHardhat3SplitBuildInfoAndCanonicalSourceMapping() public {
+        assertNotEq(
+            ArtifactProvenance.assertMatch("Widget.sol:Widget", _fixture("hh3-valid/artifacts/contracts")),
+            bytes32(0)
+        );
+    }
+
+    function testRejectsHardhat3OutputWithMismatchedBuildInfoId() public {
+        vm.expectPartialRevert(ArtifactProvenance.BuildInfoIdentityMismatch.selector);
+        invoker.assertMatch("Widget.sol:Widget", _fixture("hh3-mismatched-output/artifacts/contracts"));
     }
 
     function testRejectsMissingCompilerBuildIdentity() public {

@@ -1,0 +1,4 @@
+{
+  "_format": "hh3-sol-build-info-output-1", "id": "solc-0_8_22-wrong",
+  "output": {"contracts": {"project/contracts/Widget.sol": {"Widget": {"metadata": "{\"compiler\":{\"version\":\"0.8.22+commit.4fc1097e\"}}", "evm": {"bytecode": {"object": "6001600055"}}}}}}
+}

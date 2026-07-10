@@ -1,5 +1,5 @@
 {
   "solcVersion": "0.8.22", "solcLongVersion": "0.8.22+commit.4fc1097e",
   "input": {"sources": {"contracts/Widget.sol": {"content": "contract Widget {}"}}},
-  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"evm": {"bytecode": {"object": "0x6001600055"}}}}}}
+  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"metadata": "{\"compiler\":{\"version\":\"0.8.22+commit.4fc1097e\"}}", "evm": {"bytecode": {"object": "0x6001600055"}}}}}}
 }

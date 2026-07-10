@@ -15,12 +15,14 @@ const CODE = Object.freeze({
   sourceHashMismatch: 7,
   compilerBuildMismatch: 8,
   artifactOutsideOutput: 9,
+  buildInfoIdentityMismatch: 10,
   toolFailure: 255,
 });
 
 const ZERO_HASH = `0x${'00'.repeat(32)}`;
 const resultTypes = ['uint8', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'];
 const provenanceTypes = [
+  'string',
   'string',
   'string',
   'string',
@@ -64,6 +66,86 @@ function findJsonFiles(directory) {
   return files.sort();
 }
 
+function remapKeys(record, canonicalToUser) {
+  return Object.fromEntries(Object.entries(record ?? {}).map(([key, value]) => [canonicalToUser[key] ?? key, value]));
+}
+
+function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedName) {
+  const directory = buildInfoDirectory(outputDirectory);
+  if (artifact._format === 'hh3-artifact-1') {
+    const id = artifact.buildInfoId;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) {
+      return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, 'valid Hardhat buildInfoId', id ?? '') };
+    }
+    const mainPath = path.resolve(directory, `${id}.json`);
+    const outputPath = path.resolve(directory, `${id}.output.json`);
+    if (!fs.existsSync(mainPath) || !fs.existsSync(outputPath)) {
+      return { error: response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName) };
+    }
+    const main = JSON.parse(fs.readFileSync(mainPath, 'utf8'));
+    const split = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    if (
+      typeof main._format !== 'string' ||
+      !main._format.startsWith('hh3-sol-build-info') ||
+      typeof split._format !== 'string' ||
+      !split._format.startsWith('hh3-sol-build-info-output')
+    ) {
+      return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, id, 'invalid Hardhat build-info format') };
+    }
+    if (main.id !== id) {
+      return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, id, main.id ?? '') };
+    }
+    if (split.id !== id) {
+      return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, id, split.id ?? '') };
+    }
+    const output = split.output ?? split;
+    const canonicalToUser = Object.fromEntries(
+      Object.entries(main.userSourceNameMap ?? {}).map(([userSource, canonicalSource]) => [canonicalSource, userSource]),
+    );
+    const sourceName = artifact.sourceName;
+    const inputSourceName = artifact.inputSourceName;
+    if (
+      typeof sourceName !== 'string' ||
+      typeof inputSourceName !== 'string' ||
+      artifact.ast?.absolutePath !== inputSourceName ||
+      (canonicalToUser[inputSourceName] ?? inputSourceName) !== sourceName
+    ) {
+      return { error: response(CODE.buildInfoIdentityMismatch, ZERO_HASH, sourceName ?? '', inputSourceName ?? '') };
+    }
+    const inputSources = remapKeys(main.input?.sources, canonicalToUser);
+    const outputContracts = remapKeys(output.contracts, canonicalToUser);
+    const target = outputContracts[sourceName]?.[contractName];
+    if (target === undefined) return { error: response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName) };
+    return {
+      buildInfoFile: mainPath,
+      inputSources,
+      target,
+      sourceLookup: source => canonicalToUser[source] ?? source,
+      solcVersion: main.solcVersion,
+      solcLongVersion: typeof main.solcLongVersion === 'string' ? main.solcLongVersion : '',
+      hardhat3: true,
+    };
+  }
+
+  const artifactSourceName = artifact.ast.absolutePath;
+  const candidates = findJsonFiles(directory)
+    .filter(file => !file.endsWith('.output.json'))
+    .map(file => ({ file, buildInfo: JSON.parse(fs.readFileSync(file, 'utf8')) }))
+    .filter(({ buildInfo }) => buildInfo.output?.contracts?.[artifactSourceName]?.[contractName] !== undefined);
+  if (candidates.length === 0) return { error: response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName) };
+  if (candidates.length !== 1) return { error: response(CODE.ambiguousBuildInfo, ZERO_HASH, fullyQualifiedName) };
+  const { file, buildInfo } = candidates[0];
+  return {
+    buildInfoFile: file,
+    inputSources: buildInfo.input?.sources ?? {},
+    target: buildInfo.output.contracts[artifactSourceName][contractName],
+    sourceLookup: source => source,
+    solcVersion: buildInfo.solcVersion,
+    solcLongVersion: buildInfo.solcLongVersion,
+    hardhat3: false,
+  };
+}
+
 function isWithin(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -81,33 +163,39 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
   }
 
   const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
-  const artifactSourceName = artifact.ast.absolutePath;
-  const candidates = findJsonFiles(buildInfoDirectory(outputDirectory)).filter(file => {
-    const buildInfo = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return buildInfo.output?.contracts?.[artifactSourceName]?.[contractName] !== undefined;
-  });
-  if (candidates.length === 0) return response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName);
-  if (candidates.length !== 1) return response(CODE.ambiguousBuildInfo, ZERO_HASH, fullyQualifiedName);
-
-  const buildInfoFile = candidates[0];
-  const buildInfo = JSON.parse(fs.readFileSync(buildInfoFile, 'utf8'));
+  if (artifact._format === 'hh3-artifact-1' && artifact.sourceName !== contractPath) {
+    return response(CODE.buildInfoIdentityMismatch, ZERO_HASH, contractPath, artifact.sourceName ?? '');
+  }
+  const loaded = loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedName);
+  if (loaded.error !== undefined) return loaded.error;
+  const { buildInfoFile, inputSources, target, sourceLookup, solcVersion, solcLongVersion, hardhat3 } = loaded;
   const artifactCompilerVersion = artifact.metadata?.compiler?.version;
-  const solcVersion = buildInfo.solcVersion;
-  const solcLongVersion = buildInfo.solcLongVersion;
   if (typeof artifactCompilerVersion !== 'string' || typeof solcVersion !== 'string' || semanticVersion(artifactCompilerVersion) !== semanticVersion(solcVersion)) {
     return response(CODE.compilerVersionMismatch, ZERO_HASH, artifactCompilerVersion ?? '', solcVersion ?? '');
   }
-  if (typeof solcLongVersion !== 'string' || solcLongVersion.length === 0) {
+  if (!hardhat3 && (typeof solcLongVersion !== 'string' || solcLongVersion.length === 0)) {
     return response(CODE.missingCompilerIdentity, ZERO_HASH, buildInfoFile);
   }
   if (solcLongVersion.includes('+') && artifactCompilerVersion !== solcLongVersion) {
     return response(CODE.compilerBuildMismatch, ZERO_HASH, artifactCompilerVersion, solcLongVersion);
   }
 
-  const artifactBytecode = normalizeBytecode(artifact.bytecode?.object);
-  const buildBytecode = normalizeBytecode(
-    buildInfo.output.contracts[artifactSourceName][contractName]?.evm?.bytecode?.object,
-  );
+  let outputMetadata;
+  try {
+    outputMetadata = typeof target.metadata === 'string' ? JSON.parse(target.metadata) : target.metadata;
+  } catch {
+    return response(CODE.missingCompilerIdentity, ZERO_HASH, buildInfoFile);
+  }
+  const outputCompilerVersion = outputMetadata?.compiler?.version;
+  if (typeof outputCompilerVersion !== 'string') {
+    return response(CODE.missingCompilerIdentity, ZERO_HASH, buildInfoFile);
+  }
+  if (artifactCompilerVersion !== outputCompilerVersion) {
+    return response(CODE.compilerBuildMismatch, ZERO_HASH, artifactCompilerVersion, outputCompilerVersion);
+  }
+
+  const artifactBytecode = normalizeBytecode(typeof artifact.bytecode === 'string' ? artifact.bytecode : artifact.bytecode?.object);
+  const buildBytecode = normalizeBytecode(target?.evm?.bytecode?.object);
   if (artifactBytecode !== buildBytecode) return response(CODE.bytecodeMismatch, ZERO_HASH, fullyQualifiedName);
 
   const metadataSources = artifact.metadata?.sources;
@@ -117,7 +205,7 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
   const sourceNames = Object.keys(metadataSources).sort();
   const sourceHashes = [];
   for (const sourceName of sourceNames) {
-    const content = buildInfo.input?.sources?.[sourceName]?.content;
+    const content = inputSources[sourceLookup(sourceName)]?.content;
     if (typeof content !== 'string') return response(CODE.missingSource, ZERO_HASH, sourceName);
     const actual = keccak256(toUtf8Bytes(content));
     const expected = metadataSources[sourceName]?.keccak256;
@@ -132,6 +220,7 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
       outputDirectory,
       buildInfoFile,
       artifactCompilerVersion,
+      outputCompilerVersion,
       solcVersion,
       solcLongVersion,
       `${contractPath}:${contractName}`,
@@ -153,4 +242,4 @@ function main(args) {
 
 if (require.main === module) main(process.argv.slice(2));
 
-module.exports = { CODE, buildInfoDirectory, findJsonFiles, main, normalizeBytecode, verify };
+module.exports = { CODE, buildInfoDirectory, findJsonFiles, loadBuildInfo, main, normalizeBytecode, verify };

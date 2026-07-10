@@ -19,6 +19,7 @@ library ArtifactProvenance {
     error MissingSource(string sourceName);
     error SourceContentHashMismatch(string sourceName, bytes32 expected, bytes32 actual);
     error ArtifactOutsideOutputDirectory(string artifact, string outputDirectory);
+    error BuildInfoIdentityMismatch(string expected, string actual);
     error ProvenanceToolFailure(string reason);
 
     uint8 private constant BUILD_INFO_NOT_FOUND = 1;
@@ -30,13 +31,15 @@ library ArtifactProvenance {
     uint8 private constant SOURCE_HASH_MISMATCH = 7;
     uint8 private constant COMPILER_BUILD_MISMATCH = 8;
     uint8 private constant ARTIFACT_OUTSIDE_OUTPUT = 9;
+    uint8 private constant BUILD_INFO_IDENTITY_MISMATCH = 10;
 
     /**
      * @dev Returns keccak256(abi.encode(absoluteOutDir,
-     * absoluteBuildInfoFile, artifactCompilerVersion, solcVersion,
-     * solcLongVersion, FQN, normalizedCreationBytecode, sortedSourceNames,
-     * sourceContentKeccaks)). This is a diagnostic/test oracle and is not
-     * transported in deployment transactions.
+     * absoluteBuildInfoFile, artifactCompilerVersion,
+     * outputMetadataCompilerVersion, solcVersion, solcLongVersion, FQN,
+     * normalizedCreationBytecode, sortedSourceNames, sourceContentKeccaks)).
+     * This is a diagnostic/test oracle and is not transported in deployment
+     * transactions.
      */
     function assertMatch(string memory contractName, string memory outDir) internal returns (bytes32) {
         ContractInfo memory info = Utils.getContractInfo(contractName, outDir);
@@ -77,6 +80,7 @@ library ArtifactProvenance {
         if (code == SOURCE_HASH_MISMATCH) revert SourceContentHashMismatch(detailA, expected, actual);
         if (code == COMPILER_BUILD_MISMATCH) revert CompilerBuildMismatch(detailA, detailB);
         if (code == ARTIFACT_OUTSIDE_OUTPUT) revert ArtifactOutsideOutputDirectory(detailA, detailB);
+        if (code == BUILD_INFO_IDENTITY_MISMATCH) revert BuildInfoIdentityMismatch(detailA, detailB);
         revert ProvenanceToolFailure(detailA);
     }
 }
