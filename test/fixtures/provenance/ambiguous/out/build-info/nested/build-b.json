@@ -1,0 +1,5 @@
+{
+  "solcVersion": "0.8.22", "solcLongVersion": "0.8.22+commit.deadbeef", "sourceHash": "0xe6d94a5da9fc80f4f65ce5851cd4be0091f7e773bce34524b632c227e7b9758e",
+  "input": {"sources": {"contracts/Widget.sol": {"content": "contract Widget {}"}}},
+  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"evm": {"bytecode": {"object": "6001600055"}}}}}}
+}

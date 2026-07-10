@@ -1,0 +1,5 @@
+{
+  "ast": {"absolutePath": "contracts/Linked.sol"},
+  "bytecode": {"object": "0x73__$1234567890abcdef1234567890abcdef12$__6000"},
+  "metadata": {"compiler": {"version": "0.8.22+commit.4fc1097e"}, "sources": {"contracts/Linked.sol": {"keccak256": "0x47dc590098e5dcaec40132246602734565138481b23fb00191f552c583569e28"}}}
+}

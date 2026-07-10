@@ -1,0 +1,5 @@
+{
+  "solcVersion": "0.8.22", "solcLongVersion": "0.8.22+commit.4fc1097e",
+  "input": {"sources": {"contracts/Widget.sol": {"content": "contract Widget {}"}}},
+  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"evm": {"bytecode": {"object": "6002600055"}}}}}}
+}

@@ -1,0 +1,5 @@
+{
+  "solcVersion": "0.8.22",
+  "input": {"sources": {"contracts/Widget.sol": {"content": "contract Widget {}"}}},
+  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"evm": {"bytecode": {"object": "6001600055"}}}}}}
+}

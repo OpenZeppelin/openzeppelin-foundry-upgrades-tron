@@ -1,0 +1,5 @@
+{
+  "solcVersion": "0.8.22", "solcLongVersion": "0.8.22+commit.4fc1097e",
+  "input": {"sources": {"contracts/Linked.sol": {"content": "library Linked {}"}}},
+  "output": {"contracts": {"contracts/Linked.sol": {"Linked": {"evm": {"bytecode": {"object": "73__$1234567890abcdef1234567890abcdef12$__6000"}}}}}}
+}
