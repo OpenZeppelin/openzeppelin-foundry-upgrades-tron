@@ -21,6 +21,7 @@ library Upgrades {
         bytes memory initializerData,
         Options memory opts
     ) internal returns (address) {
+        UnsafeUpgrades.requireTRC1967Initialization(initializerData);
         address implementation = deployImplementation(contractName, opts);
         return UnsafeUpgrades.deployUUPSProxy(implementation, initializerData);
     }
@@ -36,6 +37,7 @@ library Upgrades {
         bytes memory initializerData,
         Options memory opts
     ) internal returns (address) {
+        UnsafeUpgrades.requireTRC1967Initialization(initializerData);
         if (!opts.unsafeSkipAllChecks && !opts.unsafeSkipProxyAdminCheck && Core.inferProxyAdmin(initialOwner)) {
             revert(
                 string.concat(
@@ -178,7 +180,7 @@ library UnsafeUpgrades {
     error TRC1967InitializationRequired();
 
     function deployUUPSProxy(address implementation, bytes memory initializerData) internal returns (address) {
-        _requireTRC1967Initialization(initializerData);
+        requireTRC1967Initialization(initializerData);
         return address(new TRC1967Proxy(implementation, initializerData));
     }
 
@@ -187,7 +189,7 @@ library UnsafeUpgrades {
         address initialOwner,
         bytes memory initializerData
     ) internal returns (address) {
-        _requireTRC1967Initialization(initializerData);
+        requireTRC1967Initialization(initializerData);
         return address(new TransparentUpgradeableProxy(implementation, initialOwner, initializerData));
     }
 
@@ -227,7 +229,7 @@ library UnsafeUpgrades {
         return Core.getBeaconAddress(proxy);
     }
 
-    function _requireTRC1967Initialization(bytes memory initializerData) private pure {
+    function requireTRC1967Initialization(bytes memory initializerData) internal pure {
         if (initializerData.length == 0) revert TRC1967InitializationRequired();
     }
 }

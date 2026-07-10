@@ -159,12 +159,19 @@ library Core {
      * artifact lookup, provenance verification, or CLI execution.
      */
     function validateImplementation(string memory contractName, Options memory opts) internal {
-        _validate(contractName, opts, false);
+        validateImplementationWithProvenance(contractName, opts);
+    }
+
+    function validateImplementationWithProvenance(
+        string memory contractName,
+        Options memory opts
+    ) internal returns (ArtifactProvenance.Result memory) {
+        return _validate(contractName, opts, false);
     }
 
     function deployImplementation(string memory contractName, Options memory opts) internal returns (address) {
-        validateImplementation(contractName, opts);
-        return deploy(contractName, opts.constructorData);
+        ArtifactProvenance.Result memory validated = validateImplementationWithProvenance(contractName, opts);
+        return deploy(contractName, opts.constructorData, validated);
     }
 
     /**
@@ -176,13 +183,31 @@ library Core {
     }
 
     function prepareUpgrade(string memory contractName, Options memory opts) internal returns (address) {
-        validateUpgrade(contractName, opts);
-        return deploy(contractName, opts.constructorData);
+        ArtifactProvenance.Result memory validated = _validate(contractName, opts, true);
+        return deploy(contractName, opts.constructorData, validated);
     }
 
-    function deploy(string memory contractName, bytes memory constructorData) internal returns (address) {
-        string memory artifactPath = Utils.getContractInfo(contractName, Utils.getOutDir()).artifactPath;
-        bytes memory creationCode = Vm(Utils.CHEATCODE_ADDRESS).getCode(artifactPath);
+    function deploy(
+        string memory contractName,
+        bytes memory constructorData,
+        ArtifactProvenance.Result memory validated
+    ) internal returns (address) {
+        string memory artifactPath;
+        bytes32 expectedBytecodeHash;
+        if (validated.provenanceHash == bytes32(0)) {
+            artifactPath = Utils.getContractInfo(contractName, Utils.getOutDir()).artifactPath;
+        } else {
+            ArtifactProvenance.Result memory current = ArtifactProvenance.assertMatchDetailed(
+                contractName,
+                Utils.getOutDir()
+            );
+            ArtifactProvenance.assertUnchanged(validated, current);
+            artifactPath = current.artifactPath;
+            expectedBytecodeHash = current.creationBytecodeHash;
+        }
+
+        string memory artifactSnapshot = Vm(Utils.CHEATCODE_ADDRESS).readFile(artifactPath);
+        bytes memory creationCode = ArtifactProvenance.creationCodeFromSnapshot(artifactSnapshot, expectedBytecodeHash);
         address deployedAddress = _deployFromBytecode(abi.encodePacked(creationCode, constructorData));
         if (deployedAddress == address(0)) {
             revert(string.concat("Failed to deploy contract ", contractName));
@@ -216,6 +241,15 @@ library Core {
     ) internal returns (string[] memory) {
         ArtifactProvenance.assertMatch(contractName, outDir);
 
+        return _buildValidateCommand(contractName, opts, requireReference, outDir);
+    }
+
+    function _buildValidateCommand(
+        string memory contractName,
+        Options memory opts,
+        bool requireReference,
+        string memory outDir
+    ) private returns (string[] memory) {
         uint256 nonEmptyExcludes;
         for (uint256 j = 0; j < opts.exclude.length; ++j) {
             if (bytes(opts.exclude[j]).length != 0) ++nonEmptyExcludes;
@@ -304,17 +338,28 @@ library Core {
         return ValidationResult.ToolFailure;
     }
 
-    function _validate(string memory contractName, Options memory opts, bool requireReference) private {
-        if (opts.unsafeSkipAllChecks) return;
+    function _validate(
+        string memory contractName,
+        Options memory opts,
+        bool requireReference
+    ) private returns (ArtifactProvenance.Result memory) {
+        if (opts.unsafeSkipAllChecks) return ArtifactProvenance.Result(bytes32(0), bytes32(0), "");
 
-        string[] memory inputs = buildValidateCommand(contractName, opts, requireReference);
+        string memory outDir = Utils.getOutDir();
+        ArtifactProvenance.Result memory beforeValidation = ArtifactProvenance.assertMatchDetailed(
+            contractName,
+            outDir
+        );
+        string[] memory inputs = _buildValidateCommand(contractName, opts, requireReference, outDir);
         Vm.FfiResult memory result = Utils.runAsBashCommand(inputs);
+        ArtifactProvenance.Result memory afterValidation = ArtifactProvenance.assertMatchDetailed(contractName, outDir);
+        ArtifactProvenance.assertUnchanged(beforeValidation, afterValidation);
         string memory stdout = string(result.stdout);
         ValidationResult classification = classifyValidationResult(result.exitCode, result.stdout);
 
         if (classification == ValidationResult.Success) {
             _logWarnings(result.stderr);
-            return;
+            return afterValidation;
         }
 
         if (classification == ValidationResult.ValidationFailure) {

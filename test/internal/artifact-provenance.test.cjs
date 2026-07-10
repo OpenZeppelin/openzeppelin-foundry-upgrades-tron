@@ -2,7 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildInfoDirectory, isAbsolutePath, resolvePath } = require('../../src/internal/artifact-provenance.cjs');
+const path = require('node:path');
+const { AbiCoder, keccak256, toUtf8Bytes } = require('ethers');
+const {
+  buildInfoDirectory,
+  isAbsolutePath,
+  resolvePath,
+  verify,
+} = require('../../src/internal/artifact-provenance.cjs');
 
 test('classifies portable absolute path forms', () => {
   assert.equal(isAbsolutePath('/tmp/project/out'), true);
@@ -25,4 +32,23 @@ test('selects split build-info beside artifacts contracts for Windows paths', ()
     buildInfoDirectory('\\\\server\\share\\project\\artifacts\\contracts'),
     '\\\\server\\share\\project\\artifacts\\build-info',
   );
+});
+
+test('encodes deterministic normalized creation bytecode hash for Solidity parity', () => {
+  const outputDirectory = path.resolve('test/fixtures/provenance/valid/out');
+  const encoded = verify([
+    outputDirectory,
+    path.join(outputDirectory, 'Widget.sol/Widget.json'),
+    'contracts/Widget.sol',
+    'Widget',
+    'contracts/Widget.sol:Widget',
+  ]);
+  const [code, provenanceHash, creationBytecodeHash] = AbiCoder.defaultAbiCoder().decode(
+    ['uint8', 'bytes32', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'],
+    encoded,
+  );
+
+  assert.equal(code, 0n);
+  assert.notEqual(provenanceHash, `0x${'00'.repeat(32)}`);
+  assert.equal(creationBytecodeHash, keccak256(toUtf8Bytes('6001600055')));
 });

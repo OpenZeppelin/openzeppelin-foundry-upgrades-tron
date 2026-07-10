@@ -10,6 +10,12 @@ import {Utils, ContractInfo} from "./Utils.sol";
  * FFI so real Forge build-info files do not exhaust EVM memory.
  */
 library ArtifactProvenance {
+    struct Result {
+        bytes32 provenanceHash;
+        bytes32 creationBytecodeHash;
+        string artifactPath;
+    }
+
     string private constant PROVENANCE_REMAPPING = "openzeppelin-foundry-upgrades-tron/=";
 
     error BuildInfoNotFound(string fullyQualifiedName);
@@ -28,6 +34,8 @@ library ArtifactProvenance {
     error AmbiguousProvenanceHelperCandidates(string first, string second, string environmentVariable);
     error ProvenanceHelperNotFound(string path);
     error ProvenanceToolFailure(string reason);
+    error ProvenanceChanged(bytes32 expected, bytes32 actual);
+    error CreationBytecodeSnapshotMismatch(bytes32 expected, bytes32 actual);
 
     uint8 private constant BUILD_INFO_NOT_FOUND = 1;
     uint8 private constant AMBIGUOUS_BUILD_INFO = 2;
@@ -49,6 +57,16 @@ library ArtifactProvenance {
      * transactions.
      */
     function assertMatch(string memory contractName, string memory outDir) internal returns (bytes32) {
+        return assertMatchDetailed(contractName, outDir).provenanceHash;
+    }
+
+    /**
+     * @dev Verifies compiler provenance and returns the artifact identity plus
+     * a hash of its normalized creation-bytecode string. Callers can bind a
+     * later in-memory artifact snapshot to this result without trusting a
+     * second artifact load.
+     */
+    function assertMatchDetailed(string memory contractName, string memory outDir) internal returns (Result memory) {
         ContractInfo memory info = Utils.getContractInfo(contractName, outDir);
         string memory absoluteOutDir = Utils.absoluteOutDir(outDir);
         string memory helperPath = resolveHelperPath();
@@ -70,12 +88,13 @@ library ArtifactProvenance {
         (
             uint8 code,
             bytes32 provenanceHash,
+            bytes32 creationBytecodeHash,
             string memory detailA,
             string memory detailB,
             bytes32 expected,
             bytes32 actual
-        ) = abi.decode(result.stdout, (uint8, bytes32, string, string, bytes32, bytes32));
-        if (code == 0) return provenanceHash;
+        ) = abi.decode(result.stdout, (uint8, bytes32, bytes32, string, string, bytes32, bytes32));
+        if (code == 0) return Result(provenanceHash, creationBytecodeHash, info.artifactPath);
         if (code == BUILD_INFO_NOT_FOUND) revert BuildInfoNotFound(detailA);
         if (code == AMBIGUOUS_BUILD_INFO) revert AmbiguousBuildInfo(detailA);
         if (code == BYTECODE_MISMATCH) revert CreationBytecodeMismatch(detailA);
@@ -87,6 +106,38 @@ library ArtifactProvenance {
         if (code == ARTIFACT_OUTSIDE_OUTPUT) revert ArtifactOutsideOutputDirectory(detailA, detailB);
         if (code == BUILD_INFO_IDENTITY_MISMATCH) revert BuildInfoIdentityMismatch(detailA, detailB);
         revert ProvenanceToolFailure(detailA);
+    }
+
+    function assertUnchanged(Result memory expected, Result memory actual) internal pure {
+        if (
+            expected.provenanceHash != actual.provenanceHash ||
+            expected.creationBytecodeHash != actual.creationBytecodeHash ||
+            keccak256(bytes(expected.artifactPath)) != keccak256(bytes(actual.artifactPath))
+        ) {
+            revert ProvenanceChanged(expected.provenanceHash, actual.provenanceHash);
+        }
+    }
+
+    /**
+     * @dev Parses creation code from one already-loaded artifact snapshot.
+     * A zero expected hash is the explicit unbound mode used only when
+     * `unsafeSkipAllChecks` bypassed validation.
+     */
+    function creationCodeFromSnapshot(
+        string memory artifactJson,
+        bytes32 expectedBytecodeHash
+    ) internal view returns (bytes memory) {
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        string memory bytecode =
+            vm.keyExistsJson(artifactJson, ".bytecode.object")
+                ? vm.parseJsonString(artifactJson, ".bytecode.object")
+                : vm.parseJsonString(artifactJson, ".bytecode");
+        string memory normalized = _normalizeBytecode(bytecode);
+        bytes32 actualBytecodeHash = keccak256(bytes(normalized));
+        if (expectedBytecodeHash != bytes32(0) && actualBytecodeHash != expectedBytecodeHash) {
+            revert CreationBytecodeSnapshotMismatch(expectedBytecodeHash, actualBytecodeHash);
+        }
+        return vm.parseBytes(string.concat("0x", normalized));
     }
 
     function resolveHelperPath() internal view returns (string memory) {
@@ -198,5 +249,13 @@ library ArtifactProvenance {
         bytes memory result = new bytes(length);
         for (uint256 i = 0; i < length; ++i) result[i] = subject[i];
         return string(result);
+    }
+
+    function _normalizeBytecode(string memory value) private pure returns (string memory) {
+        bytes memory raw = bytes(value);
+        uint256 start = raw.length >= 2 && raw[0] == "0" && (raw[1] == "x" || raw[1] == "X") ? 2 : 0;
+        bytes memory normalized = new bytes(raw.length - start);
+        for (uint256 i = start; i < raw.length; ++i) normalized[i - start] = raw[i];
+        return string(normalized);
     }
 }

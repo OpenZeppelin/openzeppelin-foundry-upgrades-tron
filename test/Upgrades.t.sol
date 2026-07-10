@@ -224,13 +224,19 @@ contract UpgradesTest is Test {
     }
 
     function testSafeUUPSRejectsEmptyInitializerData() public {
+        Options memory opts;
+        opts.unsafeSkipAllChecks = true;
+
         vm.expectRevert(UnsafeUpgrades.TRC1967InitializationRequired.selector);
-        this.deployUUPS("GreeterProxiable.sol", bytes(""), _emptyOptions());
+        this.deployUUPS("Missing.sol:Missing", bytes(""), opts);
     }
 
     function testSafeTransparentRejectsEmptyInitializerData() public {
+        Options memory opts;
+        opts.unsafeSkipAllChecks = true;
+
         vm.expectRevert(UnsafeUpgrades.TRC1967InitializationRequired.selector);
-        this.deployTransparent("Greeter.sol", address(this), bytes(""), _emptyOptions());
+        this.deployTransparent("Missing.sol:Missing", address(this), bytes(""), opts);
     }
 
     function testSafeBeaconProxyAcceptsEmptyInitializerData() public {

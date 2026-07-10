@@ -39,6 +39,49 @@ contract ArtifactProvenanceTest is Test {
         assertEq(first, expected);
     }
 
+    function testDetailedResultIncludesArtifactAndNormalizedCreationBytecodeHash() public {
+        string memory outDir = _fixture("valid/out");
+        ArtifactProvenance.Result memory result = ArtifactProvenance.assertMatchDetailed("Widget.sol:Widget", outDir);
+
+        assertEq(result.provenanceHash, ArtifactProvenance.assertMatch("Widget.sol:Widget", outDir));
+        assertEq(result.creationBytecodeHash, keccak256(bytes("6001600055")));
+        assertEq(result.artifactPath, string.concat(outDir, "/Widget.sol/Widget.json"));
+    }
+
+    function testRejectsChangedProvenanceBinding() public {
+        ArtifactProvenance.Result memory beforeValidation = ArtifactProvenance.Result({
+            provenanceHash: bytes32(uint256(1)),
+            creationBytecodeHash: bytes32(uint256(2)),
+            artifactPath: "/tmp/out/Widget.json"
+        });
+        ArtifactProvenance.Result memory afterValidation = ArtifactProvenance.Result({
+            provenanceHash: bytes32(uint256(3)),
+            creationBytecodeHash: bytes32(uint256(2)),
+            artifactPath: "/tmp/out/Widget.json"
+        });
+
+        vm.expectPartialRevert(ArtifactProvenance.ProvenanceChanged.selector);
+        invoker.assertUnchanged(beforeValidation, afterValidation);
+    }
+
+    function testParsesCreationCodeFromOneBoundArtifactSnapshot() public view {
+        string memory artifact = vm.readFile(_fixture("valid/out/Widget.sol/Widget.json"));
+
+        bytes memory creationCode = ArtifactProvenance.creationCodeFromSnapshot(
+            artifact,
+            keccak256(bytes("6001600055"))
+        );
+
+        assertEq(creationCode, hex"6001600055");
+    }
+
+    function testRejectsArtifactSnapshotCreationCodeHashMismatch() public {
+        string memory artifact = vm.readFile(_fixture("valid/out/Widget.sol/Widget.json"));
+
+        vm.expectPartialRevert(ArtifactProvenance.CreationBytecodeSnapshotMismatch.selector);
+        invoker.creationCodeFromSnapshot(artifact, bytes32(uint256(1)));
+    }
+
     function testOptionalHexPrefixIsNormalized() public {
         assertNotEq(ArtifactProvenance.assertMatch("Widget.sol:Widget", _fixture("prefixed/out")), bytes32(0));
     }
@@ -238,6 +281,20 @@ contract ArtifactProvenanceTest is Test {
 contract ProvenanceInvoker {
     function assertMatch(string memory name, string memory outDir) external returns (bytes32) {
         return ArtifactProvenance.assertMatch(name, outDir);
+    }
+
+    function assertUnchanged(
+        ArtifactProvenance.Result memory beforeValidation,
+        ArtifactProvenance.Result memory afterValidation
+    ) external pure {
+        ArtifactProvenance.assertUnchanged(beforeValidation, afterValidation);
+    }
+
+    function creationCodeFromSnapshot(
+        string memory artifact,
+        bytes32 expectedBytecodeHash
+    ) external view returns (bytes memory) {
+        return ArtifactProvenance.creationCodeFromSnapshot(artifact, expectedBytecodeHash);
     }
 
     function resolveHelperPathFromRemappings(

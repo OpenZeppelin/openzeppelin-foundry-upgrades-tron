@@ -276,6 +276,30 @@ contract CoreTest is Test {
         invoker.buildValidateCommandForOutDir("Widget.sol:Widget", opts, false, _fixture("source-mismatch/out"));
     }
 
+    function testValidationReturnsPostCliArtifactBinding() public {
+        Options memory opts;
+
+        ArtifactProvenance.Result memory result = invoker.validateImplementationWithProvenance(TARGET, opts);
+
+        assertNotEq(result.provenanceHash, bytes32(0));
+        assertNotEq(result.creationBytecodeHash, bytes32(0));
+        assertEq(result.artifactPath, string.concat(vm.projectRoot(), "/out/Validations.sol/OptionsApiShape.json"));
+    }
+
+    function testUnsafeSkipAllChecksExplicitlyReturnsUnboundValidation() public {
+        Options memory opts;
+        opts.unsafeSkipAllChecks = true;
+
+        ArtifactProvenance.Result memory result = invoker.validateImplementationWithProvenance(
+            "Missing.sol:Missing",
+            opts
+        );
+
+        assertEq(result.provenanceHash, bytes32(0));
+        assertEq(result.creationBytecodeHash, bytes32(0));
+        assertEq(result.artifactPath, "");
+    }
+
     function _fixture(string memory suffix) private view returns (string memory) {
         return string.concat(vm.projectRoot(), "/test/fixtures/provenance/", suffix);
     }
@@ -309,6 +333,13 @@ contract CoreTest is Test {
 }
 
 contract CoreInvoker {
+    function validateImplementationWithProvenance(
+        string memory contractName,
+        Options memory opts
+    ) external returns (ArtifactProvenance.Result memory) {
+        return Core.validateImplementationWithProvenance(contractName, opts);
+    }
+
     function buildValidateCommand(
         string memory contractName,
         Options memory opts,

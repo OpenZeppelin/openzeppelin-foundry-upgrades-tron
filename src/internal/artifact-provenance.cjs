@@ -20,7 +20,7 @@ const CODE = Object.freeze({
 });
 
 const ZERO_HASH = `0x${'00'.repeat(32)}`;
-const resultTypes = ['uint8', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'];
+const resultTypes = ['uint8', 'bytes32', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'];
 const provenanceTypes = [
   'string',
   'string',
@@ -34,8 +34,24 @@ const provenanceTypes = [
   'bytes32[]',
 ];
 
-function response(code, hash = ZERO_HASH, detailA = '', detailB = '', expected = ZERO_HASH, actual = ZERO_HASH) {
-  return AbiCoder.defaultAbiCoder().encode(resultTypes, [code, hash, detailA, detailB, expected, actual]);
+function response(
+  code,
+  hash = ZERO_HASH,
+  detailA = '',
+  detailB = '',
+  expected = ZERO_HASH,
+  actual = ZERO_HASH,
+  creationBytecodeHash = ZERO_HASH,
+) {
+  return AbiCoder.defaultAbiCoder().encode(resultTypes, [
+    code,
+    hash,
+    creationBytecodeHash,
+    detailA,
+    detailB,
+    expected,
+    actual,
+  ]);
 }
 
 function normalizeBytecode(value) {
@@ -122,7 +138,10 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
     }
     const output = split.output ?? split;
     const canonicalToUser = Object.fromEntries(
-      Object.entries(main.userSourceNameMap ?? {}).map(([userSource, canonicalSource]) => [canonicalSource, userSource]),
+      Object.entries(main.userSourceNameMap ?? {}).map(([userSource, canonicalSource]) => [
+        canonicalSource,
+        userSource,
+      ]),
     );
     const sourceName = artifact.sourceName;
     const inputSourceName = artifact.inputSourceName;
@@ -171,11 +190,17 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
 function isWithin(parent, child) {
   const flavor = isWindowsAbsolute(parent) || isWindowsAbsolute(child) ? path.win32 : path.posix;
   const relative = flavor.relative(parent, child);
-  return relative === '' || (!relative.startsWith(`..${flavor.sep}`) && relative !== '..' && !flavor.isAbsolute(relative));
+  return (
+    relative === '' || (!relative.startsWith(`..${flavor.sep}`) && relative !== '..' && !flavor.isAbsolute(relative))
+  );
 }
 
 function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName, fullyQualifiedName]) {
-  if (![outputDirectoryArg, artifactPathArg, contractPath, contractName, fullyQualifiedName].every(value => typeof value === 'string')) {
+  if (
+    ![outputDirectoryArg, artifactPathArg, contractPath, contractName, fullyQualifiedName].every(
+      value => typeof value === 'string',
+    )
+  ) {
     return response(CODE.toolFailure, ZERO_HASH, 'Expected output directory, artifact, source, contract, and FQN');
   }
 
@@ -193,7 +218,11 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
   if (loaded.error !== undefined) return loaded.error;
   const { buildInfoFile, inputSources, target, sourceLookup, solcVersion, solcLongVersion, hardhat3 } = loaded;
   const artifactCompilerVersion = artifact.metadata?.compiler?.version;
-  if (typeof artifactCompilerVersion !== 'string' || typeof solcVersion !== 'string' || semanticVersion(artifactCompilerVersion) !== semanticVersion(solcVersion)) {
+  if (
+    typeof artifactCompilerVersion !== 'string' ||
+    typeof solcVersion !== 'string' ||
+    semanticVersion(artifactCompilerVersion) !== semanticVersion(solcVersion)
+  ) {
     return response(CODE.compilerVersionMismatch, ZERO_HASH, artifactCompilerVersion ?? '', solcVersion ?? '');
   }
   if (!hardhat3 && (typeof solcLongVersion !== 'string' || solcLongVersion.length === 0)) {
@@ -217,7 +246,9 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
     return response(CODE.compilerBuildMismatch, ZERO_HASH, artifactCompilerVersion, outputCompilerVersion);
   }
 
-  const artifactBytecode = normalizeBytecode(typeof artifact.bytecode === 'string' ? artifact.bytecode : artifact.bytecode?.object);
+  const artifactBytecode = normalizeBytecode(
+    typeof artifact.bytecode === 'string' ? artifact.bytecode : artifact.bytecode?.object,
+  );
   const buildBytecode = normalizeBytecode(target?.evm?.bytecode?.object);
   if (artifactBytecode !== buildBytecode) return response(CODE.bytecodeMismatch, ZERO_HASH, fullyQualifiedName);
 
@@ -252,7 +283,8 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
       sourceHashes,
     ]),
   );
-  return response(CODE.success, hash);
+  const creationBytecodeHash = keccak256(toUtf8Bytes(artifactBytecode));
+  return response(CODE.success, hash, '', '', ZERO_HASH, ZERO_HASH, creationBytecodeHash);
 }
 
 function main(args) {
