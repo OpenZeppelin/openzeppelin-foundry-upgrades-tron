@@ -16,13 +16,15 @@
   },
   "scripts": {
     "compile": "forge build",
-    "test": "npm run test:solidity && npm run test:rpc",
-    "test:solidity": "FOUNDRY_OUT=out FOUNDRY_PROFILE=default forge test -vvv --ffi --force",
+    "test": "npm run test:package && npm run test:solidity && npm run test:rpc",
+    "test:package": "node --test test/package-shape.test.cjs",
+    "test:solidity": "node scripts/test-solidity.cjs",
     "test:validation": "FOUNDRY_OUT=out FOUNDRY_PROFILE=default forge test --match-path test/Validation.t.sol -vvv --ffi --force",
-    "test:rpc": "node --test rpc/test/*.test.cjs",
-    "lint": "prettier --log-level warn --ignore-path .gitignore '{src,test,rpc}/**/*.{sol,cjs}' --check && solhint 'src/**/*.sol'",
-    "lint:fix": "prettier --log-level warn --ignore-path .gitignore '{src,test,rpc}/**/*.{sol,cjs}' --write",
-    "rpc": "node rpc/cli.cjs"
+    "test:rpc": "node scripts/test-rpc.cjs",
+    "lint": "node scripts/lint.cjs",
+    "lint:fix": "node scripts/lint.cjs --write",
+    "rpc": "node rpc/cli.cjs",
+    "prepack": "node scripts/require-package-contents.cjs"
   },
   "dependencies": {
     "ethers": "6.17.0",
