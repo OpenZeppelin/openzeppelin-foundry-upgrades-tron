@@ -49,6 +49,50 @@ async function signedTransaction(overrides = {}) {
   });
 }
 
+async function seedConfirmedDeployment(
+  result,
+  {
+    identity = ARTIFACT_IDENTITY,
+    provenanceHash = `0x${'55'.repeat(32)}`,
+    predicted = TARGET,
+    actual = TARGET_ACTUAL,
+  } = {},
+) {
+  const raw = await signedTransaction({ to: null, nonce: 12, data: '0x6000' });
+  const sourceHash = keccak256(raw);
+  const operationContext = {
+    kind: 'deployment',
+    from: WALLET.address.toLowerCase(),
+    to: null,
+    nonce: '12',
+    predictedContractAddress: predicted,
+    actualTarget: actual,
+    contractKind: contractKindForArtifact(identity),
+    artifactIdentity: identity,
+    provenanceHash,
+  };
+  result.journal.receive(raw);
+  result.journal.recordNativeBuilt(
+    sourceHash,
+    { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID },
+    {
+      operationContext,
+      childCreatePlan: {
+        version: 1,
+        mode: 'exact-signed',
+        sender: operationContext.from,
+        simulationRootAddress: actual,
+        attempts: [],
+        counterBases: {},
+        counterFinals: {},
+      },
+    },
+  );
+  result.journal.recordBroadcast(sourceHash);
+  result.journal.recordConfirmed(sourceHash, translatedReceipt(sourceHash, operationContext));
+  return sourceHash;
+}
+
 function translatedReceipt(sourceHash, context, overrides = {}) {
   return {
     transactionHash: sourceHash,
@@ -1029,37 +1073,49 @@ test('resolves predicted and actual addresses to EVM, TRON hex, Base58, provenan
 
 test('resolves an internally-created ProxyAdmin ABI from durable metadata and verified artifacts', async t => {
   let seenContext;
+  const transparentIdentity = {
+    sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+    contractName: 'TransparentUpgradeableProxy',
+    fullyQualifiedName:
+      'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+  };
   const result = fixture(t, {
     useDefaultResolveCallContext: true,
     findArtifactPaths(outputDirectory, reference) {
-      assert.equal(reference, 'contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin');
+      if (reference === transparentIdentity.fullyQualifiedName) {
+        return [path.join(outputDirectory, 'TransparentUpgradeableProxy.sol', 'TransparentUpgradeableProxy.json')];
+      }
+      assert.equal(reference, 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin');
       return [path.join(outputDirectory, 'ProxyAdmin.sol', 'ProxyAdmin.json')];
     },
-    verifyArtifactProvenance() {
-      return { abi: ['function owner() view returns (address)'], provenanceHash: `0x${'66'.repeat(32)}` };
+    verifyArtifactProvenance({ artifactPath }) {
+      return artifactPath.includes('TransparentUpgradeableProxy')
+        ? { abi: [], provenanceHash: `0x${'55'.repeat(32)}` }
+        : { abi: ['function owner() view returns (address)'], provenanceHash: `0x${'66'.repeat(32)}` };
     },
     async rewriteCall(decoded, context) {
       seenContext = context;
       return { ...decoded, to: TARGET_ACTUAL };
     },
   });
+  const sourceTransaction = await seedConfirmedDeployment(result, { identity: transparentIdentity });
   result.addressMap.set({
     predicted: TARGET,
     actual: TARGET_ACTUAL,
     creator: WALLET.address,
     sender: WALLET.address,
-    sourceTransaction: SOURCE_TX,
+    sourceTransaction,
   });
   const proxyAdminIdentity = {
-    sourceName: 'contracts/proxy/transparent/ProxyAdmin.sol',
+    sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
     contractName: 'ProxyAdmin',
-    fullyQualifiedName: 'contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
+    fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
   };
   result.addressMap.setContractMetadata({
     predicted: TARGET,
     contractKind: 'proxy-admin',
     artifactIdentity: proxyAdminIdentity,
-    sourceTransaction: SOURCE_TX,
+    sourceTransaction,
   });
   const raw = await signedTransaction({ to: TARGET, nonce: 15, data: '0x1234' });
   assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
@@ -1069,6 +1125,42 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
     artifactIdentity: proxyAdminIdentity,
     provenanceHash: `0x${'66'.repeat(32)}`,
   });
+});
+
+test('rejects a same-name artifact whose provenance changed after deployment', async t => {
+  const result = fixture(t, {
+    useDefaultResolveCallContext: true,
+    findArtifactPaths(outputDirectory, reference) {
+      assert.equal(reference, ARTIFACT_IDENTITY.fullyQualifiedName);
+      return [path.join(outputDirectory, 'Box.sol', 'Box.json')];
+    },
+    verifyArtifactProvenance() {
+      return { abi: ['function ping()'], provenanceHash: `0x${'66'.repeat(32)}` };
+    },
+  });
+  const sourceTransaction = await seedConfirmedDeployment(result);
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction,
+  });
+  result.addressMap.setContractMetadata({
+    predicted: TARGET,
+    contractKind: 'contract',
+    artifactIdentity: ARTIFACT_IDENTITY,
+    sourceTransaction,
+  });
+
+  const raw = await signedTransaction({ to: TARGET, nonce: 16, data: '0x5c36b186' });
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'ARTIFACT_PROVENANCE_CHANGED');
+  assert.equal(
+    result.calls.some(call => call.type === 'buildCall' || call.type === 'broadcast'),
+    false,
+  );
 });
 
 test('propagates upstream JSON-RPC errors without rewriting their code or data', async t => {
@@ -1086,6 +1178,21 @@ test('propagates upstream JSON-RPC errors without rewriting their code or data',
     id: 1,
     error: { code: -32042, message: 'upstream reverted', data: { reason: 'boom' } },
   });
+});
+
+test('does not reflect arbitrary dependency error messages to JSON-RPC clients', async t => {
+  const secret = 'PRIVATE_KEY_MATERIAL_SHOULD_NOT_LEAK';
+  const { handlers } = fixture(t, {
+    upstream: {
+      async request() {
+        throw new Error(secret);
+      },
+    },
+  });
+  const response = await handlers.handle({ jsonrpc: '2.0', id: 1, method: 'eth_gasPrice', params: [] });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.message, 'TRON RPC operation failed');
+  assert.equal(JSON.stringify(response).includes(secret), false);
 });
 
 test('implements strict JSON-RPC single, batch, notification, and invalid request semantics', async t => {

@@ -5,7 +5,6 @@ const { AbiCoder, Interface, ParamType, getAddress } = require('ethers');
 const { canonicalTronFullyQualifiedName } = require('./artifact-identities.cjs');
 
 const HEX_BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
-const ABI_ADDRESS_WORD_PREFIX = '0'.repeat(24);
 
 const PROXY_CONSTRUCTORS = Object.freeze({
   'openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol:TRC1967Proxy': {
@@ -80,7 +79,7 @@ async function mapAddress(address, deps) {
   return actual === undefined ? address : address;
 }
 
-async function predictedAddressWords(deps) {
+async function predictedAddressBytes(deps) {
   requireDependencies(deps);
   const records = await deps.addressMap.list();
   if (!Array.isArray(records)) {
@@ -101,23 +100,21 @@ async function predictedAddressWords(deps) {
         { cause: error },
       );
     }
-    return `${ABI_ADDRESS_WORD_PREFIX}${predicted}`;
+    return predicted;
   });
 }
 
 async function assertOpaqueBytesSafe(value, deps) {
   const bytes = requireBytes(value, 'Opaque payload').slice(2).toLowerCase();
-  for (const word of await predictedAddressWords(deps)) {
-    let offset = bytes.indexOf(word);
+  for (const address of await predictedAddressBytes(deps)) {
+    let offset = bytes.indexOf(address);
     while (offset !== -1) {
       if (offset % 2 === 0) {
-        throw new RewriteError(
-          'OPAQUE_PREDICTED_ADDRESS',
-          'Opaque bytes contain a known predicted address in a complete ABI word',
-          { byteOffset: offset / 2 },
-        );
+        throw new RewriteError('OPAQUE_PREDICTED_ADDRESS', 'Opaque bytes contain a known predicted address', {
+          byteOffset: offset / 2,
+        });
       }
-      offset = bytes.indexOf(word, offset + 1);
+      offset = bytes.indexOf(address, offset + 1);
     }
   }
   return value;

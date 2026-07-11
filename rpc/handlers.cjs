@@ -5,7 +5,7 @@ const path = require('node:path');
 const { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256 } = require('ethers');
 
 const { normalizeAddress, toEvmAddress } = require('./address-codec.cjs');
-const { canonicalTronFullyQualifiedName } = require('./artifact-identities.cjs');
+const { canonicalTronFullyQualifiedName, derivedTronProxyAdminIdentity } = require('./artifact-identities.cjs');
 const { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } = require('./artifacts.cjs');
 const { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } = require('./rewriter.cjs');
 const { assertStateLockHeld } = require('./state-lock.cjs');
@@ -201,7 +201,7 @@ function publicError(error) {
   if (error instanceof RpcError) return error;
   if (Number.isInteger(error?.code))
     return new RpcError(error.code, error.message || 'Upstream JSON-RPC error', error.data);
-  return new RpcError(-32000, error?.message || 'TRON RPC operation failed', { code: failureCode(error) });
+  return new RpcError(-32000, 'TRON RPC operation failed', { code: failureCode(error) });
 }
 
 function responseError(id, error) {
@@ -415,9 +415,50 @@ function createRpcHandlers(rawOptions) {
     return verifyArtifact({ outputDirectory: config.foundryOut, artifactPath: matches[0] });
   }
 
+  function sameArtifactIdentity(left, right) {
+    return left?.fullyQualifiedName === right?.fullyQualifiedName;
+  }
+
+  function provenanceFailure(message, code = 'ARTIFACT_PROVENANCE_CHANGED') {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function verifiedArtifactForMetadata(metadata) {
+    const source = journal.get(metadata.sourceTransaction);
+    const operation = source?.operationContext;
+    if (
+      source?.state !== 'confirmed' ||
+      operation?.kind !== 'deployment' ||
+      operation.artifactIdentity === null ||
+      operation.provenanceHash === null
+    ) {
+      throw provenanceFailure(
+        'Contract artifact metadata has no confirmed deployment provenance',
+        'UNBOUND_ARTIFACT_METADATA',
+      );
+    }
+    const deploymentArtifact = verifiedArtifactForIdentity(operation.artifactIdentity);
+    if (deploymentArtifact.provenanceHash?.toLowerCase() !== operation.provenanceHash) {
+      throw provenanceFailure('Deployment artifact provenance changed after the contract was mapped');
+    }
+    if (sameArtifactIdentity(metadata.artifactIdentity, operation.artifactIdentity)) return deploymentArtifact;
+
+    const derivedProxyAdmin = derivedTronProxyAdminIdentity(operation.artifactIdentity);
+    if (
+      metadata.contractKind === 'proxy-admin' &&
+      derivedProxyAdmin !== undefined &&
+      sameArtifactIdentity(metadata.artifactIdentity, derivedProxyAdmin)
+    ) {
+      return verifiedArtifactForIdentity(metadata.artifactIdentity);
+    }
+    throw provenanceFailure('Contract artifact metadata is not bound to its deployment', 'UNBOUND_ARTIFACT_METADATA');
+  }
+
   async function resolveArtifact(address) {
     const metadata = metadataFor(address);
-    return metadata === undefined ? undefined : verifiedArtifactForIdentity(metadata.artifactIdentity);
+    return metadata === undefined ? undefined : verifiedArtifactForMetadata(metadata);
   }
 
   async function readStorageAddress(target, slot) {
@@ -442,6 +483,7 @@ function createRpcHandlers(rawOptions) {
   async function defaultResolveCallContext(target) {
     const metadata = metadataFor(target);
     if (metadata === undefined) return undefined;
+    const targetArtifact = verifiedArtifactForMetadata(metadata);
     let artifactAddress = target;
     if (metadata.contractKind === 'uups-proxy' || metadata.contractKind === 'transparent-proxy') {
       artifactAddress = await readStorageAddress(target, IMPLEMENTATION_SLOT);
@@ -449,10 +491,7 @@ function createRpcHandlers(rawOptions) {
       const beacon = await readStorageAddress(target, BEACON_SLOT);
       artifactAddress = await resolveBeaconImplementation(beacon);
     }
-    const artifact =
-      artifactAddress === target
-        ? verifiedArtifactForIdentity(metadata.artifactIdentity)
-        : await resolveArtifact(artifactAddress);
+    const artifact = artifactAddress === target ? targetArtifact : await resolveArtifact(artifactAddress);
     if (artifact === undefined) {
       const error = new Error('Target implementation artifact metadata is unavailable');
       error.code = 'MISSING_ARTIFACT_METADATA';

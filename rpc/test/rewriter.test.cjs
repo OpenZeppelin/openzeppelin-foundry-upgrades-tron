@@ -546,7 +546,7 @@ test('passes an unknown selector only through a declared fallback after opaque s
   );
 });
 
-test('preserves opaque safe bytes and rejects undecodable bytes containing a mapped ABI word at any byte offset', async () => {
+test('preserves opaque safe bytes and rejects padded or packed mapped addresses at any byte offset', async () => {
   const abi = ['function carry(bytes payload)'];
   const iface = new Interface(abi);
   const safe = iface.encodeFunctionData('carry', ['0x123456']);
@@ -555,7 +555,11 @@ test('preserves opaque safe bytes and rejects undecodable bytes containing a map
   const predictedWord = zeroPadValue(PREDICTED_OWNER, 32).slice(2);
   const unsafePayload = `0xff${predictedWord}00`;
   const unsafe = iface.encodeFunctionData('carry', [unsafePayload]);
-  await assert.rejects(rewriteCalldata(unsafe, abi, dependencies()), /opaque|predicted|ABI word/i);
+  await assert.rejects(rewriteCalldata(unsafe, abi, dependencies()), /opaque|predicted/i);
+
+  const packedPayload = `0xdead${PREDICTED_OWNER.slice(2)}beef`;
+  const packed = iface.encodeFunctionData('carry', [packedPayload]);
+  await assert.rejects(rewriteCalldata(packed, abi, dependencies()), /opaque|predicted/i);
 });
 
 test('rejects undecodable canonical proxy initializer containing a mapped ABI word', async () => {
