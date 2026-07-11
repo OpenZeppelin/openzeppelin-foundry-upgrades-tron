@@ -690,7 +690,9 @@ test('retries transient solid-node query failures and then returns the confirmed
         if (path === 'wallet/gettransactionbyid') return transaction;
         if (path === 'walletsolidity/gettransactioninfobyid') {
           solidAttempts += 1;
-          if (solidAttempts === 1) throw new Error('temporary solid-node outage');
+          if (solidAttempts === 1) {
+            throw Object.assign(new Error('temporary solid-node outage'), { status: 503 });
+          }
           return {
             id: transaction.txID,
             blockNumber: 7,
@@ -717,6 +719,47 @@ test('retries transient solid-node query failures and then returns the confirmed
   assert.equal(receipt.status, '0x1');
   assert.equal(solidAttempts, 2);
   assert.deepEqual(sleeps, [500]);
+});
+
+test('does not retry permanent HTTP query failures reported through common status fields', async t => {
+  const transaction = unsignedTransaction();
+  const cases = [
+    { name: 'status 401', error: Object.assign(new Error('unauthorized'), { status: 401 }) },
+    { name: 'response status 404', error: Object.assign(new Error('not found'), { response: { status: 404 } }) },
+    { name: 'statusCode 403', error: Object.assign(new Error('forbidden'), { statusCode: 403 }) },
+    { name: 'code 400', error: Object.assign(new Error('bad request'), { code: 400 }) },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      let attempts = 0;
+      let sleeps = 0;
+      let clock = 0;
+      const { client } = fixture({
+        now: () => clock,
+        receiptTimeoutMs: 1,
+        pollIntervalMs: 1,
+        sleep: async delay => {
+          sleeps += 1;
+          clock += delay;
+        },
+        transport: {
+          async request(path) {
+            if (path === 'wallet/gettransactionbyid') return transaction;
+            attempts += 1;
+            throw item.error;
+          },
+        },
+      });
+
+      await assert.rejects(
+        () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+        error => error === item.error,
+      );
+      assert.equal(attempts, 1);
+      assert.equal(sleeps, 0);
+    });
+  }
 });
 
 test('times out repeated transient receipt queries with the last transport failure as cause', async () => {

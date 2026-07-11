@@ -174,6 +174,36 @@ function duplicateResponse(response) {
   return /DUP_TRANSACTION/i.test(code) || /duplicate transaction/i.test(message);
 }
 
+const RETRYABLE_NETWORK_CODES = new Set([
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'EPIPE',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+function numericHttpStatus(error) {
+  const candidates = [error?.status, error?.statusCode, error?.response?.status, error?.code];
+  for (const candidate of candidates) {
+    if (Number.isInteger(candidate)) return candidate;
+    if (typeof candidate === 'string' && /^[0-9]{3}$/.test(candidate)) return Number(candidate);
+  }
+  return undefined;
+}
+
+function retryableTransportError(error) {
+  const status = numericHttpStatus(error);
+  if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  if (typeof error?.code === 'string' && RETRYABLE_NETWORK_CODES.has(error.code.toUpperCase())) return true;
+  const message = typeof error?.message === 'string' ? error.message : '';
+  return /network|socket|reset|timed?\s*out|timeout|offline|outage|fetch failed/i.test(message);
+}
+
 class RetryableNativeQueryError extends Error {
   constructor(path, cause) {
     super(`Transient TRON query failure at ${path}`, { cause });
@@ -351,6 +381,7 @@ class TronClient {
       try {
         return await this.transport.request(path, body);
       } catch (error) {
+        if (!retryableTransportError(error)) throw error;
         throw new RetryableNativeQueryError(path, error);
       }
     };
