@@ -14,6 +14,7 @@ const OWNER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CONTRACT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const STATES = new Set(['received', 'native-built', 'broadcast', 'confirmed', 'failed']);
+const SIMULATION_MODES = new Set(['exact-signed', 'constant-create', 'constant-call']);
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -214,8 +215,17 @@ function validateCounterMap(value, label) {
 function validateChildCreatePlan(plan) {
   if (
     !isObject(plan) ||
-    !exactKeys(plan, ['attempts', 'counterBases', 'counterFinals', 'sender', 'version']) ||
+    !exactKeys(plan, [
+      'attempts',
+      'counterBases',
+      'counterFinals',
+      'mode',
+      'sender',
+      'simulationRootAddress',
+      'version',
+    ]) ||
     plan.version !== 1 ||
+    !SIMULATION_MODES.has(plan.mode) ||
     !Array.isArray(plan.attempts)
   ) {
     throw new Error('Invalid child CREATE plan');
@@ -283,7 +293,9 @@ function validateChildCreatePlan(plan) {
   }
   return {
     version: 1,
+    mode: plan.mode,
     sender: normalizeAddress(plan.sender, 'child CREATE sender'),
+    simulationRootAddress: normalizeAddress(plan.simulationRootAddress, 'simulation root'),
     attempts,
     counterBases,
     counterFinals,

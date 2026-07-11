@@ -1,5 +1,6 @@
 const { createHash } = require('node:crypto');
 
+const { concat, dataSlice, keccak256 } = require('ethers');
 const { TronWeb, utils } = require('tronweb');
 
 const { toEvmAddress, toTronHexAddress } = require('./address-codec.cjs');
@@ -10,6 +11,7 @@ const HEX_BYTES_PATTERN = /^(?:0x)?(?:[0-9a-f]{2})+$/i;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_RECEIPT_TIMEOUT_MS = 120_000;
 const DEFAULT_BROADCAST_ATTEMPTS = 3;
+const SIMULATION_PROBE_INITCODE = '6000600053600160006000f0506460006000fd6000526005601b6000f05060006000f3';
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -174,6 +176,166 @@ function duplicateResponse(response) {
   return /DUP_TRANSACTION/i.test(code) || /duplicate transaction/i.test(message);
 }
 
+function explicitMissingSimulationCapability(value) {
+  const status = numericHttpStatus(value);
+  if (status === 404 || status === 405 || status === 501) return true;
+  const message = [value?.message, value?.code, responseMessage(isObject(value) ? value : {})]
+    .filter(item => typeof item === 'string')
+    .join(' ');
+  return /\bmethod(?:\s+is)?\s+not\s+found\b/i.test(message);
+}
+
+function singleNativeContract(transaction, label) {
+  const contracts = transaction?.raw_data?.contract;
+  if (!Array.isArray(contracts) || contracts.length !== 1 || !isObject(contracts[0]?.parameter?.value)) {
+    throw new Error(`Invalid ${label} contract payload`);
+  }
+  return contracts[0];
+}
+
+function assertSuccessfulContractRet(transaction, label) {
+  if (transaction.ret === undefined) return;
+  if (
+    !Array.isArray(transaction.ret) ||
+    transaction.ret.some(item => !isObject(item) || (item.contractRet !== undefined && item.contractRet !== 'SUCCESS'))
+  ) {
+    throw new Error(`${label} contract result is not SUCCESS`);
+  }
+}
+
+function sameTronAddress(left, right, allowEmpty = false) {
+  if (allowEmpty && (left === undefined || left === '') && (right === undefined || right === '')) return true;
+  try {
+    return toTronHexAddress(left).toLowerCase() === toTronHexAddress(right).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+function nativeContractAddress(nativeTransactionId, ownerAddress) {
+  const owner = toEvmAddress(ownerAddress).slice(2);
+  return dataSlice(keccak256(concat([`0x${normalizeTxId(nativeTransactionId)}`, `0x41${owner}`])), 12).toLowerCase();
+}
+
+function payloadFromSignedJson(signed, transaction) {
+  let reproduced;
+  try {
+    reproduced = isObject(transaction) ? serializeSignedTransaction(transaction) : undefined;
+  } catch (error) {
+    throw new Error('Built transaction JSON does not reproduce the exact signed native bytes', { cause: error });
+  }
+  if (reproduced !== signed) {
+    throw new Error('Built transaction JSON does not reproduce the exact signed native bytes');
+  }
+  assertSuccessfulContractRet(transaction, 'Built transaction');
+  const contract = singleNativeContract(transaction, 'built transaction');
+  const value = contract.parameter.value;
+  if (contract.type === 'CreateSmartContract') {
+    const created = value.new_contract;
+    if (!isObject(created) || typeof created.bytecode !== 'string') {
+      throw new Error('Invalid built CreateSmartContract payload');
+    }
+    if (created.origin_address !== undefined && !sameTronAddress(created.origin_address, value.owner_address)) {
+      throw new Error('Built CreateSmartContract owner mismatch');
+    }
+    return {
+      mode: 'constant-create',
+      body: {
+        owner_address: toTronHexAddress(value.owner_address),
+        contract_address: '',
+        data: stripHex(created.bytecode, 'creation payload', false),
+        call_value: normalizeCallValue(created.call_value ?? 0),
+        visible: false,
+      },
+    };
+  }
+  if (contract.type === 'TriggerSmartContract') {
+    return {
+      mode: 'constant-call',
+      body: {
+        owner_address: toTronHexAddress(value.owner_address),
+        contract_address: toTronHexAddress(value.contract_address),
+        data: stripHex(value.data ?? '', 'call payload'),
+        call_value: normalizeCallValue(value.call_value ?? 0),
+        visible: false,
+      },
+    };
+  }
+  throw new Error(`Unsupported native simulation contract type ${String(contract.type)}`);
+}
+
+function validateConstantEcho(response, payload) {
+  if (!isObject(response.transaction)) throw new Error('Constant simulation did not echo a transaction payload');
+  assertSuccessfulContractRet(response.transaction, 'Constant simulation');
+  const contract = singleNativeContract(response.transaction, 'constant simulation echo');
+  const value = contract.parameter.value;
+  if (payload.mode === 'constant-create') {
+    const created = value.new_contract;
+    if (
+      contract.type !== 'CreateSmartContract' ||
+      !isObject(created) ||
+      !sameTronAddress(value.owner_address, payload.body.owner_address) ||
+      !sameTronAddress(created.origin_address, payload.body.owner_address) ||
+      stripHex(created.bytecode ?? '', 'constant simulation echo creation data') !== payload.body.data ||
+      normalizeCallValue(created.call_value ?? 0) !== payload.body.call_value
+    ) {
+      throw new Error('Constant simulation echo payload mismatch');
+    }
+    let root;
+    try {
+      root = toEvmAddress(response.transaction.contract_address);
+    } catch (error) {
+      throw new Error('Constant-create simulation did not echo a valid synthetic root address', { cause: error });
+    }
+    if (root !== nativeContractAddress(response.transaction.txID, payload.body.owner_address)) {
+      throw new Error('Constant-create simulation synthetic root address mismatch');
+    }
+    return { transaction: response.transaction, simulationRootAddress: root };
+  }
+  if (
+    contract.type !== 'TriggerSmartContract' ||
+    !sameTronAddress(value.owner_address, payload.body.owner_address) ||
+    !sameTronAddress(value.contract_address, payload.body.contract_address) ||
+    stripHex(value.data ?? '', 'constant simulation echo data') !== payload.body.data ||
+    normalizeCallValue(value.call_value ?? 0) !== payload.body.call_value
+  ) {
+    throw new Error('Constant simulation echo payload mismatch');
+  }
+  return { transaction: response.transaction, simulationRootAddress: toEvmAddress(payload.body.contract_address) };
+}
+
+function decodeInternalNote(value) {
+  if (typeof value !== 'string') throw new Error('Invalid constant simulation internal transaction note');
+  if (/^(?:[0-9a-f]{2})+$/i.test(value)) return Buffer.from(value, 'hex').toString('utf8');
+  return value;
+}
+
+function constantCreateAttempts(response, allowOmitted = false) {
+  if (response.internal_transactions === undefined && allowOmitted) return [];
+  if (!Array.isArray(response.internal_transactions)) {
+    throw new Error('Constant simulation did not provide a complete internal transaction trace');
+  }
+  const creates = response.internal_transactions.filter(transaction => {
+    if (!isObject(transaction)) throw new Error('Invalid constant simulation internal transaction');
+    return decodeInternalNote(transaction.note).toLowerCase() === 'create';
+  });
+  return creates.map((attempt, index) => {
+    if (attempt.rejected !== undefined && typeof attempt.rejected !== 'boolean') {
+      throw new Error(`Invalid constant simulation child CREATE rejection marker ${index}`);
+    }
+    try {
+      return {
+        index,
+        callerAddress: toEvmAddress(attempt.caller_address),
+        createdAddress: toEvmAddress(attempt.transferTo_address ?? attempt.transfer_to_address),
+        success: attempt.rejected !== true,
+      };
+    } catch (error) {
+      throw new Error(`Invalid constant simulation child CREATE trace attempt ${index}`, { cause: error });
+    }
+  });
+}
+
 const RETRYABLE_NETWORK_CODES = new Set([
   'EAI_AGAIN',
   'ECONNREFUSED',
@@ -252,6 +414,9 @@ class TronClient {
       'broadcast attempt count',
       DEFAULT_BROADCAST_ATTEMPTS,
     );
+    this.simulationCapability = undefined;
+    this.simulationProbePromise = undefined;
+    this.constantTraceCapability = false;
   }
 
   ownerAddress(ownerAddress) {
@@ -308,7 +473,7 @@ class TronClient {
     return this.signBuiltTransaction(wrapper.transaction);
   }
 
-  async simulateSigned(signedNativeTransaction, expectedNativeTransactionId) {
+  async simulateSigned(signedNativeTransaction, expectedNativeTransactionId, builtTransaction) {
     const signed = normalizeSignedBytes(signedNativeTransaction);
     const nativeTransactionId = nativeTxIdFromSignedBytes(signed);
     if (
@@ -317,13 +482,26 @@ class TronClient {
     ) {
       throw new Error('Native transaction ID mismatch before simulation');
     }
+    if (this.simulationCapability === 'constant-create') {
+      return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+    }
     let response;
     try {
       response = await this.transport.request('wallet/simulatesignedtransaction', { transaction: signed });
     } catch (error) {
+      if (explicitMissingSimulationCapability(error)) {
+        if (builtTransaction === undefined) {
+          throw new Error('Exact signed-transaction simulation is unavailable', { cause: error });
+        }
+        return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+      }
       throw new Error('Exact signed-transaction simulation is unavailable', { cause: error });
     }
     if (!isObject(response) || response.result?.result !== true) {
+      if (explicitMissingSimulationCapability(response)) {
+        if (builtTransaction === undefined) throw new Error('Exact signed-transaction simulation is unavailable');
+        return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+      }
       throw new Error(
         `Exact signed-transaction simulation failed${responseMessage(response ?? {}) ? `: ${responseMessage(response)}` : ''}`,
       );
@@ -349,7 +527,87 @@ class TronClient {
     });
     const energyUsed = response.energy_used;
     if (!Number.isSafeInteger(energyUsed) || energyUsed < 0) throw new Error('Invalid exact simulation energy usage');
-    return { nativeTransactionId, energyUsed, traceComplete: true, childCreateAttempts };
+    let simulationRootAddress;
+    if (builtTransaction !== undefined) {
+      const payload = payloadFromSignedJson(signed, builtTransaction);
+      simulationRootAddress =
+        payload.mode === 'constant-create'
+          ? nativeContractAddress(nativeTransactionId, payload.body.owner_address)
+          : toEvmAddress(payload.body.contract_address);
+    } else {
+      simulationRootAddress = childCreateAttempts[0]?.callerAddress ?? `0x${'00'.repeat(20)}`;
+    }
+    return {
+      mode: 'exact-signed',
+      nativeTransactionId,
+      simulationRootAddress,
+      energyUsed,
+      traceComplete: true,
+      childCreateAttempts,
+    };
+  }
+
+  async simulatePayload(signed, nativeTransactionId, builtTransaction) {
+    const payload = payloadFromSignedJson(signed, builtTransaction);
+    const response = await this.transport.request('wallet/triggerconstantcontract', payload.body);
+    if (!isObject(response) || response.result?.result !== true) {
+      throw new Error(
+        `Constant payload simulation failed${responseMessage(response ?? {}) ? `: ${responseMessage(response)}` : ''}`,
+      );
+    }
+    const echoed = validateConstantEcho(response, payload);
+    const childCreateAttempts = constantCreateAttempts(response, this.constantTraceCapability);
+    const energyUsed = response.energy_used;
+    if (!Number.isSafeInteger(energyUsed) || energyUsed < 0) {
+      throw new Error('Invalid constant simulation energy usage');
+    }
+    return {
+      mode: payload.mode,
+      nativeTransactionId,
+      simulationRootAddress: echoed.simulationRootAddress,
+      energyUsed,
+      traceComplete: true,
+      childCreateAttempts,
+    };
+  }
+
+  async assertSimulationReady() {
+    if (this.simulationCapability !== undefined) return this.simulationCapability;
+    if (this.simulationProbePromise !== undefined) return this.simulationProbePromise;
+    this.simulationProbePromise = (async () => {
+      const built = await this.buildCreate({
+        abi: [],
+        bytecode: SIMULATION_PROBE_INITCODE,
+        constructorData: '',
+        ownerAddress: this.ownerAddress(),
+        name: 'OpenZeppelinSimulationProbe',
+        callValue: 0,
+      });
+      const simulation = await this.simulateSigned(
+        built.signedNativeTransaction,
+        built.nativeTransactionId,
+        built.transaction,
+      );
+      if (
+        simulation.childCreateAttempts.length !== 2 ||
+        simulation.childCreateAttempts[0].success !== true ||
+        simulation.childCreateAttempts[1].success !== false ||
+        simulation.childCreateAttempts.some(attempt => attempt.callerAddress !== simulation.simulationRootAddress)
+      ) {
+        throw new Error(
+          'TRON simulation readiness probe did not expose ordered successful and rejected CREATE attempts',
+        );
+      }
+      if (simulation.mode === 'constant-create') this.constantTraceCapability = true;
+      this.simulationCapability = simulation.mode === 'exact-signed' ? 'exact-signed' : 'constant-create';
+      return this.simulationCapability;
+    })();
+    try {
+      return await this.simulationProbePromise;
+    } catch (error) {
+      this.simulationProbePromise = undefined;
+      throw error;
+    }
   }
 
   async broadcastSigned(signedNativeTransaction, expectedNativeTransactionId) {

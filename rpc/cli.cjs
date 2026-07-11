@@ -160,10 +160,15 @@ async function startCommand(parsed, context) {
     port: parsed.port,
     ...(context.fetch === undefined ? {} : { fetch: context.fetch }),
   });
-  if (!isObject(runtime) || !isObject(runtime.server)) throw new Error('Adapter runtime did not provide a server');
-  const { server } = runtime;
+  if (!isObject(runtime) || !isObject(runtime.server) || !isObject(runtime.nativeClient)) {
+    throw new Error('Adapter runtime did not provide a server and native client');
+  }
+  const { server, nativeClient } = runtime;
   if (typeof server.start !== 'function' || typeof server.stop !== 'function') {
     throw new Error('Adapter runtime server is invalid');
+  }
+  if (typeof nativeClient.assertSimulationReady !== 'function') {
+    throw new Error('Adapter runtime native client cannot prove simulation readiness');
   }
   let resolveSignal;
   let shutdownRequested = false;
@@ -183,6 +188,7 @@ async function startCommand(parsed, context) {
   context.signalTarget.on('SIGINT', requestShutdown);
   context.signalTarget.on('SIGTERM', requestShutdown);
   try {
+    const simulationMode = await nativeClient.assertSimulationReady();
     const address = await server.start();
     if (!shutdownRequested) {
       writeJson(context.stdout, {
@@ -192,6 +198,7 @@ async function startCommand(parsed, context) {
         chainIdentity: config.chainIdentity,
         stateFile: config.stateFile,
         foundryOut: config.foundryOut,
+        simulationMode,
       });
       await signalPromise;
     }

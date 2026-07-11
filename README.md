@@ -104,19 +104,29 @@ contract-call transactions. Before broadcast it verifies artifacts and
 constructor/call payloads, rewrites mapped ABI address values, journals the
 exact signed native transaction, and simulates child `CREATE` operations.
 
-Write translation requires a nonstandard POST
-`wallet/simulatesignedtransaction` capability. Its result must contain the
-matching native transaction ID, `trace_complete: true`, and ordered
-`child_create_attempts`. The stock public java-tron API and current stock TRE
-image do not provide this complete capability, so write requests fail closed
-before native broadcast on those nodes. Supplying public-network credentials
-does not by itself make write translation operational.
+The adapter prefers the nonstandard POST `wallet/simulatesignedtransaction`
+capability when a node provides it. The result must bind the matching native
+transaction ID and a complete ordered child-`CREATE` trace. If, and only if,
+the node explicitly reports that endpoint as absent, the adapter can use the
+standard `wallet/triggerconstantcontract` payload simulation supported by
+stock TRE and java-tron.
 
-The TRE readiness diagnostic must probe this exact simulation
-contract before reporting the write adapter ready; ordinary node or `/jsonrpc`
-health is not sufficient. Until that gate passes against a capability-enabled
-node, the adapter's read path and offline mapping inspection remain usable, but
-write support is not claimed for stock TRE or public java-tron deployments.
+Before opening its listener, the adapter runs a constant, non-broadcasting
+capability probe that must expose one successful and one rejected `CREATE` in
+order. Payload simulation is derived from the byte-identical signed native
+transaction JSON and its echoed contract payload is checked before use. The
+selected `exact-signed` or `constant-create` readiness mode is included in the
+CLI's ready message. A direct handler invocation performs the same cached probe
+before its first write.
+
+Standard payload simulation uses synthetic deployment addresses and cannot
+distinguish `CREATE` from `CREATE2`. It therefore supports zero child creations
+for ordinary deployments and calls, plus the canonical transparent proxy's
+single successful root-created `ProxyAdmin`. Extra, nested, initializer, or
+otherwise ambiguous child creations fail before broadcast. Their actual
+addresses are bound only from a successful confirmed receipt. A node with the
+exact signed-transaction capability retains strict generic child-address and
+topology reconciliation.
 
 State is written atomically and keyed by network plus chain ID. Replaying a
 Forge transaction reuses the journaled native transaction; restart recovery

@@ -97,17 +97,28 @@ function fixture(t, overrides = {}) {
     },
   };
   const nativeClient = overrides.nativeClient ?? {
+    async assertSimulationReady() {
+      calls.push({ type: 'simulationReady' });
+      return 'exact-signed';
+    },
     async buildCreate(value) {
       calls.push({ type: 'buildCreate', value });
-      return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID };
+      return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID, transaction: { built: true } };
     },
     async buildCall(value) {
       calls.push({ type: 'buildCall', value });
-      return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID };
+      return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID, transaction: { built: true } };
     },
-    async simulateSigned(bytes, txid) {
-      calls.push({ type: 'simulate', bytes, txid });
-      return { nativeTransactionId: txid, energyUsed: 123, traceComplete: true, childCreateAttempts: [] };
+    async simulateSigned(bytes, txid, transaction) {
+      calls.push({ type: 'simulate', bytes, txid, transaction });
+      return {
+        mode: 'exact-signed',
+        nativeTransactionId: txid,
+        simulationRootAddress: ACTUAL_TARGET,
+        energyUsed: 123,
+        traceComplete: true,
+        childCreateAttempts: [],
+      };
     },
     async broadcastSigned(bytes, txid) {
       calls.push({
@@ -134,7 +145,9 @@ function fixture(t, overrides = {}) {
         operationContext,
         childCreatePlan: {
           version: 1,
+          mode: simulation.mode,
           sender: operationContext.from,
+          simulationRootAddress: simulation.simulationRootAddress,
           attempts: [],
           counterBases: {},
           counterFinals: {},
@@ -326,7 +339,7 @@ test('composes deployment decode, provenance, rewrite, exact simulation, durable
   assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: sourceHash });
   assert.deepEqual(
     result.calls.map(call => call.type),
-    ['buildCreate', 'simulate', 'prepared', 'broadcast', 'wait', 'reconcile'],
+    ['simulationReady', 'buildCreate', 'simulate', 'prepared', 'broadcast', 'wait', 'reconcile'],
   );
   assert.equal(result.calls.find(call => call.type === 'broadcast').state, 'native-built');
   const operation = result.calls.find(call => call.type === 'prepared').operationContext;
@@ -491,7 +504,15 @@ test('recovers native-built and broadcast records without ever calling a builder
         { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID },
         {
           operationContext: context,
-          childCreatePlan: { version: 1, sender: WALLET.address, attempts: [], counterBases: {}, counterFinals: {} },
+          childCreatePlan: {
+            version: 1,
+            mode: 'exact-signed',
+            sender: WALLET.address,
+            simulationRootAddress: ACTUAL_TARGET,
+            attempts: [],
+            counterBases: {},
+            counterFinals: {},
+          },
         },
       );
       if (initialState === 'broadcast') result.journal.recordBroadcast(sourceHash);
@@ -596,7 +617,9 @@ test('replays receipts only from confirmed journal records and hides retained su
             operationContext,
             childCreatePlan: {
               version: 1,
+              mode: 'exact-signed',
               sender: WALLET.address,
+              simulationRootAddress: ACTUAL_TARGET,
               attempts: [],
               counterBases: {},
               counterFinals: {},

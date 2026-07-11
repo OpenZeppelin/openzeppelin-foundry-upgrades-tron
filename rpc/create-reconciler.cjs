@@ -16,7 +16,7 @@ const {
   requireJournal,
   validateOperationContext,
 } = require('./journal.cjs');
-const { internalCreateTransactions } = require('./receipts.cjs');
+const { internalCreateAttempts } = require('./receipts.cjs');
 
 const RECONCILIATION_VERSION = 1;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
@@ -80,12 +80,11 @@ function contractMetadata(kind, identity) {
   return kind === null || identity === null ? undefined : { contractKind: kind, artifactIdentity: identity };
 }
 
-function proxyAdminMetadata(operationContext, actualCaller, predictedCaller, nonce) {
+function proxyAdminMetadata(operationContext, predictedCaller, nonce) {
   if (
     operationContext.kind === 'deployment' &&
     operationContext.contractKind === 'transparent-proxy' &&
     operationContext.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX) &&
-    actualCaller === operationContext.actualTarget &&
     predictedCaller === operationContext.predictedContractAddress &&
     nonce === 1n
   ) {
@@ -107,6 +106,29 @@ function proxyAdminMetadata(operationContext, actualCaller, predictedCaller, non
     };
   }
   return undefined;
+}
+
+function assertPredictedChildAvailable(chain, indexes, predictedAddress, childMetadata) {
+  const existingPredicted = indexes.byPredicted[predictedAddress];
+  if (existingPredicted !== undefined && childMetadata !== undefined) {
+    const existingMetadata = resolveContractMetadataInChain(chain, predictedAddress);
+    if (
+      existingMetadata !== undefined &&
+      (existingMetadata.contractKind !== childMetadata.contractKind ||
+        JSON.stringify(existingMetadata.artifactIdentity) !== JSON.stringify(childMetadata.artifactIdentity))
+    ) {
+      throw new CreateReconciliationError(
+        'CHILD_CREATE_SIMULATION_CONFLICT',
+        `Simulated child metadata conflicts with ${predictedAddress}`,
+      );
+    }
+  }
+  if (existingPredicted !== undefined) {
+    throw new CreateReconciliationError(
+      'CHILD_CREATE_SIMULATION_CONFLICT',
+      `Simulated child mapping conflicts with persisted address state for ${predictedAddress}`,
+    );
+  }
 }
 
 function assertChildMappingAvailable(chain, indexes, predictedAddress, actualAddress, childMetadata) {
@@ -140,6 +162,9 @@ function validateSimulation(simulation, nativeTransactionId) {
       'Exact simulation did not provide a complete child CREATE trace',
     );
   }
+  if (!['exact-signed', 'constant-create', 'constant-call'].includes(simulation.mode)) {
+    throw new CreateReconciliationError('SIMULATION_INCOMPLETE', 'Simulation mode is missing or invalid');
+  }
   if (
     typeof simulation.nativeTransactionId !== 'string' ||
     simulation.nativeTransactionId.replace(/^0x/i, '').toLowerCase() !==
@@ -150,12 +175,67 @@ function validateSimulation(simulation, nativeTransactionId) {
       'Exact simulation transaction ID does not match the signed native transaction',
     );
   }
-  return simulation.childCreateAttempts;
+  return {
+    mode: simulation.mode,
+    simulationRootAddress: normalizeAddress(simulation.simulationRootAddress, 'simulation root'),
+    attempts: simulation.childCreateAttempts,
+  };
+}
+
+function assertConstantProfile(mode, simulationRootAddress, attempts, operationContext) {
+  if (mode === 'exact-signed') {
+    if (simulationRootAddress !== operationContext.actualTarget) {
+      throw new CreateReconciliationError(
+        'SIMULATION_ROOT_MISMATCH',
+        'Exact simulation root does not match the native operation target',
+      );
+    }
+    return;
+  }
+  const expectedMode = operationContext.kind === 'deployment' ? 'constant-create' : 'constant-call';
+  if (mode !== expectedMode) {
+    throw new CreateReconciliationError(
+      'UNSAFE_CONSTANT_CREATE_PROFILE',
+      'Constant simulation mode does not match the native operation',
+    );
+  }
+  if (mode === 'constant-call' && simulationRootAddress !== operationContext.actualTarget) {
+    throw new CreateReconciliationError(
+      'UNSAFE_CONSTANT_CREATE_PROFILE',
+      'Constant-call simulation root does not match the native target',
+    );
+  }
+  const canonicalTransparent =
+    operationContext.kind === 'deployment' &&
+    operationContext.contractKind === 'transparent-proxy' &&
+    operationContext.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX);
+  if (canonicalTransparent) {
+    if (
+      attempts.length !== 1 ||
+      !isObject(attempts[0]) ||
+      attempts[0].success !== true ||
+      normalizeAddress(attempts[0].callerAddress, 'constant simulation root caller') !== simulationRootAddress
+    ) {
+      throw new CreateReconciliationError(
+        'UNSAFE_CONSTANT_CREATE_PROFILE',
+        'Stock constant simulation requires exactly one successful root ProxyAdmin CREATE',
+      );
+    }
+    return;
+  }
+  if (attempts.length !== 0) {
+    throw new CreateReconciliationError(
+      'UNSAFE_CONSTANT_CREATE_PROFILE',
+      'Stock constant simulation cannot distinguish CREATE from CREATE2 for this operation',
+    );
+  }
 }
 
 function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId) {
   const operationContext = validateOperationContext(rawOperationContext);
-  const attempts = validateSimulation(simulation, nativeTransactionId);
+  const validatedSimulation = validateSimulation(simulation, nativeTransactionId);
+  const { attempts, mode, simulationRootAddress } = validatedSimulation;
+  assertConstantProfile(mode, simulationRootAddress, attempts, operationContext);
   const indexes = requireIndexes(chain);
   const reconciliation = requireReconciliation(chain);
   const provisional = new Map();
@@ -172,11 +252,10 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
 
   addCaller(operationContext.from, operationContext.from);
   const operationMetadata = contractMetadata(operationContext.contractKind, operationContext.artifactIdentity);
-  addCaller(
-    operationContext.actualTarget,
-    operationContext.kind === 'deployment' ? operationContext.predictedContractAddress : operationContext.to,
-    operationMetadata,
-  );
+  const predictedRoot =
+    operationContext.kind === 'deployment' ? operationContext.predictedContractAddress : operationContext.to;
+  addCaller(operationContext.actualTarget, predictedRoot, operationMetadata);
+  if (mode === 'constant-create') addCaller(simulationRootAddress, predictedRoot, operationMetadata);
 
   const resolveCaller = actual => {
     const local = provisional.get(actual);
@@ -218,10 +297,14 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     nextByCaller.set(caller.predicted, nonce + 1n);
     const predictedAddress = getCreateAddress({ from: caller.predicted, nonce }).toLowerCase();
     const childMetadata = rawAttempt.success
-      ? proxyAdminMetadata(operationContext, actualCaller, caller.predicted, nonce)
+      ? proxyAdminMetadata(operationContext, caller.predicted, nonce)
       : undefined;
     if (rawAttempt.success) {
-      assertChildMappingAvailable(chain, indexes, predictedAddress, simulatedActualAddress, childMetadata);
+      if (mode === 'exact-signed') {
+        assertChildMappingAvailable(chain, indexes, predictedAddress, simulatedActualAddress, childMetadata);
+      } else {
+        assertPredictedChildAvailable(chain, indexes, predictedAddress, childMetadata);
+      }
       addCaller(simulatedActualAddress, predictedAddress, childMetadata);
     }
     return {
@@ -242,7 +325,9 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     operationContext,
     childCreatePlan: {
       version: RECONCILIATION_VERSION,
+      mode,
       sender: operationContext.from,
+      simulationRootAddress,
       attempts: plannedAttempts,
       counterBases,
       counterFinals,
@@ -263,14 +348,19 @@ function receiptCreations(receipt, nativeTransactionId) {
   }
   let internalCreations;
   try {
-    internalCreations = internalCreateTransactions(receipt);
+    internalCreations = internalCreateAttempts(receipt);
   } catch (error) {
     throw new CreateReconciliationError('CHILD_CREATE_MISMATCH', error.message, { cause: error });
   }
   return internalCreations.map((transaction, index) => ({
     index,
     callerAddress: normalizeAddress(transaction.callerAddress, 'receipt internal caller'),
-    actualAddress: normalizeAddress(transaction.transferToAddress, 'receipt internal creation'),
+    actualAddress: normalizeAddress(
+      transaction.transferToAddress,
+      'receipt internal creation',
+      transaction.rejected === true,
+    ),
+    success: transaction.rejected !== true,
   }));
 }
 
@@ -294,6 +384,12 @@ function assertTopLevelReceipt(record, receipt) {
     });
   }
   const context = record.operationContext;
+  if (receipt.status !== '0x1') {
+    throw new CreateReconciliationError(
+      'TOP_LEVEL_RECEIPT_MISMATCH',
+      'Confirmed native transaction was not successful',
+    );
+  }
   if (normalizeReceiptHash(receipt.transactionHash) !== record.sourceTransactionHash || from !== context.from) {
     throw new CreateReconciliationError(
       'TOP_LEVEL_RECEIPT_MISMATCH',
@@ -412,25 +508,51 @@ class CreateReconciler {
           );
         }
         assertTopLevelReceipt(record, receipt);
-        const successful = record.childCreatePlan.attempts.filter(attempt => attempt.success);
+        const attempts = record.childCreatePlan.attempts;
         const creations = receiptCreations(receipt, record.nativeTransactionId);
-        if (successful.length !== creations.length) {
+        if (attempts.length !== creations.length) {
           throw new CreateReconciliationError(
             'CHILD_CREATE_MISMATCH',
-            `Simulation expected ${successful.length} internal creations but receipt contained ${creations.length}`,
+            `Simulation expected ${attempts.length} internal CREATE attempts but receipt contained ${creations.length}`,
           );
         }
-        for (let index = 0; index < successful.length; index += 1) {
+        const predictedToReceiptActual = new Map();
+        predictedToReceiptActual.set(record.childCreatePlan.sender, record.childCreatePlan.sender);
+        const predictedRoot =
+          record.operationContext.kind === 'deployment'
+            ? record.operationContext.predictedContractAddress
+            : record.operationContext.to;
+        predictedToReceiptActual.set(predictedRoot, record.operationContext.actualTarget);
+        const indexes = requireIndexes(chain);
+        for (const attempt of attempts) {
+          const persisted = indexes.byPredicted[attempt.predictedCaller];
+          if (!predictedToReceiptActual.has(attempt.predictedCaller) && persisted !== undefined) {
+            predictedToReceiptActual.set(attempt.predictedCaller, persisted.actual);
+          }
+        }
+        for (let index = 0; index < attempts.length; index += 1) {
+          const planned = attempts[index];
+          const creation = creations[index];
+          const expectedCaller = predictedToReceiptActual.get(planned.predictedCaller);
+          const exactMismatch =
+            record.childCreatePlan.mode === 'exact-signed' &&
+            (planned.actualCaller !== creation.callerAddress ||
+              planned.simulatedActualAddress !== creation.actualAddress);
           if (
-            successful[index].actualCaller !== creations[index].callerAddress ||
-            successful[index].simulatedActualAddress !== creations[index].actualAddress
+            planned.success !== creation.success ||
+            expectedCaller === undefined ||
+            expectedCaller !== creation.callerAddress ||
+            exactMismatch
           ) {
             throw new CreateReconciliationError(
               'CHILD_CREATE_MISMATCH',
-              `Receipt internal creation order differs at successful attempt ${index}`,
+              `Receipt internal CREATE topology differs at attempt ${index}`,
             );
           }
+          if (planned.success) predictedToReceiptActual.set(planned.predictedAddress, creation.actualAddress);
         }
+        const successful = attempts.filter(attempt => attempt.success);
+        const successfulCreations = creations.filter(creation => creation.success);
 
         const reconciliation = requireReconciliation(chain);
         for (const [caller, base] of Object.entries(record.childCreatePlan.counterBases)) {
@@ -463,7 +585,7 @@ class CreateReconciler {
         }
         for (let index = 0; index < successful.length; index += 1) {
           const planned = successful[index];
-          const creation = creations[index];
+          const creation = successfulCreations[index];
           setMappingInChain(chain, {
             predicted: planned.predictedAddress,
             actual: creation.actualAddress,

@@ -52,7 +52,24 @@ function nativeTransaction() {
 }
 
 function simulation(attempts) {
-  return { nativeTransactionId: NATIVE_TXID, traceComplete: true, childCreateAttempts: attempts };
+  return {
+    mode: 'exact-signed',
+    nativeTransactionId: NATIVE_TXID,
+    simulationRootAddress: ROOT_ACTUAL,
+    traceComplete: true,
+    childCreateAttempts: attempts,
+  };
+}
+
+function payloadSimulation(attempts, overrides = {}) {
+  return {
+    mode: 'constant-create',
+    nativeTransactionId: NATIVE_TXID,
+    simulationRootAddress: `0x${'77'.repeat(20)}`,
+    traceComplete: true,
+    childCreateAttempts: attempts,
+    ...overrides,
+  };
 }
 
 function attempt(callerAddress, createdAddress, success = true) {
@@ -85,12 +102,12 @@ function receipt(creations) {
     tron: {
       nativeTransactionId: NATIVE_TXID,
       actualContractAddress: ROOT_ACTUAL,
-      internalTransactions: creations.map((actual, index) => ({
+      internalTransactions: creations.map((entry, index) => ({
         hash: `0x${String(index + 1).padStart(64, '0')}`,
-        callerAddress: ROOT_ACTUAL,
-        transferToAddress: actual,
+        callerAddress: typeof entry === 'string' ? ROOT_ACTUAL : (entry.callerAddress ?? ROOT_ACTUAL),
+        transferToAddress: typeof entry === 'string' ? entry : entry.actualAddress,
         note: 'create',
-        rejected: false,
+        rejected: typeof entry === 'string' ? false : entry.rejected === true,
         callValueInfo: [],
       })),
     },
@@ -127,7 +144,10 @@ test('advances caller nonces for failed attempts and maps successful children in
     attempt(ROOT_ACTUAL, CHILD_ACTUAL_2),
   ];
   const plan = prepareAndBroadcast(journal, reconciler, attempts);
-  const confirmed = reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1, CHILD_ACTUAL_2]));
+  const confirmed = reconciler.reconcile(
+    SOURCE_HASH,
+    receipt([{ actualAddress: `0x${'00'.repeat(20)}`, rejected: true }, CHILD_ACTUAL_1, CHILD_ACTUAL_2]),
+  );
   const first = getCreateAddress({ from: ROOT_PREDICTED, nonce: 2 }).toLowerCase();
   const second = getCreateAddress({ from: ROOT_PREDICTED, nonce: 3 }).toLowerCase();
 
@@ -143,6 +163,99 @@ test('advances caller nonces for failed attempts and maps successful children in
   assert.equal(addressMap.toActual(second), CHILD_ACTUAL_2);
   assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 4n);
   assert.equal(confirmed.state, 'confirmed');
+});
+
+test('persists payload-relative mode, normalizes its synthetic root, and binds only confirmed actual children', t => {
+  const { addressMap, journal, reconciler } = fixture(t);
+  const syntheticRoot = `0x${'77'.repeat(20)}`;
+  const syntheticChild = `0x${'88'.repeat(20)}`;
+  const predictedAdmin = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 }).toLowerCase();
+  const prepared = reconciler.recordPreparedNative(
+    SOURCE_HASH,
+    nativeTransaction(),
+    payloadSimulation([attempt(syntheticRoot, syntheticChild)]),
+    context(),
+  );
+
+  assert.equal(prepared.childCreatePlan.mode, 'constant-create');
+  assert.equal(prepared.childCreatePlan.simulationRootAddress, syntheticRoot);
+  assert.equal(prepared.childCreatePlan.attempts[0].predictedCaller, ROOT_PREDICTED);
+  assert.equal(addressMap.resolveActual(syntheticChild), undefined);
+  journal.recordBroadcast(SOURCE_HASH);
+  reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1]));
+
+  assert.equal(addressMap.toActual(predictedAdmin), CHILD_ACTUAL_1);
+  assert.equal(addressMap.resolveActual(syntheticChild), undefined);
+});
+
+test('fails closed outside the distinguishable stock constant-simulation CREATE profile', t => {
+  const cases = [
+    {
+      name: 'transparent proxy missing its ProxyAdmin',
+      operationContext: context(),
+      attempts: [],
+    },
+    {
+      name: 'transparent proxy extra child',
+      operationContext: context(),
+      attempts: [
+        attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`),
+        attempt(`0x${'77'.repeat(20)}`, `0x${'89'.repeat(20)}`),
+      ],
+    },
+    {
+      name: 'ordinary deployment child',
+      operationContext: context({
+        contractKind: 'contract',
+        artifactIdentity: { sourceName: 'src/A.sol', contractName: 'A', fullyQualifiedName: 'src/A.sol:A' },
+      }),
+      attempts: [attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`)],
+    },
+    {
+      name: 'call child',
+      operationContext: context({ kind: 'call', to: ROOT_PREDICTED, predictedContractAddress: null }),
+      attempts: [attempt(ROOT_ACTUAL, `0x${'88'.repeat(20)}`)],
+      simulationOverrides: { mode: 'constant-call', simulationRootAddress: ROOT_ACTUAL },
+    },
+  ];
+
+  for (const item of cases) {
+    const { journal, reconciler } = fixture(t);
+    assert.throws(
+      () =>
+        reconciler.recordPreparedNative(
+          SOURCE_HASH,
+          nativeTransaction(),
+          payloadSimulation(item.attempts, item.simulationOverrides),
+          item.operationContext,
+        ),
+      error => error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
+      item.name,
+    );
+    assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  }
+});
+
+test('compares every exact CREATE attempt status and requires a successful top-level receipt', t => {
+  const { journal, reconciler } = fixture(t);
+  prepareAndBroadcast(journal, reconciler, [
+    attempt(ROOT_ACTUAL, CHILD_ACTUAL_1, true),
+    attempt(ROOT_ACTUAL, CHILD_ACTUAL_2, false),
+  ]);
+  const statusMismatch = receipt([CHILD_ACTUAL_1, { actualAddress: CHILD_ACTUAL_2, rejected: false }]);
+  assert.throws(
+    () => reconciler.reconcile(SOURCE_HASH, statusMismatch),
+    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
+  );
+
+  const other = fixture(t);
+  prepareAndBroadcast(other.journal, other.reconciler, []);
+  const reverted = receipt([]);
+  reverted.status = '0x0';
+  assert.throws(
+    () => other.reconciler.reconcile(SOURCE_HASH, reverted),
+    error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+  );
 });
 
 test('uses provisional successful child mappings for nested callers and starts each new contract at nonce 1', t => {

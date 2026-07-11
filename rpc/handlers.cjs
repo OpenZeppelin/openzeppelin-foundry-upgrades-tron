@@ -147,7 +147,15 @@ function validateDependencies(options) {
     [
       'native client',
       options.nativeClient,
-      ['buildCreate', 'buildCall', 'simulateSigned', 'broadcastSigned', 'getTransaction', 'waitForReceipt'],
+      [
+        'assertSimulationReady',
+        'buildCreate',
+        'buildCall',
+        'simulateSigned',
+        'broadcastSigned',
+        'getTransaction',
+        'waitForReceipt',
+      ],
     ],
     ['upstream JSON-RPC client', options.upstream, ['request']],
   ]) {
@@ -415,6 +423,7 @@ function createRpcHandlers(rawOptions) {
 
   async function processClaimed(raw, sourceHash) {
     try {
+      await nativeClient.assertSimulationReady();
       const decoded = decode(raw, { expectedSender: config.expectedSender, expectedChainId: config.chainId });
       let built;
       let operationContext;
@@ -473,7 +482,11 @@ function createRpcHandlers(rawOptions) {
         signedNativeTransaction: built.signedNativeTransaction,
         nativeTransactionId: built.nativeTransactionId,
       };
-      const simulation = await nativeClient.simulateSigned(native.signedNativeTransaction, native.nativeTransactionId);
+      const simulation = await nativeClient.simulateSigned(
+        native.signedNativeTransaction,
+        native.nativeTransactionId,
+        built.transaction,
+      );
       const prepared = reconciler.recordPreparedNative(sourceHash, native, simulation, operationContext);
       await nativeClient.broadcastSigned(prepared.signedNativeTransaction, prepared.nativeTransactionId);
       const broadcast = journal.recordBroadcast(sourceHash);

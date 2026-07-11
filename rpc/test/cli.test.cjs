@@ -137,6 +137,12 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
     signals.emit('SIGTERM');
     return result;
   };
+  const nativeClient = {
+    async assertSimulationReady() {
+      events.push('probe');
+      return 'constant-create';
+    },
+  };
 
   const exitCode = await run(['start'], {
     environment: { TRON_PRIVATE_KEY: PRIVATE_KEY },
@@ -149,18 +155,19 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
       assert.equal(options.host, '127.0.0.1');
       assert.equal(options.port, 8545);
       events.push('compose');
-      return { server };
+      return { server, nativeClient };
     },
   });
 
   assert.equal(exitCode, 0);
-  assert.deepEqual(events, ['compose', 'start', 'stop']);
+  assert.deepEqual(events, ['compose', 'probe', 'start', 'stop']);
   assert.equal(stderr.read(), '');
   assert.deepEqual(JSON.parse(stdout.read()), {
     chainIdentity: 'tre:728126428',
     foundryOut: '/absolute/out',
     host: '127.0.0.1',
     port: 18545,
+    simulationMode: 'constant-create',
     stateFile: '/absolute/state.json',
     status: 'ready',
   });
@@ -195,7 +202,7 @@ test('keeps both signal handlers installed throughout draining and still stops o
     stderr: output().stream,
     signalTarget: signals,
     parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
-    runtimeFactory: () => ({ server }),
+    runtimeFactory: () => ({ server, nativeClient: { assertSimulationReady: async () => 'exact-signed' } }),
   });
   await new Promise(resolve => setImmediate(resolve));
 
@@ -255,12 +262,44 @@ test('accepts explicit non-loopback opt-in and strict canonical ports', async ()
     parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
     runtimeFactory: (_config, options) => {
       assert.deepEqual({ host: options.host, port: options.port }, { host: '0.0.0.0', port: 9545 });
-      return { server };
+      return { server, nativeClient: { assertSimulationReady: async () => 'constant-create' } };
     },
   });
 
   assert.equal(exitCode, 0);
   assert.equal(seen.length, 1);
+});
+
+test('does not open the listener when the bounded simulation readiness probe fails', async () => {
+  const stderr = output();
+  let starts = 0;
+  let stops = 0;
+  const exitCode = await run(['start'], {
+    environment: {},
+    stdout: output().stream,
+    stderr: stderr.stream,
+    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    runtimeFactory: () => ({
+      nativeClient: {
+        async assertSimulationReady() {
+          throw new Error('ordered successful and rejected CREATE attempts unavailable');
+        },
+      },
+      server: {
+        async start() {
+          starts += 1;
+        },
+        async stop() {
+          stops += 1;
+        },
+      },
+    }),
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(starts, 0);
+  assert.equal(stops, 1);
+  assert.match(stderr.read(), /ordered successful and rejected CREATE/i);
 });
 
 test('rejects unknown commands, flags, duplicate flags, operands, and CLI secrets', async () => {

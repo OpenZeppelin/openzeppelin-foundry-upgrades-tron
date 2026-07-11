@@ -49,7 +49,9 @@ function preparation() {
     },
     childCreatePlan: {
       version: 1,
+      mode: 'exact-signed',
       sender: FROM,
+      simulationRootAddress: TO,
       attempts: [],
       counterBases: {},
       counterFinals: {},
