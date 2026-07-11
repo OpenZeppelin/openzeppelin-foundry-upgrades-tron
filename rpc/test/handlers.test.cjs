@@ -300,9 +300,45 @@ test('derives latest and pending source nonces from durable journal state withou
     jsonrpc: '2.0',
     id: 5,
     method: 'eth_getTransactionCount',
-    params: [WALLET.address, '0x1'],
+    params: [WALLET.address, '0x01'],
   });
   assert.equal(unsupported.error.code, -32602);
+});
+
+test('derives historical source nonces from confirmed journal receipts at canonical block quantities', async t => {
+  const raw = await signedTransaction({ nonce: 3 });
+  const result = fixture(t, { sourceHash: keccak256(raw) });
+  await result.handlers.dispatch('eth_sendRawTransaction', [raw]);
+
+  const count = async (block, address = WALLET.address) =>
+    (
+      await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getTransactionCount',
+        params: [address, block],
+      })
+    ).result;
+
+  assert.equal(await count('0x0'), '0x0');
+  assert.equal(await count('0x29'), '0x0');
+  assert.equal(await count('0x2a'), '0x4');
+  assert.equal(await count('0x2b'), '0x4');
+  assert.equal(await count('0x2a', TARGET), '0x0');
+  assert.equal(
+    result.calls.some(call => call.type === 'upstream'),
+    false,
+  );
+
+  for (const block of ['0x', '0x00', '0x01', '0x2A', 'safe', 'finalized']) {
+    const response = await result.handlers.handle({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'eth_getTransactionCount',
+      params: [WALLET.address, block],
+    });
+    assert.equal(response.error.code, -32602, block);
+  }
 });
 
 test('normalizes the stock TRE empty state root before Forge deserializes a block', async t => {

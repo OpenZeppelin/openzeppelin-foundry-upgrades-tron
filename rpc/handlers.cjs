@@ -277,8 +277,15 @@ function virtualTransactionCount(
 ) {
   const sender = normalizeEvmAddress(address, 'transaction-count address');
   const expected = normalizeEvmAddress(expectedSender, 'configured sender');
+  let historicalBlock;
   if (!['earliest', 'latest', 'pending'].includes(blockTag)) {
-    throw new RpcError(-32602, 'Only earliest, latest, and pending transaction counts are supported');
+    if (typeof blockTag !== 'string' || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(blockTag)) {
+      throw new RpcError(
+        -32602,
+        'Transaction count block must be earliest, latest, pending, or a canonical block quantity',
+      );
+    }
+    historicalBlock = BigInt(blockTag);
   }
   if (blockTag === 'earliest' || sender !== expected) return '0x0';
 
@@ -303,10 +310,15 @@ function virtualTransactionCount(
     } else {
       continue;
     }
-    const included =
-      blockTag === 'pending' ||
-      record.state === 'confirmed' ||
-      (record.state === 'failed' && record.receipt !== undefined);
+    const finalized = record.state === 'confirmed' || (record.state === 'failed' && record.receipt !== undefined);
+    let included = blockTag === 'pending' || finalized;
+    if (included && historicalBlock !== undefined) {
+      const receiptBlock = record.receipt?.blockNumber;
+      if (typeof receiptBlock !== 'string' || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(receiptBlock)) {
+        throw new Error('Confirmed journal receipt has an invalid block number');
+      }
+      included = BigInt(receiptBlock) <= historicalBlock;
+    }
     if (included && from === expected && nonce >= next) next = nonce + 1n;
   }
   return quantity(next);
