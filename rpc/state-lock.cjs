@@ -91,7 +91,7 @@ function proofFor(stateId, nonce) {
 }
 
 function createLockServer(stateId, sockets) {
-  return net.createServer(socket => {
+  const server = net.createServer(socket => {
     sockets.add(socket);
     socket.setEncoding('utf8');
     socket.setTimeout(DEFAULT_PROBE_TIMEOUT_MS, () => socket.destroy());
@@ -119,6 +119,10 @@ function createLockServer(stateId, sockets) {
     socket.on('close', () => sockets.delete(socket));
     socket.on('error', () => {});
   });
+  // A persistent listener prevents an unexpected post-listen error from being
+  // raised without a handler while acquisition is still scanning candidates.
+  server.on('error', () => {});
+  return server;
 }
 
 async function bindCandidate(port, stateId, sockets) {
@@ -178,12 +182,35 @@ async function probeCandidate(port, stateId, timeoutMs) {
   });
 }
 
+async function closeReservations(servers, sockets) {
+  for (const socket of sockets) {
+    socket.destroy();
+  }
+
+  const results = await Promise.allSettled(
+    servers.map(
+      server =>
+        new Promise((resolve, reject) => {
+          if (!server.listening) {
+            resolve();
+            return;
+          }
+          server.close(error => (error === undefined ? resolve() : reject(error)));
+        }),
+    ),
+  );
+  const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+  if (errors.length > 0) {
+    throw new AggregateError(errors, 'Failed to release every state lock reservation');
+  }
+}
+
 function assertStateLockHeld(capability) {
   const record = capabilityRecords.get(capability);
   if (record === undefined) {
     throw new Error('Expected an authentic state lock capability');
   }
-  if (!record.held || !record.server.listening) {
+  if (!record.held || record.servers.some(server => !server.listening)) {
     throw new Error('State lock is no longer held');
   }
   return capability;
@@ -199,22 +226,17 @@ async function releaseStateLock(capability) {
   }
 
   record.held = false;
-  for (const socket of record.sockets) {
-    socket.destroy();
-  }
-
-  if (record.server.listening) {
-    await new Promise((resolve, reject) => {
-      record.server.close(error => (error === undefined ? resolve() : reject(error)));
-    });
-  }
+  record.closing = true;
+  await closeReservations(record.servers, record.sockets);
 }
 
-function createCapability(server, sockets, port) {
+function createCapability(servers, sockets) {
+  const ports = Object.freeze(servers.map(server => server.address().port));
   let capability;
   capability = Object.freeze({
     ownerId: crypto.randomBytes(32).toString('hex'),
-    port,
+    port: ports[0],
+    ports,
     assertHeld() {
       return assertStateLockHeld(capability);
     },
@@ -223,15 +245,21 @@ function createCapability(server, sockets, port) {
     },
   });
 
-  const record = { held: true, server, sockets };
+  const record = { closing: false, held: true, servers, sockets };
   capabilityRecords.set(capability, record);
-  server.once('close', () => {
+  const invalidate = () => {
+    if (!record.held || record.closing) {
+      return;
+    }
     record.held = false;
-  });
-  server.on('error', () => {
-    record.held = false;
-  });
-  server.unref();
+    record.closing = true;
+    void closeReservations(record.servers, record.sockets).catch(() => {});
+  };
+  for (const server of servers) {
+    server.once('close', invalidate);
+    server.on('error', invalidate);
+    server.unref();
+  }
   return capability;
 }
 
@@ -247,19 +275,34 @@ async function acquireStateLock(statePath, options = {}) {
       : validateCandidatePorts(options.candidatePorts);
   const probeTimeoutMs = validateProbeTimeout(options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
 
-  for (const port of candidatePorts) {
-    const sockets = new Set();
-    const server = await bindCandidate(port, stateId, sockets);
-    if (server !== undefined) {
-      return createCapability(server, sockets, port);
+  const servers = [];
+  const sockets = new Set();
+  try {
+    for (const port of candidatePorts) {
+      const server = await bindCandidate(port, stateId, sockets);
+      if (server !== undefined) {
+        servers.push(server);
+        continue;
+      }
+
+      if (await probeCandidate(port, stateId, probeTimeoutMs)) {
+        throw new Error('State is already locked by another adapter process');
+      }
     }
 
-    if (await probeCandidate(port, stateId, probeTimeoutMs)) {
-      throw new Error('State is already locked by another adapter process');
+    if (servers.length === 0) {
+      throw new Error('Unable to acquire the state lock because all 8 candidate ports are occupied');
     }
+
+    return createCapability(servers, sockets);
+  } catch (error) {
+    try {
+      await closeReservations(servers, sockets);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'State lock acquisition and cleanup both failed');
+    }
+    throw error;
   }
-
-  throw new Error('Unable to acquire the state lock because all 8 candidate ports are occupied');
 }
 
 module.exports = {

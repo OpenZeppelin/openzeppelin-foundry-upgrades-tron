@@ -33,8 +33,8 @@ async function close(server) {
   });
 }
 
-async function freeCandidatePorts() {
-  const servers = Array.from({ length: 8 }, () => net.createServer());
+async function freeCandidatePorts(count = 8) {
+  const servers = Array.from({ length: count }, () => net.createServer());
   const ports = [];
   try {
     for (const server of servers) {
@@ -114,15 +114,63 @@ test('canonicalizes relative and symlinked aliases before locking', async t => {
 
 test('uses the next candidate when different states deterministically collide', async t => {
   const directory = temporaryDirectory(t);
-  const candidatePorts = await freeCandidatePorts();
-  const first = await acquireStateLock(path.join(directory, 'first.json'), { candidatePorts });
-  const second = await acquireStateLock(path.join(directory, 'second.json'), { candidatePorts });
+  const ports = await freeCandidatePorts(15);
+  const firstCandidates = ports.slice(0, 8);
+  const secondCandidates = [ports[0], ...ports.slice(8)];
+  const first = await acquireStateLock(path.join(directory, 'first.json'), { candidatePorts: firstCandidates });
+  const second = await acquireStateLock(path.join(directory, 'second.json'), { candidatePorts: secondCandidates });
   t.after(() => Promise.all([first.release(), second.release()]));
 
-  assert.equal(first.port, candidatePorts[0]);
-  assert.equal(second.port, candidatePorts[1]);
+  assert.deepEqual(first.ports, firstCandidates);
+  assert.deepEqual(second.ports, secondCandidates.slice(1));
+  assert.equal(first.port, firstCandidates[0]);
+  assert.equal(second.port, secondCandidates[1]);
   assertStateLockHeld(first);
   assertStateLockHeld(second);
+});
+
+test('refuses a duplicate after changing foreign occupancy exposes an earlier candidate', async t => {
+  const statePath = path.join(temporaryDirectory(t), 'adapter-state.json');
+  const candidatePorts = await freeCandidatePorts();
+  const foreignSockets = new Set();
+  const foreign = net.createServer(socket => {
+    foreignSockets.add(socket);
+    socket.on('close', () => foreignSockets.delete(socket));
+    socket.end('foreign-listener\n');
+  });
+  await listen(foreign, candidatePorts[0]);
+
+  const first = await acquireStateLock(statePath, { candidatePorts, probeTimeoutMs: 50 });
+  assert.equal(first.port, candidatePorts[1]);
+  for (const socket of foreignSockets) {
+    socket.destroy();
+  }
+  await close(foreign);
+
+  await assert.rejects(acquireStateLock(statePath, { candidatePorts, probeTimeoutMs: 50 }), /state is already locked/i);
+
+  await first.release();
+  const reacquired = await acquireStateLock(statePath, { candidatePorts, probeTimeoutMs: 50 });
+  t.after(() => reacquired.release());
+  assert.equal(reacquired.port, candidatePorts[0]);
+});
+
+test('grants exactly one capability to simultaneous same-state contenders', async t => {
+  const statePath = path.join(temporaryDirectory(t), 'adapter-state.json');
+  const candidatePorts = await freeCandidatePorts();
+  const results = await Promise.allSettled(
+    Array.from({ length: 6 }, () => acquireStateLock(statePath, { candidatePorts, probeTimeoutMs: 50 })),
+  );
+  const acquired = results.filter(result => result.status === 'fulfilled').map(result => result.value);
+  const refused = results.filter(result => result.status === 'rejected');
+  t.after(() => Promise.all(acquired.map(lock => lock.release())));
+
+  assert.equal(acquired.length, 1);
+  assert.equal(refused.length, 5);
+  for (const result of refused) {
+    assert.match(result.reason.message, /state is already locked/i);
+  }
+  assertStateLockHeld(acquired[0]);
 });
 
 test('release invalidates the authentic capability and permits reacquisition', async t => {
