@@ -103,6 +103,40 @@ test('does not commit a transaction whose callback throws', t => {
   assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { stable: true });
 });
 
+test('does not commit before validating and cloning the callback result', t => {
+  const statePath = temporaryState(t);
+  const store = new JsonStore(statePath);
+  store.transaction('chain-a', chain => {
+    chain.stable = true;
+  });
+
+  assert.throws(() =>
+    store.transaction('chain-a', chain => {
+      chain.uncloneable = true;
+      return () => {};
+    }),
+  );
+  assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { stable: true });
+});
+
+test('rejects asynchronous transaction callbacks without committing their draft', t => {
+  const statePath = temporaryState(t);
+  const store = new JsonStore(statePath);
+  store.transaction('chain-a', chain => {
+    chain.stable = true;
+  });
+
+  assert.throws(
+    () =>
+      store.transaction('chain-a', chain => {
+        chain.asynchronous = true;
+        return Promise.resolve('result');
+      }),
+    /synchronous/i,
+  );
+  assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { stable: true });
+});
+
 test('rejects unsafe chain identities', t => {
   const store = new JsonStore(temporaryState(t));
   for (const chain of ['', ' chain', '__proto__', 'constructor']) {

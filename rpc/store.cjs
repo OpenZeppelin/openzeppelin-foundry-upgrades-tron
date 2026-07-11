@@ -80,9 +80,18 @@ class JsonStore {
     }
 
     const result = callback(state.chains[key]);
+    if (
+      result !== null &&
+      (typeof result === 'object' || typeof result === 'function') &&
+      typeof result.then === 'function'
+    ) {
+      Promise.resolve(result).catch(() => {});
+      throw new Error('State transaction callbacks must be synchronous');
+    }
+    const clonedResult = clone(result);
     validateState(state);
     this._writeState(state);
-    return clone(result);
+    return clonedResult;
   }
 
   _readState() {
