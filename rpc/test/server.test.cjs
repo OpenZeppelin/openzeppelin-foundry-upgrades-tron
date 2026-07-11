@@ -305,9 +305,15 @@ test('suppresses handler and serialization failures for notification-only payloa
 test('returns fallback errors only for response-bearing items in a mixed batch', async t => {
   const payload = [
     { jsonrpc: '2.0', method: 'notify' },
+    { jsonrpc: '2.0', method: '', unexpected: true },
     { jsonrpc: '2.0', id: 9, method: 'query' },
   ];
   const expected = [
+    {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32_603, message: 'Internal error' },
+    },
     {
       jsonrpc: '2.0',
       id: 9,
@@ -333,6 +339,32 @@ test('returns fallback errors only for response-bearing items in a mixed batch',
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(JSON.parse(response.body), expected);
+  }
+});
+
+test('does not suppress malformed no-id objects on fallback failures', async t => {
+  const payload = { jsonrpc: '2.0', method: '', unexpected: true };
+  const headers = { 'content-type': 'application/json' };
+
+  for (const failure of ['handler', 'serialization']) {
+    const server = await startedServer(t, {
+      handlers: fakeHandlers({
+        async handle() {
+          if (failure === 'handler') throw new Error('private failure');
+          const circular = {};
+          circular.result = circular;
+          return circular;
+        },
+      }),
+    });
+    const response = await request(server.address(), { body: JSON.stringify(payload), headers });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.body), {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32_603, message: 'Internal error' },
+    });
   }
 });
 

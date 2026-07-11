@@ -213,7 +213,13 @@ function isNotification(payload) {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
     return false;
   }
-  if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string') {
+  const keys = Object.keys(payload);
+  if (
+    keys.some(key => !['jsonrpc', 'method', 'params'].includes(key)) ||
+    payload.jsonrpc !== '2.0' ||
+    typeof payload.method !== 'string' ||
+    payload.method.length === 0
+  ) {
     return false;
   }
   if (Object.prototype.hasOwnProperty.call(payload, 'id')) {
@@ -222,7 +228,10 @@ function isNotification(payload) {
   if (!Object.prototype.hasOwnProperty.call(payload, 'params')) {
     return true;
   }
-  return payload.params !== null && typeof payload.params === 'object';
+  return (
+    Array.isArray(payload.params) ||
+    (payload.params !== null && typeof payload.params === 'object' && !Array.isArray(payload.params))
+  );
 }
 
 function internalFailure(payload) {
