@@ -22,11 +22,7 @@ const RECONCILIATION_VERSION = 1;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const TRANSPARENT_PROXY_SUFFIX =
   'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy';
-const PROXY_ADMIN_IDENTITY = Object.freeze({
-  sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
-  contractName: 'ProxyAdmin',
-  fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
-});
+const TRANSPARENT_PROXY_FILE = 'TransparentUpgradeableProxy.sol';
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -89,9 +85,48 @@ function proxyAdminMetadata(callerMetadata) {
     callerMetadata?.contractKind === 'transparent-proxy' ||
     callerMetadata?.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX)
   ) {
-    return { contractKind: 'proxy-admin', artifactIdentity: PROXY_ADMIN_IDENTITY };
+    const callerIdentity = callerMetadata.artifactIdentity;
+    if (!callerIdentity.sourceName.endsWith(TRANSPARENT_PROXY_FILE)) {
+      throw new CreateReconciliationError(
+        'INVALID_TRANSPARENT_PROXY_METADATA',
+        'Transparent proxy artifact identity cannot derive its ProxyAdmin child',
+      );
+    }
+    const sourceName = `${callerIdentity.sourceName.slice(0, -TRANSPARENT_PROXY_FILE.length)}ProxyAdmin.sol`;
+    return {
+      contractKind: 'proxy-admin',
+      artifactIdentity: {
+        sourceName,
+        contractName: 'ProxyAdmin',
+        fullyQualifiedName: `${sourceName}:ProxyAdmin`,
+      },
+    };
   }
   return undefined;
+}
+
+function assertChildMappingAvailable(chain, indexes, predictedAddress, actualAddress, childMetadata) {
+  const existingPredicted = indexes.byPredicted[predictedAddress];
+  const existingActual = indexes.byActual[actualAddress];
+  if (existingPredicted !== undefined && childMetadata !== undefined) {
+    const existingMetadata = resolveContractMetadataInChain(chain, predictedAddress);
+    if (
+      existingMetadata !== undefined &&
+      (existingMetadata.contractKind !== childMetadata.contractKind ||
+        JSON.stringify(existingMetadata.artifactIdentity) !== JSON.stringify(childMetadata.artifactIdentity))
+    ) {
+      throw new CreateReconciliationError(
+        'CHILD_CREATE_SIMULATION_CONFLICT',
+        `Simulated child metadata conflicts with ${predictedAddress}`,
+      );
+    }
+  }
+  if (existingPredicted !== undefined || existingActual !== undefined) {
+    throw new CreateReconciliationError(
+      'CHILD_CREATE_SIMULATION_CONFLICT',
+      `Simulated child mapping conflicts with persisted address state for ${predictedAddress}`,
+    );
+  }
 }
 
 function validateSimulation(simulation, nativeTransactionId) {
@@ -179,7 +214,10 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     nextByCaller.set(caller.predicted, nonce + 1n);
     const predictedAddress = getCreateAddress({ from: caller.predicted, nonce }).toLowerCase();
     const childMetadata = rawAttempt.success ? proxyAdminMetadata(caller.metadata) : undefined;
-    if (rawAttempt.success) addCaller(simulatedActualAddress, predictedAddress, childMetadata);
+    if (rawAttempt.success) {
+      assertChildMappingAvailable(chain, indexes, predictedAddress, simulatedActualAddress, childMetadata);
+      addCaller(simulatedActualAddress, predictedAddress, childMetadata);
+    }
     return {
       index,
       actualCaller,
@@ -228,6 +266,74 @@ function receiptCreations(receipt, nativeTransactionId) {
     callerAddress: normalizeAddress(transaction.callerAddress, 'receipt internal caller'),
     actualAddress: normalizeAddress(transaction.transferToAddress, 'receipt internal creation'),
   }));
+}
+
+function normalizeReceiptHash(value) {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/i.test(value)) {
+    throw new CreateReconciliationError('TOP_LEVEL_RECEIPT_MISMATCH', 'Receipt source transaction hash is invalid');
+  }
+  return value.toLowerCase();
+}
+
+function assertTopLevelReceipt(record, receipt) {
+  if (!isObject(receipt) || !isObject(receipt.tron)) {
+    throw new CreateReconciliationError('TOP_LEVEL_RECEIPT_MISMATCH', 'Confirmed receipt shape is invalid');
+  }
+  let from;
+  try {
+    from = toEvmAddress(receipt.from);
+  } catch (error) {
+    throw new CreateReconciliationError('TOP_LEVEL_RECEIPT_MISMATCH', 'Confirmed receipt sender is invalid', {
+      cause: error,
+    });
+  }
+  const context = record.operationContext;
+  if (normalizeReceiptHash(receipt.transactionHash) !== record.sourceTransactionHash || from !== context.from) {
+    throw new CreateReconciliationError(
+      'TOP_LEVEL_RECEIPT_MISMATCH',
+      'Confirmed receipt does not match its source transaction and sender',
+    );
+  }
+  if (context.kind === 'deployment') {
+    let predictedContractAddress;
+    let actualContractAddress;
+    try {
+      predictedContractAddress = toEvmAddress(receipt.contractAddress);
+      actualContractAddress = toEvmAddress(receipt.tron.actualContractAddress);
+    } catch (error) {
+      throw new CreateReconciliationError(
+        'TOP_LEVEL_RECEIPT_MISMATCH',
+        'Confirmed deployment receipt addresses are invalid',
+        { cause: error },
+      );
+    }
+    if (
+      receipt.to !== null ||
+      predictedContractAddress !== context.predictedContractAddress ||
+      actualContractAddress !== context.actualTarget
+    ) {
+      throw new CreateReconciliationError(
+        'TOP_LEVEL_RECEIPT_MISMATCH',
+        'Confirmed deployment receipt does not match its predicted and actual addresses',
+      );
+    }
+    return;
+  }
+
+  let to;
+  try {
+    to = toEvmAddress(receipt.to);
+  } catch (error) {
+    throw new CreateReconciliationError('TOP_LEVEL_RECEIPT_MISMATCH', 'Confirmed call target is invalid', {
+      cause: error,
+    });
+  }
+  if (to !== context.to || receipt.contractAddress !== null || receipt.tron.actualContractAddress !== null) {
+    throw new CreateReconciliationError(
+      'TOP_LEVEL_RECEIPT_MISMATCH',
+      'Confirmed call receipt does not match its target',
+    );
+  }
 }
 
 function rewriteInternalCreations(receipt, actualToPredicted) {
@@ -299,18 +405,9 @@ class CreateReconciler {
             `Transaction in ${record.state} state cannot reconcile a receipt`,
           );
         }
+        assertTopLevelReceipt(record, receipt);
         const successful = record.childCreatePlan.attempts.filter(attempt => attempt.success);
         const creations = receiptCreations(receipt, record.nativeTransactionId);
-        if (
-          record.operationContext.kind === 'deployment' &&
-          normalizeAddress(receipt.tron.actualContractAddress, 'receipt deployment') !==
-            record.operationContext.actualTarget
-        ) {
-          throw new CreateReconciliationError(
-            'DEPLOYMENT_ADDRESS_MISMATCH',
-            'Confirmed deployment address differs from the preflight operation context',
-          );
-        }
         if (successful.length !== creations.length) {
           throw new CreateReconciliationError(
             'CHILD_CREATE_MISMATCH',

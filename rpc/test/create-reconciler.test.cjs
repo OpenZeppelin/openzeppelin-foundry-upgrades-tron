@@ -30,9 +30,9 @@ const TRANSPARENT_IDENTITY = {
     'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
 };
 const PROXY_ADMIN_IDENTITY = {
-  sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
+  sourceName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
   contractName: 'ProxyAdmin',
-  fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
+  fullyQualifiedName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
 };
 
 function fixture(t) {
@@ -79,6 +79,9 @@ function receipt(creations) {
     transactionHash: SOURCE_HASH,
     blockNumber: '0x2a',
     status: '0x1',
+    from: SENDER,
+    to: null,
+    contractAddress: ROOT_PREDICTED,
     tron: {
       nativeTransactionId: NATIVE_TXID,
       actualContractAddress: ROOT_ACTUAL,
@@ -311,21 +314,7 @@ test('retains a fatal mismatch when a receipt creation has a different caller th
   assert.equal(addressMap.list().length, 0);
 });
 
-test('retains a fatal mismatch when the deployment receipt has a different top-level actual address', t => {
-  const { addressMap, journal, reconciler } = fixture(t);
-  prepareAndBroadcast(journal, reconciler, []);
-  const mismatchedReceipt = receipt([]);
-  mismatchedReceipt.tron.actualContractAddress = CHILD_ACTUAL_3;
-
-  assert.throws(
-    () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
-    error => error instanceof CreateReconciliationError && error.code === 'DEPLOYMENT_ADDRESS_MISMATCH',
-  );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(addressMap.list().length, 0);
-});
-
-test('retains a fatal mapping conflict and atomically withholds receipt confirmation, metadata, and counters', t => {
+test('rejects a simulated child mapping conflict before native-built or broadcast', t => {
   const { addressMap, journal, reconciler } = fixture(t);
   const predicted = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 }).toLowerCase();
   addressMap.set({
@@ -335,7 +324,76 @@ test('retains a fatal mapping conflict and atomically withholds receipt confirma
     sender: SENDER,
     sourceTransaction: `0x${'ab'.repeat(32)}`,
   });
-  prepareAndBroadcast(journal, reconciler, [attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]);
+
+  assert.throws(
+    () =>
+      reconciler.recordPreparedNative(
+        SOURCE_HASH,
+        nativeTransaction(),
+        simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
+        context(),
+      ),
+    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
+  );
+  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.equal(addressMap.toActual(predicted), CHILD_ACTUAL_3);
+  assert.equal(addressMap.resolveContractMetadata(predicted), undefined);
+  assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
+});
+
+test('rejects conflicting persisted child metadata during simulation preflight', t => {
+  const { addressMap, journal, reconciler } = fixture(t);
+  const predicted = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 }).toLowerCase();
+  const previousSource = `0x${'ab'.repeat(32)}`;
+  addressMap.set({
+    predicted,
+    actual: CHILD_ACTUAL_1,
+    creator: ROOT_PREDICTED,
+    sender: SENDER,
+    sourceTransaction: previousSource,
+  });
+  addressMap.setContractMetadata({
+    predicted,
+    contractKind: 'unrelated-contract',
+    artifactIdentity: {
+      sourceName: 'contracts/Unrelated.sol',
+      contractName: 'Unrelated',
+      fullyQualifiedName: 'contracts/Unrelated.sol:Unrelated',
+    },
+    sourceTransaction: previousSource,
+  });
+
+  assert.throws(
+    () =>
+      reconciler.recordPreparedNative(
+        SOURCE_HASH,
+        nativeTransaction(),
+        simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
+        context(),
+      ),
+    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
+  );
+  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+});
+
+test('retains a conflict that appears only after successful simulation preflight', t => {
+  const { addressMap, journal, reconciler } = fixture(t);
+  const predicted = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 }).toLowerCase();
+  reconciler.recordPreparedNative(
+    SOURCE_HASH,
+    nativeTransaction(),
+    simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
+    context(),
+  );
+  addressMap.set({
+    predicted,
+    actual: CHILD_ACTUAL_3,
+    creator: ROOT_PREDICTED,
+    sender: SENDER,
+    sourceTransaction: `0x${'ab'.repeat(32)}`,
+  });
+  journal.recordBroadcast(SOURCE_HASH);
 
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1])),
@@ -344,8 +402,82 @@ test('retains a fatal mapping conflict and atomically withholds receipt confirma
   assert.equal(journal.get(SOURCE_HASH).state, 'failed');
   assert.equal(journal.get(SOURCE_HASH).receipt.tron.internalTransactions.length, 1);
   assert.equal(addressMap.toActual(predicted), CHILD_ACTUAL_3);
-  assert.equal(addressMap.resolveContractMetadata(predicted), undefined);
   assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
+});
+
+test('binds every top-level deployment receipt field before publishing mappings', async t => {
+  const mismatches = [
+    ['source hash', value => (value.transactionHash = `0x${'ff'.repeat(32)}`)],
+    ['sender', value => (value.from = CHILD_ACTUAL_3)],
+    ['to', value => (value.to = CHILD_ACTUAL_3)],
+    ['predicted contract', value => (value.contractAddress = CHILD_ACTUAL_3)],
+    ['actual contract', value => (value.tron.actualContractAddress = CHILD_ACTUAL_3)],
+  ];
+  for (const [name, mutate] of mismatches) {
+    await t.test(name, nested => {
+      const { addressMap, journal, reconciler } = fixture(nested);
+      prepareAndBroadcast(journal, reconciler, []);
+      const mismatchedReceipt = receipt([]);
+      mutate(mismatchedReceipt);
+
+      assert.throws(
+        () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
+        error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+      );
+      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+      assert.equal(addressMap.list().length, 0);
+      assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
+    });
+  }
+});
+
+test('binds every top-level call receipt field before confirmation', async t => {
+  const callContext = context({
+    kind: 'call',
+    to: ROOT_PREDICTED,
+    predictedContractAddress: null,
+    contractKind: null,
+    artifactIdentity: null,
+    provenanceHash: null,
+  });
+  const mismatches = [
+    ['source hash', value => (value.transactionHash = `0x${'ff'.repeat(32)}`)],
+    ['sender', value => (value.from = CHILD_ACTUAL_3)],
+    ['target', value => (value.to = CHILD_ACTUAL_3)],
+    ['contract address', value => (value.contractAddress = ROOT_PREDICTED)],
+  ];
+  for (const [name, mutate] of mismatches) {
+    await t.test(name, nested => {
+      const { addressMap, journal, reconciler } = fixture(nested);
+      prepareAndBroadcast(journal, reconciler, [], callContext);
+      const mismatchedReceipt = receipt([]);
+      mismatchedReceipt.to = ROOT_PREDICTED;
+      mismatchedReceipt.contractAddress = null;
+      mismatchedReceipt.tron.actualContractAddress = null;
+      mutate(mismatchedReceipt);
+
+      assert.throws(
+        () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
+        error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+      );
+      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+      assert.equal(addressMap.list().length, 0);
+    });
+  }
+});
+
+test('normalizes equivalent hash and address encodings while binding a deployment receipt', t => {
+  const { addressMap, journal, reconciler } = fixture(t);
+  prepareAndBroadcast(journal, reconciler, []);
+  const normalizedReceipt = receipt([]);
+  normalizedReceipt.transactionHash = SOURCE_HASH.toUpperCase().replace('0X', '0x');
+  normalizedReceipt.from = `41${SENDER.slice(2).toUpperCase()}`;
+  normalizedReceipt.contractAddress = ROOT_PREDICTED.toUpperCase().replace('0X', '0x');
+  normalizedReceipt.tron.actualContractAddress = `41${ROOT_ACTUAL.slice(2).toUpperCase()}`;
+
+  const confirmed = reconciler.reconcile(SOURCE_HASH, normalizedReceipt);
+  assert.equal(confirmed.state, 'confirmed');
+  assert.equal(addressMap.toActual(ROOT_PREDICTED), ROOT_ACTUAL);
 });
 
 test('refuses a stale pending plan after another confirmation advances its caller counter', t => {
