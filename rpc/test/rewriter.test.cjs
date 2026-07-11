@@ -18,6 +18,7 @@ const ACTUAL_BEACON = getAddress(`0x${'a4'.repeat(20)}`);
 const PREDICTED_LIBRARY = getAddress(`0x${'55'.repeat(20)}`);
 const ACTUAL_LIBRARY = getAddress(`0x${'a5'.repeat(20)}`);
 const UNMAPPED = getAddress(`0x${'66'.repeat(20)}`);
+const SAFE_MARKER = `0x${'fe'.repeat(32)}`;
 
 const records = [
   [PREDICTED_IMPLEMENTATION, ACTUAL_IMPLEMENTATION],
@@ -64,7 +65,7 @@ function dependencies(overrides = {}) {
   };
 }
 
-function initializerData({ owner = PREDICTED_OWNER, marker = zeroPadValue(PREDICTED_OWNER, 32) } = {}) {
+function initializerData({ owner = PREDICTED_OWNER, marker = SAFE_MARKER } = {}) {
   return new Interface(initializerAbi).encodeFunctionData('initialize', [
     owner,
     [[PREDICTED_PROXY, ACTUAL_PROXY], [UNMAPPED]],
@@ -91,7 +92,7 @@ function assertInitializerRewritten(data, expectedOwner = ACTUAL_OWNER) {
   assert.equal(decoded.matrix[0][0].at(0), ACTUAL_IMPLEMENTATION);
   assert.equal(decoded.matrix[0][1].at(0), ACTUAL_OWNER);
   assert.equal(decoded.matrix[1][0].at(0), UNMAPPED);
-  assert.equal(decoded.marker, zeroPadValue(PREDICTED_OWNER, 32));
+  assert.equal(decoded.marker, SAFE_MARKER);
 }
 
 function constructorMatch({ fullyQualifiedName, inputs, values, creationBytecode = '0x60006000', artifact = {} }) {
@@ -138,18 +139,25 @@ test('recursively rewrites direct, multidimensional, fixed-array, and tuple addr
   ]);
 });
 
-test('rewrites ABI calldata but preserves bytes32 values that look like ABI addresses', async () => {
+test('rejects fixed bytes containing predicted addresses and preserves unrelated bytes32 values', async () => {
   const abi = ['function configure(address target,address[] peers,bytes32 marker)'];
   const iface = new Interface(abi);
   const marker = zeroPadValue(PREDICTED_OWNER, 32);
   const original = iface.encodeFunctionData('configure', [PREDICTED_PROXY, [PREDICTED_OWNER], marker]);
+  await assert.rejects(rewriteCalldata(original, abi, dependencies()), /opaque|predicted/i);
 
-  const rewritten = await rewriteCalldata(original, abi, dependencies());
+  const safeMarker = `0x${'fe'.repeat(32)}`;
+  const safe = iface.encodeFunctionData('configure', [PREDICTED_PROXY, [PREDICTED_OWNER], safeMarker]);
+  const rewritten = await rewriteCalldata(safe, abi, dependencies());
   const decoded = iface.decodeFunctionData('configure', rewritten);
 
   assert.equal(decoded.target, ACTUAL_PROXY);
   assert.equal(decoded.peers[0], ACTUAL_OWNER);
-  assert.equal(decoded.marker, marker);
+  assert.equal(decoded.marker, safeMarker);
+
+  const bytes20Abi = ['function configure(bytes20 target)'];
+  const bytes20 = new Interface(bytes20Abi).encodeFunctionData('configure', [PREDICTED_OWNER]);
+  await assert.rejects(rewriteCalldata(bytes20, bytes20Abi, dependencies()), /opaque|predicted/i);
 });
 
 test('rejects malformed calldata instead of guessing a selector', async () => {

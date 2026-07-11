@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { createUpstreamClient } = require('../upstream.cjs');
+const { UpstreamRpcError, createUpstreamClient } = require('../upstream.cjs');
 
 test('posts strict JSON-RPC requests through built-in fetch transport', async () => {
   const calls = [];
@@ -62,7 +62,11 @@ test('preserves validated upstream JSON-RPC errors for handler translation', asy
 
   await assert.rejects(
     () => client.request('eth_call', []),
-    error => error.code === -32042 && error.message === 'upstream rejected' && error.data === 'reason',
+    error =>
+      error instanceof UpstreamRpcError &&
+      error.code === -32042 &&
+      error.message === 'upstream rejected' &&
+      error.data === 'reason',
   );
 });
 

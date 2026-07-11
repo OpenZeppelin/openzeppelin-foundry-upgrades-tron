@@ -13,6 +13,7 @@ const { contractKindForArtifact, createRpcHandlers, nativeContractAddress } = re
 const { TransactionJournal, recordRetainedFailureInChain } = require('../journal.cjs');
 const { acquireStateLock } = require('../state-lock.cjs');
 const { JsonStore } = require('../store.cjs');
+const { UpstreamRpcError } = require('../upstream.cjs');
 
 const PRIVATE_KEY = '11'.repeat(32);
 const WALLET = new Wallet(PRIVATE_KEY);
@@ -955,7 +956,7 @@ test('retries numbered immutable reads as latest only after the explicit stock T
       async request(method, params) {
         attempts.push({ method, params: structuredClone(params) });
         if (params.at(-1) === '0x13') {
-          throw Object.assign(new Error('QUANTITY not supported, just support TAG as latest'), { code: -32602 });
+          throw new UpstreamRpcError(-32602, 'QUANTITY not supported, just support TAG as latest');
         }
         return `${method}:latest`;
       },
@@ -986,8 +987,8 @@ test('retries numbered immutable reads as latest only after the explicit stock T
   );
 
   for (const error of [
-    Object.assign(new Error('different invalid params'), { code: -32602 }),
-    Object.assign(new Error('QUANTITY not supported, just support TAG as latest'), { code: -32000 }),
+    new UpstreamRpcError(-32602, 'different invalid params'),
+    new UpstreamRpcError(-32000, 'QUANTITY not supported, just support TAG as latest'),
   ]) {
     const isolated = fixture(t, {
       upstream: {
@@ -1163,8 +1164,8 @@ test('rejects a same-name artifact whose provenance changed after deployment', a
   );
 });
 
-test('propagates upstream JSON-RPC errors without rewriting their code or data', async t => {
-  const error = Object.assign(new Error('upstream reverted'), { code: -32042, data: { reason: 'boom' } });
+test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async t => {
+  const error = new UpstreamRpcError(-32042, 'upstream reverted', { reason: 'boom' }, true);
   const { handlers } = fixture(t, {
     upstream: {
       async request() {
@@ -1185,7 +1186,7 @@ test('does not reflect arbitrary dependency error messages to JSON-RPC clients',
   const { handlers } = fixture(t, {
     upstream: {
       async request() {
-        throw new Error(secret);
+        throw Object.assign(new Error(secret), { code: 500, data: { secret } });
       },
     },
   });

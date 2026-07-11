@@ -153,7 +153,9 @@ async function rewriteParam(param, value, deps) {
     throw new RewriteError('INVALID_ABI_VALUE', `Expected a tuple for ${param.format('sighash')}`);
   }
 
-  if (param.baseType === 'bytes') return assertOpaqueBytesSafe(value, deps);
+  if (param.baseType === 'bytes' || /^bytes(?:[1-9]|[12][0-9]|3[0-2])$/.test(param.baseType)) {
+    return assertOpaqueBytesSafe(value, deps);
+  }
   return value;
 }
 

@@ -11,6 +11,7 @@ const { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } = require('./rew
 const { assertStateLockHeld } = require('./state-lock.cjs');
 const { decodeLegacyTransaction } = require('./transactions.cjs');
 const { retryableTransportError } = require('./tron-client.cjs');
+const { UpstreamRpcError } = require('./upstream.cjs');
 
 const JSON_RPC_VERSION = '2.0';
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
@@ -199,8 +200,7 @@ function failureCode(error) {
 
 function publicError(error) {
   if (error instanceof RpcError) return error;
-  if (Number.isInteger(error?.code))
-    return new RpcError(error.code, error.message || 'Upstream JSON-RPC error', error.data);
+  if (error instanceof UpstreamRpcError) return new RpcError(error.code, error.message, error.data);
   return new RpcError(-32000, 'TRON RPC operation failed', { code: failureCode(error) });
 }
 
@@ -355,7 +355,8 @@ async function requestStockCompatibleRead(upstream, method, params, blockTag) {
     return await upstream.request(method, params);
   } catch (error) {
     const stockQuantityError =
-      error?.code === -32602 &&
+      error instanceof UpstreamRpcError &&
+      error.code === -32602 &&
       error?.message === 'QUANTITY not supported, just support TAG as latest' &&
       typeof blockTag === 'string' &&
       /^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(blockTag);

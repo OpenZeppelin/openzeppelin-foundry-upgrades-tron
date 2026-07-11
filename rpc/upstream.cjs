@@ -8,6 +8,15 @@ function own(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
+class UpstreamRpcError extends Error {
+  constructor(code, message, data, hasData = false) {
+    super(message);
+    this.name = 'UpstreamRpcError';
+    this.code = code;
+    if (hasData) this.data = data;
+  }
+}
+
 function validateEndpoint(value) {
   let endpoint;
   try {
@@ -42,10 +51,7 @@ function validateResponse(payload, id) {
   ) {
     throw new Error('Invalid upstream JSON-RPC response');
   }
-  const error = new Error(payload.error.message);
-  error.code = payload.error.code;
-  if (own(payload.error, 'data')) error.data = payload.error.data;
-  throw error;
+  throw new UpstreamRpcError(payload.error.code, payload.error.message, payload.error.data, own(payload.error, 'data'));
 }
 
 function createUpstreamClient(rawEndpoint, options = {}) {
@@ -86,4 +92,4 @@ function createUpstreamClient(rawEndpoint, options = {}) {
   return Object.freeze({ request });
 }
 
-module.exports = { createUpstreamClient };
+module.exports = { UpstreamRpcError, createUpstreamClient };
