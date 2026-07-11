@@ -523,6 +523,9 @@ test('composes deployment decode, provenance, rewrite, exact simulation, durable
   assert.equal(operation.actualTarget, ACTUAL_TARGET);
   assert.equal(operation.contractKind, 'contract');
   assert.deepEqual(operation.artifactIdentity, ARTIFACT_IDENTITY);
+  const receiptResolvers = result.calls.find(call => call.type === 'wait').context;
+  assert.equal(receiptResolvers.resolveAddress(ACTUAL_TARGET), operation.predictedContractAddress);
+  assert.equal(receiptResolvers.resolveInternalAddress(ACTUAL_TARGET), ACTUAL_TARGET);
   assert.equal(result.journal.get(sourceHash).state, 'confirmed');
 });
 

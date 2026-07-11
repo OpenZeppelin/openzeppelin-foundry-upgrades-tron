@@ -122,6 +122,27 @@ test('translates a successful native deployment receipt including block, contrac
   });
 });
 
+test('keeps internal transaction addresses native when reconciliation supplies a distinct resolver', () => {
+  const child = `41${'44'.repeat(20)}`;
+  const info = confirmedInfo();
+  info.internal_transactions[0].caller_address = ACTUAL_CONTRACT;
+  info.internal_transactions[0].transferTo_address = child;
+
+  const receipt = translateReceipt(
+    { transaction: nativeTransaction(), info },
+    {
+      sourceTransactionHash: SOURCE_HASH,
+      predictedContractAddress: PREDICTED_CONTRACT,
+      resolveAddress: () => PREDICTED_CONTRACT,
+      resolveInternalAddress: address => address,
+    },
+  );
+
+  assert.equal(receipt.logs[0].address, PREDICTED_CONTRACT);
+  assert.equal(receipt.tron.internalTransactions[0].callerAddress, `0x${'22'.repeat(20)}`);
+  assert.equal(receipt.tron.internalTransactions[0].transferToAddress, `0x${'44'.repeat(20)}`);
+});
+
 test('translates confirmed native reverts as status zero and preserves the result message', () => {
   const info = confirmedInfo({
     receipt: { result: 'REVERT', energy_usage_total: 9, energy_fee: 27 },

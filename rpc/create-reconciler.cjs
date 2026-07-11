@@ -578,7 +578,7 @@ class CreateReconciler {
           }
         }
 
-        const actualToPredicted = new Map();
+        const actualToPredicted = new Map(Object.entries(indexes.byActual));
         if (record.operationContext.kind === 'deployment') {
           setMappingInChain(chain, {
             predicted: record.operationContext.predictedContractAddress,

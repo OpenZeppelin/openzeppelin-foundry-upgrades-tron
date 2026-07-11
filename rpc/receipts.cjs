@@ -128,6 +128,8 @@ function translateReceipt(snapshot, context = {}) {
   const transactionIndex = quantity(nativeTransactionIndex, 'transaction index');
   const { type: contractType, value: nativeContract } = contractData(transaction);
   const resolveAddress = typeof context.resolveAddress === 'function' ? context.resolveAddress : undefined;
+  const resolveInternalAddress =
+    typeof context.resolveInternalAddress === 'function' ? context.resolveInternalAddress : resolveAddress;
   const from = resolvedAddress(nativeContract.owner_address, resolveAddress);
   const isCreation = contractType === 'CreateSmartContract';
   const to = isCreation ? null : resolvedAddress(nativeContract.contract_address, resolveAddress);
@@ -167,7 +169,7 @@ function translateReceipt(snapshot, context = {}) {
   });
 
   const internalTransactions = (info.internal_transactions ?? []).map(transaction =>
-    translateInternalTransaction(transaction, resolveAddress),
+    translateInternalTransaction(transaction, resolveInternalAddress),
   );
 
   return {

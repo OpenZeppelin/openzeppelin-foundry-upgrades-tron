@@ -23,6 +23,8 @@ const ROOT_ACTUAL = `0x${'22'.repeat(20)}`;
 const CHILD_ACTUAL_1 = `0x${'31'.repeat(20)}`;
 const CHILD_ACTUAL_2 = `0x${'32'.repeat(20)}`;
 const CHILD_ACTUAL_3 = `0x${'33'.repeat(20)}`;
+const EXISTING_PREDICTED = `0x${'41'.repeat(20)}`;
+const EXISTING_ACTUAL = `0x${'42'.repeat(20)}`;
 const TRANSPARENT_IDENTITY = {
   sourceName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
   contractName: 'TransparentUpgradeableProxy',
@@ -170,6 +172,13 @@ test('persists payload-relative mode, normalizes its synthetic root, and binds o
   const syntheticRoot = `0x${'77'.repeat(20)}`;
   const syntheticChild = `0x${'88'.repeat(20)}`;
   const predictedAdmin = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 }).toLowerCase();
+  addressMap.set({
+    predicted: EXISTING_PREDICTED,
+    actual: EXISTING_ACTUAL,
+    creator: SENDER,
+    sender: SENDER,
+    sourceTransaction: `0x${'ab'.repeat(32)}`,
+  });
   const prepared = reconciler.recordPreparedNative(
     SOURCE_HASH,
     nativeTransaction(),
@@ -182,10 +191,23 @@ test('persists payload-relative mode, normalizes its synthetic root, and binds o
   assert.equal(prepared.childCreatePlan.attempts[0].predictedCaller, ROOT_PREDICTED);
   assert.equal(addressMap.resolveActual(syntheticChild), undefined);
   journal.recordBroadcast(SOURCE_HASH);
-  reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1]));
+  const translated = receipt([CHILD_ACTUAL_1]);
+  translated.tron.internalTransactions.unshift({
+    hash: `0x${'99'.repeat(32)}`,
+    callerAddress: ROOT_ACTUAL,
+    transferToAddress: EXISTING_ACTUAL,
+    note: 'call',
+    rejected: false,
+    callValueInfo: [],
+  });
+  const confirmed = reconciler.reconcile(SOURCE_HASH, translated);
 
   assert.equal(addressMap.toActual(predictedAdmin), CHILD_ACTUAL_1);
   assert.equal(addressMap.resolveActual(syntheticChild), undefined);
+  assert.equal(confirmed.receipt.tron.internalTransactions[0].callerAddress, ROOT_PREDICTED);
+  assert.equal(confirmed.receipt.tron.internalTransactions[0].transferToAddress, EXISTING_PREDICTED);
+  assert.equal(confirmed.receipt.tron.internalTransactions[1].callerAddress, ROOT_PREDICTED);
+  assert.equal(confirmed.receipt.tron.internalTransactions[1].transferToAddress, predictedAdmin);
 });
 
 test('fails closed outside the distinguishable stock constant-simulation CREATE profile', t => {

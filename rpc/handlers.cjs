@@ -241,6 +241,9 @@ function receiptContext(addressMap, record) {
       }
       return addressMap.toPredicted(actual) ?? actual;
     },
+    resolveInternalAddress(address) {
+      return normalizeEvmAddress(address, 'native internal transaction address');
+    },
   };
 }
 
