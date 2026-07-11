@@ -34,6 +34,7 @@ function request(address, options = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
+        agent: options.agent ?? false,
         host: address.host,
         port: address.port,
         path: options.path ?? '/',
@@ -104,6 +105,22 @@ function partialHeaders(address, bytes) {
     socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     socket.on('error', reject);
   });
+}
+
+async function openPartialRequest(address, bytes) {
+  const socket = net.createConnection({ host: address.host, port: address.port });
+  const chunks = [];
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  socket.write(bytes);
+  const response = new Promise((resolve, reject) => {
+    socket.on('data', chunk => chunks.push(chunk));
+    socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    socket.on('error', reject);
+  });
+  return { response, socket };
 }
 
 async function startedServer(t, options = {}) {
@@ -405,22 +422,21 @@ test('reports ready and draining health without dispatching new RPC work', async
   const ready = await request(server.address(), { method: 'GET', path: '/healthz' });
   assert.equal(ready.statusCode, 200);
   assert.deepEqual(JSON.parse(ready.body), { status: 'ready' });
+  const address = server.address();
+  const drainingProbe = await openPartialRequest(address, 'GET /healthz HTTP/1.1\r\nHost: localhost\r\n');
 
-  const rpcResponse = request(server.address(), {
+  const rpcResponse = request(address, {
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'slow' }),
     headers: { 'content-type': 'application/json' },
   });
   await entered.promise;
   const stopping = server.stop();
-  const draining = await request(server.address(), { method: 'GET', path: '/healthz' });
-  const rejectedRpc = await request(server.address(), {
-    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'late' }),
-    headers: { 'content-type': 'application/json' },
-  });
+  drainingProbe.socket.end('\r\n');
+  const draining = await drainingProbe.response;
 
-  assert.equal(draining.statusCode, 503);
-  assert.deepEqual(JSON.parse(draining.body), { status: 'draining' });
-  assert.equal(rejectedRpc.statusCode, 503);
+  assert.match(draining, /^HTTP\/1\.1 503 Service Unavailable\r\n/);
+  assert.match(draining, /\r\n\r\n{"status":"draining"}$/);
+  await assert.rejects(request(address, { agent: false, method: 'GET', path: '/healthz' }), /ECONNREFUSED|socket/i);
   assert.equal(calls, 1);
   finish.resolve();
   assert.equal((await rpcResponse).statusCode, 200);

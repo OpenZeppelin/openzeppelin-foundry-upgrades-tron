@@ -437,8 +437,8 @@ function createRpcServer(rawOptions) {
       }
 
       phase = 'draining';
+      const listenerClose = closeServer(server);
       const forceClose = setTimeout(() => {
-        void closeServer(server).catch(() => {});
         for (const socket of sockets) {
           socket.destroy();
         }
@@ -449,10 +449,25 @@ function createRpcServer(rawOptions) {
         await Promise.allSettled([...inFlight]);
       }
       clearTimeout(forceClose);
-      await closeServer(server);
+      let closeError;
+      try {
+        await listenerClose;
+      } catch (error) {
+        closeError = error;
+      }
       address = undefined;
       phase = 'stopped';
-      await releaseLock();
+      try {
+        await releaseLock();
+      } catch (releaseError) {
+        if (closeError !== undefined) {
+          throw new AggregateError([closeError, releaseError], 'RPC listener and state lock release both failed');
+        }
+        throw releaseError;
+      }
+      if (closeError !== undefined) {
+        throw closeError;
+      }
     })();
     return stopPromise;
   }
