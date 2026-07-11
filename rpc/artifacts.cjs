@@ -50,8 +50,17 @@ function requireAbsoluteOutput(outputDirectory) {
     );
   }
   const normalized = path.normalize(outputDirectory);
-  if (!fs.existsSync(normalized) || !fs.statSync(normalized).isDirectory()) {
+  let root;
+  try {
+    root = fs.lstatSync(normalized);
+  } catch {
     throw new ArtifactProvenanceError('INVALID_OUTPUT_DIRECTORY', `FOUNDRY_OUT does not exist: ${normalized}`);
+  }
+  if (root.isSymbolicLink() || !root.isDirectory()) {
+    throw new ArtifactProvenanceError(
+      'INVALID_OUTPUT_DIRECTORY',
+      `FOUNDRY_OUT must be a real directory, not a symlink: ${normalized}`,
+    );
   }
   return normalized;
 }
@@ -61,8 +70,37 @@ function isWithin(parent, child) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-function assertStableOutput(outputDirectory, expectedRealOutput) {
-  if (fs.realpathSync(outputDirectory) !== expectedRealOutput) {
+function outputIdentity(outputDirectory) {
+  const stat = fs.lstatSync(outputDirectory, { bigint: true });
+  return {
+    device: stat.dev.toString(),
+    inode: stat.ino.toString(),
+    mode: stat.mode.toString(),
+    changed: stat.ctimeNs.toString(),
+    realpath: fs.realpathSync(outputDirectory),
+    directory: stat.isDirectory(),
+    symlink: stat.isSymbolicLink(),
+  };
+}
+
+function assertStableOutput(outputDirectory, expectedIdentity) {
+  let actual;
+  try {
+    actual = outputIdentity(outputDirectory);
+  } catch (error) {
+    throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'FOUNDRY_OUT disappeared during provenance verification', {
+      cause: error,
+    });
+  }
+  if (
+    actual.symlink ||
+    !actual.directory ||
+    actual.device !== expectedIdentity.device ||
+    actual.inode !== expectedIdentity.inode ||
+    actual.mode !== expectedIdentity.mode ||
+    actual.changed !== expectedIdentity.changed ||
+    actual.realpath !== expectedIdentity.realpath
+  ) {
     throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'FOUNDRY_OUT changed during provenance verification');
   }
 }
@@ -284,11 +322,11 @@ function throwVerificationError(result) {
 
 function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifactPath: artifactPathArg, hooks }) {
   const outputDirectory = requireAbsoluteOutput(outputDirectoryArg);
-  const expectedRealOutput = fs.realpathSync(outputDirectory);
+  const expectedOutputIdentity = outputIdentity(outputDirectory);
   let artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPathArg);
   callHook(hooks, 'afterArtifactBoundaryCheck');
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedRealOutput);
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
   const buildInfoRoot = path.normalize(buildInfoDirectory(outputDirectory));
   assertNoSymlinksInTree(buildInfoRoot);
   const initial = readArtifact(artifactPath);
@@ -298,7 +336,7 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
   const first = decodeVerification(firstEncoded);
   if (first.numericCode !== CODE.success) throwVerificationError(first);
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedRealOutput);
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
   if (keccak256(toUtf8Bytes(initial.snapshot)) !== first.artifactSnapshotHash) {
     throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'Artifact changed during provenance verification');
   }
@@ -320,7 +358,7 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
   if (finalLoaded.error !== undefined) throwVerificationError(decodeVerification(finalLoaded.error));
   const finalLoadedSnapshot = snapshotBuildInfo(finalLoaded, outputDirectory);
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedRealOutput);
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
   if (
     secondEncoded !== firstEncoded ||
     readArtifact(artifactPath).snapshot !== initial.snapshot ||

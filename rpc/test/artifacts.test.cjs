@@ -345,3 +345,35 @@ test('binds both Hardhat 3 split build-info files to one verification snapshot',
     error => error.code === 'PROVENANCE_CHANGED',
   );
 });
+
+test('rejects FOUNDRY_OUT when the configured root itself is a symlink', t => {
+  const out = basicOut(t);
+  const symlink = `${out}-symlink`;
+  fs.symlinkSync(out, symlink, 'dir');
+
+  assert.throws(
+    () => findArtifactPaths(symlink, 'Widget'),
+    error => error.code === 'INVALID_OUTPUT_DIRECTORY',
+  );
+});
+
+test('detects replacement of FOUNDRY_OUT by a different tree at the same path', t => {
+  const out = basicOut(t);
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const displaced = `${out}-displaced`;
+
+  assert.throws(
+    () =>
+      verifyArtifactProvenance({
+        outputDirectory: out,
+        artifactPath,
+        hooks: {
+          afterArtifactBoundaryCheck() {
+            fs.renameSync(out, displaced);
+            fs.cpSync(displaced, out, { recursive: true });
+          },
+        },
+      }),
+    error => error.code === 'PROVENANCE_CHANGED',
+  );
+});
