@@ -20,5 +20,10 @@ include::Options.adoc[]
 
 include::Upgrades.adoc[]
 
-Defender APIs are not supported or exported. Legacy v4 APIs remain
-evidence-gated and are not currently exported.
+== Existing v4 upgrade API
+
+include::LegacyUpgrades.adoc[]
+
+Defender APIs are not supported or exported. External stock-TRE compatibility
+evidence for the legacy API and pinned OpenZeppelin Contracts v4.9.6 packages
+remains pending.

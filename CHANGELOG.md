@@ -18,5 +18,6 @@ project follows Semantic Versioning.
   deployment; beacon proxies retain empty-data support.
 - Document that Defender, Ethereum source verification, Foundry forking,
   generic CREATE2, and typed Ethereum transactions are unsupported.
-- Keep OpenZeppelin Contracts v4 legacy interfaces evidence-gated and not
-  currently exported.
+- Add the upgrade-only `LegacyUpgrades.sol` surface for existing OpenZeppelin
+  Contracts v4 deployments. Local v4/v5 dispatch tests pass; external stock-TRE
+  evidence with pinned v4.9.6 packages remains pending.

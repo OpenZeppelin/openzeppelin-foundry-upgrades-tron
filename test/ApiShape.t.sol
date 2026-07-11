@@ -3,6 +3,10 @@ pragma solidity ^0.8.22;
 
 import {LinkedLibrary, Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
 import {UnsafeUpgrades, Upgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
+import {
+    UnsafeUpgrades as UnsafeLegacyUpgrades,
+    Upgrades as LegacyUpgrades
+} from "openzeppelin-foundry-upgrades-tron/LegacyUpgrades.sol";
 
 /// @dev Compile-only consumer that locks every supported modern overload.
 contract ModernApiShape {
@@ -222,6 +226,129 @@ contract ModernApiShape {
                 unsafeSkipAllChecks: true,
                 linkedLibraries: linkedLibraries
             });
+    }
+}
+
+/// @dev Compile-only consumer that locks every supported legacy overload.
+contract LegacyApiShape {
+    // Legacy validated Upgrades: 13 supported functions and overloads.
+    function legacyValidatedUpgradeProxyWithOptions(
+        address proxy,
+        string memory contractName,
+        bytes memory data,
+        Options memory opts
+    ) external {
+        LegacyUpgrades.upgradeProxy(proxy, contractName, data, opts);
+    }
+
+    function legacyValidatedUpgradeProxy(address proxy, string memory contractName, bytes memory data) external {
+        LegacyUpgrades.upgradeProxy(proxy, contractName, data);
+    }
+
+    function legacyValidatedUpgradeProxyWithOptionsAndCaller(
+        address proxy,
+        string memory contractName,
+        bytes memory data,
+        Options memory opts,
+        address tryCaller
+    ) external {
+        LegacyUpgrades.upgradeProxy(proxy, contractName, data, opts, tryCaller);
+    }
+
+    function legacyValidatedUpgradeProxyWithCaller(
+        address proxy,
+        string memory contractName,
+        bytes memory data,
+        address tryCaller
+    ) external {
+        LegacyUpgrades.upgradeProxy(proxy, contractName, data, tryCaller);
+    }
+
+    function legacyValidatedUpgradeBeaconWithOptions(
+        address beacon,
+        string memory contractName,
+        Options memory opts
+    ) external {
+        LegacyUpgrades.upgradeBeacon(beacon, contractName, opts);
+    }
+
+    function legacyValidatedUpgradeBeacon(address beacon, string memory contractName) external {
+        LegacyUpgrades.upgradeBeacon(beacon, contractName);
+    }
+
+    function legacyValidatedUpgradeBeaconWithOptionsAndCaller(
+        address beacon,
+        string memory contractName,
+        Options memory opts,
+        address tryCaller
+    ) external {
+        LegacyUpgrades.upgradeBeacon(beacon, contractName, opts, tryCaller);
+    }
+
+    function legacyValidatedUpgradeBeaconWithCaller(
+        address beacon,
+        string memory contractName,
+        address tryCaller
+    ) external {
+        LegacyUpgrades.upgradeBeacon(beacon, contractName, tryCaller);
+    }
+
+    function legacyValidatedUpgrade(string memory contractName, Options memory opts) external {
+        LegacyUpgrades.validateUpgrade(contractName, opts);
+    }
+
+    function legacyValidatedPrepareUpgrade(string memory contractName, Options memory opts) external returns (address) {
+        return LegacyUpgrades.prepareUpgrade(contractName, opts);
+    }
+
+    function legacyValidatedAdminAddress(address proxy) external view returns (address) {
+        return LegacyUpgrades.getAdminAddress(proxy);
+    }
+
+    function legacyValidatedImplementationAddress(address proxy) external view returns (address) {
+        return LegacyUpgrades.getImplementationAddress(proxy);
+    }
+
+    function legacyValidatedBeaconAddress(address proxy) external view returns (address) {
+        return LegacyUpgrades.getBeaconAddress(proxy);
+    }
+
+    // Legacy UnsafeUpgrades: 7 supported functions and overloads.
+    function legacyUnsafeUpgradeProxy(address proxy, address newImplementation, bytes memory data) external {
+        UnsafeLegacyUpgrades.upgradeProxy(proxy, newImplementation, data);
+    }
+
+    function legacyUnsafeUpgradeProxyWithCaller(
+        address proxy,
+        address newImplementation,
+        bytes memory data,
+        address tryCaller
+    ) external {
+        UnsafeLegacyUpgrades.upgradeProxy(proxy, newImplementation, data, tryCaller);
+    }
+
+    function legacyUnsafeUpgradeBeacon(address beacon, address newImplementation) external {
+        UnsafeLegacyUpgrades.upgradeBeacon(beacon, newImplementation);
+    }
+
+    function legacyUnsafeUpgradeBeaconWithCaller(
+        address beacon,
+        address newImplementation,
+        address tryCaller
+    ) external {
+        UnsafeLegacyUpgrades.upgradeBeacon(beacon, newImplementation, tryCaller);
+    }
+
+    function legacyUnsafeAdminAddress(address proxy) external view returns (address) {
+        return UnsafeLegacyUpgrades.getAdminAddress(proxy);
+    }
+
+    function legacyUnsafeImplementationAddress(address proxy) external view returns (address) {
+        return UnsafeLegacyUpgrades.getImplementationAddress(proxy);
+    }
+
+    function legacyUnsafeBeaconAddress(address proxy) external view returns (address) {
+        return UnsafeLegacyUpgrades.getBeaconAddress(proxy);
     }
 }
 

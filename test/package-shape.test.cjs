@@ -39,16 +39,13 @@ test('modern Solidity surface does not export deployment implementation helpers'
   assert.doesNotMatch(source, /function\s+requireTRC1967Initialization\s*\(/u);
 });
 
-test('modern Solidity surface excludes unsupported Defender and evidence-gated legacy APIs', () => {
+test('published Solidity surfaces exclude Defender and unsupported legacy deployment APIs', () => {
   const sourceFiles = listFiles('src').filter(file => file.endsWith('.sol'));
   const source = sourceFiles.map(file => fs.readFileSync(file, 'utf8')).join('\n');
+  const legacySource = fs.readFileSync('src/LegacyUpgrades.sol', 'utf8');
 
   assert.equal(sourceFiles.includes(path.join('src', 'Defender.sol')), false);
-  assert.equal(sourceFiles.includes(path.join('src', 'LegacyUpgrades.sol')), false);
-  assert.equal(
-    sourceFiles.some(file => /(?:legacy|v4).*upgrades/iu.test(file)),
-    false,
-  );
+  assert.equal(sourceFiles.includes(path.join('src', 'LegacyUpgrades.sol')), true);
   for (const unsupported of [
     /\bDefenderOptions\b/u,
     /\bTxOverrides\b/u,
@@ -61,20 +58,33 @@ test('modern Solidity surface excludes unsupported Defender and evidence-gated l
     /\bgetDeployApprovalProcess\b/u,
     /\bgetUpgradeApprovalProcess\b/u,
     /\bforceImport\s*\(/u,
-    /\bLegacyUpgrades\b/u,
-    /\bUnsafeLegacyUpgrades\b/u,
   ]) {
     assert.doesNotMatch(source, unsupported);
   }
+
+  for (const unsupportedLegacy of [
+    /function\s+deployUUPSProxy\s*\(/u,
+    /function\s+deployTransparentProxy\s*\(/u,
+    /function\s+deployBeacon\s*\(/u,
+    /function\s+deployBeaconProxy\s*\(/u,
+    /function\s+validateImplementation\s*\(/u,
+    /function\s+deployImplementation\s*\(/u,
+  ]) {
+    assert.doesNotMatch(legacySource, unsupportedLegacy);
+  }
 });
 
-test('compile-only consumer locks all modern overload counts', () => {
+test('compile-only consumer locks modern and legacy overload counts', () => {
   const apiShape = fs.readFileSync('test/ApiShape.t.sol', 'utf8');
   const validated = apiShape.match(/^    function validated[A-Za-z0-9_]*\s*\(/gmu) ?? [];
   const unsafe = apiShape.match(/^    function unsafe[A-Za-z0-9_]*\s*\(/gmu) ?? [];
+  const legacyValidated = apiShape.match(/^    function legacyValidated[A-Za-z0-9_]*\s*\(/gmu) ?? [];
+  const legacyUnsafe = apiShape.match(/^    function legacyUnsafe[A-Za-z0-9_]*\s*\(/gmu) ?? [];
 
   assert.equal(validated.length, 23);
   assert.equal(unsafe.length, 11);
+  assert.equal(legacyValidated.length, 13);
+  assert.equal(legacyUnsafe.length, 7);
 });
 
 test('every supported modern library function has adjacent NatSpec', () => {
@@ -97,6 +107,23 @@ test('every supported modern library function has adjacent NatSpec', () => {
   assert.equal(supportedFunctions, 34);
 });
 
+test('every supported legacy library function has adjacent NatSpec', () => {
+  const source = fs.readFileSync('src/LegacyUpgrades.sol', 'utf8');
+  const functions = [...source.matchAll(/^    function\s+[A-Za-z0-9_]+\s*\(/gmu)];
+
+  for (const match of functions) {
+    const signatureEnd = source.indexOf('{', match.index);
+    const signature = source.slice(match.index, signatureEnd);
+    const prefix = source.slice(0, match.index).trimEnd();
+    const commentStart = prefix.lastIndexOf('/**');
+    const comment = prefix.slice(commentStart);
+    assert.ok(commentStart >= 0 && comment.endsWith('*/'), `missing adjacent NatSpec for ${signature.trim()}`);
+    assert.match(comment, /@dev\s+\S/u, `missing @dev summary for ${signature.trim()}`);
+  }
+
+  assert.equal(functions.length, 20);
+});
+
 test('public documentation covers the supported modern TVM workflow and intentional divergences', () => {
   const files = [
     'README.md',
@@ -106,6 +133,7 @@ test('public documentation covers the supported modern TVM workflow and intentio
     'docs/modules/api/pages/api-foundry-upgrades-tron.adoc',
     'docs/modules/api/pages/Options.adoc',
     'docs/modules/api/pages/Upgrades.adoc',
+    'docs/modules/api/pages/LegacyUpgrades.adoc',
   ];
   const documentation = files.map(file => fs.readFileSync(file, 'utf8')).join('\n');
 
@@ -124,7 +152,9 @@ test('public documentation covers the supported modern TVM workflow and intentio
     /Defender[^.]{0,80}(?:unsupported|not supported|not included)/iu,
     /(?:verification|source verification)[^.]{0,80}(?:unsupported|not supported|not translated)/iu,
     /forking[^.]{0,80}(?:unsupported|not supported)/iu,
-    /legacy[^.]{0,120}(?:evidence-gated|not currently exported)/iu,
+    /LegacyUpgrades\.sol/iu,
+    /v4\.9\.6/u,
+    /external[^.]{0,100}evidence[^.]{0,100}pending/iu,
     /actual[^.]{0,80}(?:TVM|TRON)[^.]{0,80}address/iu,
     /ETH_RPC_TIMEOUT=300/u,
   ]) {
@@ -140,7 +170,7 @@ test('published package contains runtime RPC files but no tests or fixture build
   assert.equal(packed.status, 0, packed.stderr || packed.stdout);
   const files = JSON.parse(packed.stdout)[0].files.map(file => file.path);
 
-  for (const runtime of ['src/Upgrades.sol', 'rpc/cli.cjs', 'rpc/SECURITY.md']) {
+  for (const runtime of ['src/Upgrades.sol', 'src/LegacyUpgrades.sol', 'rpc/cli.cjs', 'rpc/SECURITY.md']) {
     assert.ok(files.includes(runtime), `missing ${runtime}`);
   }
   assert.equal(
@@ -155,6 +185,7 @@ test('published package contains runtime RPC files but no tests or fixture build
 
 test('prepack guard requires both Solidity and RPC implementations', t => {
   const { REQUIRED_PACKAGE_FILES, assertPackageContents } = require('../scripts/require-package-contents.cjs');
+  assert.ok(REQUIRED_PACKAGE_FILES.includes('src/LegacyUpgrades.sol'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-upgrades-tron-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 

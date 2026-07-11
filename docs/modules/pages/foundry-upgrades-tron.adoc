@@ -79,6 +79,21 @@ Unlinked bytecode uses exact, case-sensitive `LinkedLibrary` source name,
 library name, and deployed code address records. Duplicate, missing, unused,
 zero, and codeless mappings are rejected.
 
+=== Existing OpenZeppelin Contracts v4 upgrades
+
+`LegacyUpgrades.sol` exports validated and unsafe upgrade-only helpers for
+existing deployments built from upstream OpenZeppelin Contracts v4 sources. It
+does not deploy proxies, beacons, or standalone implementations. New
+deployments use `Upgrades.sol` with OpenZeppelin Contracts for TRON v5.
+
+The dispatcher supports the v4 UUPS `upgradeTo` and ProxyAdmin
+`upgrade`/`upgradeAndCall` paths while retaining strict v5 interface-version
+dispatch. Local lifecycle tests pass. External compatibility evidence remains
+pending for stock TRE using pinned `@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6`, so completed
+v4.9.6 TVM compatibility is not yet claimed. These are upstream v4 packages,
+not a TRON-branded v4 release.
+
 == Compiler provenance and FFI security
 
 The implementation artifact and build-info must come from the same compiler
@@ -111,9 +126,9 @@ supported. Typed Ethereum transactions, generic CREATE2, Hardhat manifest
 imports, implementation reuse, kind inference, and `forceImport` are outside
 the Solidity API.
 
-OpenZeppelin Contracts v4 legacy interfaces are evidence-gated and not
-currently exported. They will be documented only after real pinned v4
-contracts pass complete TRE deployment and upgrade lifecycles.
+The upgrade-only legacy entrypoint is present, but external v4.9.6 evidence is
+still pending as described above. Local interface mocks are not acceptance
+evidence for upstream v4 bytecode on TVM.
 
 See xref:api-foundry-upgrades-tron.adoc[the Solidity API reference] for
 contract-name formats, options, and every modern overload.

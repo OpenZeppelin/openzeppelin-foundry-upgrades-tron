@@ -4,6 +4,7 @@ const path = require('node:path');
 const REQUIRED_PACKAGE_FILES = Object.freeze([
   'src/Options.sol',
   'src/Upgrades.sol',
+  'src/LegacyUpgrades.sol',
   'src/internal/Core.sol',
   'src/internal/artifact-provenance.cjs',
   'rpc/SECURITY.md',

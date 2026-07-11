@@ -160,6 +160,36 @@ upgrade-safety, storage-layout, or compiler-provenance validation. It is useful
 for local tests and coverage, but should not replace validated deployment
 scripts.
 
+### Existing OpenZeppelin Contracts v4 upgrades
+
+`LegacyUpgrades.sol` provides the upstream upgrade-only interface for existing
+deployments built with OpenZeppelin Contracts v4. It intentionally has no proxy,
+beacon, implementation deployment, or standalone implementation-validation
+helpers. New deployments use `Upgrades.sol` with OpenZeppelin Contracts for
+TRON v5.
+
+```solidity
+import {
+    Upgrades as LegacyUpgrades,
+    UnsafeUpgrades as UnsafeLegacyUpgrades
+} from "openzeppelin-foundry-upgrades-tron/LegacyUpgrades.sol";
+
+Options memory opts;
+opts.referenceContract = "BoxV1.sol:BoxV1";
+LegacyUpgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
+```
+
+The shared dispatcher recognizes the v4 UUPS `upgradeTo` entrypoint and v4
+ProxyAdmin `upgrade`/`upgradeAndCall` paths while retaining strict v5
+`UPGRADE_INTERFACE_VERSION = "5.0.0"` dispatch.
+
+Local interface and lifecycle tests are green. External compatibility evidence
+is still pending for pinned `@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6` on stock TRE.
+Until that external evidence is recorded, treat this API as provisional rather
+than claiming completed v4.9.6 TVM compatibility. Those fixtures are upstream
+OpenZeppelin Contracts v4 sources; there is no TRON-branded v4 package.
+
 ## Compiler provenance and FFI security
 
 Validation and deployment consume the same artifact snapshot. Before and after
@@ -320,9 +350,10 @@ The following EVM features are intentionally outside the supported surface:
 - Typed Ethereum transactions and generic `CREATE2` are rejected by the
   adapter. Stock constant simulation also rejects ambiguous child creation.
 
-Legacy OpenZeppelin Contracts v4 interfaces remain evidence-gated and are not
-currently exported. They will only be added after real pinned v4 contracts pass
-the complete TRE lifecycle; do not treat locally-authored lookalikes as support.
+The upgrade-only `LegacyUpgrades.sol` entrypoint is exported for existing
+OpenZeppelin Contracts v4 deployments, but its external stock-TRE v4.9.6
+evidence remains pending. Local lookalikes prove dispatch behavior, not real v4
+compatibility.
 
 ## Development
 
