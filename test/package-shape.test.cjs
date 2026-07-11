@@ -20,6 +20,10 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.equal(pkg.scripts['lint:fix'], 'node scripts/lint.cjs --write');
   assert.equal(pkg.scripts.prepack, 'node scripts/require-package-contents.cjs');
   assert.equal(pkg.scripts.rpc, 'node rpc/cli.cjs');
+  assert.equal(pkg.scripts['rpc:start'], 'node rpc/cli.cjs start');
+  assert.equal(pkg.scripts['rpc:resolve'], 'node rpc/cli.cjs resolve');
+  assert.equal(pkg.scripts['rpc:mappings'], 'node rpc/cli.cjs mappings');
+  assert.deepEqual(pkg.bin, { 'openzeppelin-foundry-upgrades-tron': 'rpc/cli.cjs' });
 
   assert.match(foundryConfig, /^ffi = true$/m);
   assert.match(foundryConfig, /^ast = true$/m);

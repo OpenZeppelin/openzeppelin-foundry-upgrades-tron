@@ -14,6 +14,9 @@
   "engines": {
     "node": ">=20"
   },
+  "bin": {
+    "openzeppelin-foundry-upgrades-tron": "rpc/cli.cjs"
+  },
   "scripts": {
     "compile": "forge build",
     "test": "npm run test:package && npm run test:solidity && npm run test:rpc",
@@ -25,6 +28,9 @@
     "lint": "node scripts/lint.cjs",
     "lint:fix": "node scripts/lint.cjs --write",
     "rpc": "node rpc/cli.cjs",
+    "rpc:start": "node rpc/cli.cjs start",
+    "rpc:resolve": "node rpc/cli.cjs resolve",
+    "rpc:mappings": "node rpc/cli.cjs mappings",
     "prepack": "node scripts/require-package-contents.cjs"
   },
   "dependencies": {

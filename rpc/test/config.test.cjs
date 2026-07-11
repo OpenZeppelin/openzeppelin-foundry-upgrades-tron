@@ -11,6 +11,7 @@ const {
   MAX_FEE_LIMIT,
   normalizeEndpoint,
   parseConfig,
+  parseStateConfig,
 } = require('../config.cjs');
 
 const PRIVATE_KEY = '11'.repeat(32);
@@ -129,4 +130,23 @@ test('validates private keys without exposing their value in errors', () => {
 
 test('rejects unknown network names instead of guessing their safety', () => {
   assert.throws(() => parseConfig({ TRON_NETWORK: 'production' }), /TRON_NETWORK/);
+});
+
+test('parses read-only state configuration without network credentials', () => {
+  const stateFile = path.resolve('/tmp', 'read-only-tron-state.json');
+  const config = parseStateConfig({
+    TRON_NETWORK: 'nile',
+    TRON_CHAIN_ID: '3448148188',
+    TRON_STATE_FILE: stateFile,
+  });
+
+  assert.deepEqual(config, {
+    network: 'nile',
+    chainId: 3448148188n,
+    chainIdentity: 'nile:3448148188',
+    stateFile,
+  });
+  assert.throws(() => parseStateConfig({ TRON_NETWORK: 'unknown' }), /TRON_NETWORK/);
+  assert.throws(() => parseStateConfig({ TRON_CHAIN_ID: '0' }), /TRON_CHAIN_ID/);
+  assert.throws(() => parseStateConfig({ TRON_STATE_FILE: 'relative.json' }), /TRON_STATE_FILE.*absolute/i);
 });

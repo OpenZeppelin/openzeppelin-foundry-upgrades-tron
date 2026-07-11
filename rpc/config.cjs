@@ -99,7 +99,7 @@ function explicitAbsolutePath(environment, key, fallback) {
   return path.normalize(value);
 }
 
-function parseConfig(environment = process.env) {
+function parseStateConfig(environment = process.env) {
   if (environment === null || typeof environment !== 'object') {
     throw new Error('Configuration environment must be an object');
   }
@@ -108,6 +108,19 @@ function parseConfig(environment = process.env) {
   if (typeof network !== 'string' || !SUPPORTED_NETWORKS.has(network)) {
     throw new Error('Invalid TRON_NETWORK; expected tre, mainnet, nile, or shasta');
   }
+
+  const chainId = parseChainId(environment.TRON_CHAIN_ID ?? DEFAULT_CHAIN_ID.toString());
+  return Object.freeze({
+    network,
+    chainId,
+    chainIdentity: `${network}:${chainId}`,
+    stateFile: explicitAbsolutePath(environment, 'TRON_STATE_FILE', DEFAULT_STATE_FILE),
+  });
+}
+
+function parseConfig(environment = process.env) {
+  const state = parseStateConfig(environment);
+  const { network } = state;
 
   const publicNetwork = PUBLIC_NETWORKS.has(network);
   if (publicNetwork && !hasNonemptyString(environment, 'TRON_RPC_URL')) {
@@ -126,19 +139,15 @@ function parseConfig(environment = process.env) {
   const feeLimit = Object.prototype.hasOwnProperty.call(environment, 'TRON_FEE_LIMIT')
     ? parseFeeLimit(environment.TRON_FEE_LIMIT)
     : DEFAULT_FEE_LIMIT;
-  const chainId = parseChainId(environment.TRON_CHAIN_ID ?? DEFAULT_CHAIN_ID.toString());
 
   return Object.freeze({
-    network,
+    ...state,
     publicNetwork,
     ...endpoint,
     privateKey,
     feeLimit,
-    chainId,
-    chainIdentity: `${network}:${chainId}`,
     expectedSender: computeAddress(`0x${privateKey}`).toLowerCase(),
     foundryOut: explicitAbsolutePath(environment, 'FOUNDRY_OUT', 'out'),
-    stateFile: explicitAbsolutePath(environment, 'TRON_STATE_FILE', DEFAULT_STATE_FILE),
   });
 }
 
@@ -151,4 +160,5 @@ module.exports = {
   MAX_FEE_LIMIT,
   normalizeEndpoint,
   parseConfig,
+  parseStateConfig,
 };
