@@ -208,7 +208,12 @@ function requireJournal(chain) {
   if (journal === undefined) {
     return emptyJournal();
   }
-  if (!isObject(journal) || journal.version !== JOURNAL_VERSION || !isObject(journal.records)) {
+  if (
+    !isObject(journal) ||
+    !exactKeys(journal, ['records', 'version']) ||
+    journal.version !== JOURNAL_VERSION ||
+    !isObject(journal.records)
+  ) {
     throw new Error('Corrupt transaction journal');
   }
   for (const [sourceTransactionHash, record] of Object.entries(journal.records)) {
@@ -237,9 +242,13 @@ class TransactionJournal {
     if (!isObject(options)) {
       throw new Error('Invalid transaction journal options');
     }
+    if (options.allowRecovery !== undefined && typeof options.allowRecovery !== 'boolean') {
+      throw new Error('Invalid transaction journal recovery option');
+    }
     this.store = store;
     this.chainIdentity = validateChainIdentity(chainIdentity);
     this.ownerId = validateOwnerId(options.ownerId ?? randomUUID());
+    this.allowRecovery = options.allowRecovery === true;
   }
 
   receive(signedEthereumTransaction) {
@@ -255,14 +264,7 @@ class TransactionJournal {
         if (existing.state !== 'received') {
           return { record: existing, shouldBuild: false };
         }
-        if (existing.buildClaimOwner === this.ownerId) {
-          return { record: existing, shouldBuild: false };
-        }
-
-        const claimed = { ...existing, buildClaimOwner: this.ownerId };
-        journal.records[sourceTransactionHash] = claimed;
-        chain.transactionJournal = journal;
-        return { record: claimed, shouldBuild: true };
+        return { record: existing, shouldBuild: false };
       }
 
       const record = {
@@ -274,6 +276,35 @@ class TransactionJournal {
       journal.records[sourceTransactionHash] = record;
       chain.transactionJournal = journal;
       return { record, shouldBuild: true };
+    });
+  }
+
+  // Startup recovery only: the caller must hold the adapter's exclusive
+  // state/server lock before using this compare-and-swap ownership transfer.
+  recoverReceived(sourceTransactionHash, expectedOwnerId) {
+    if (!this.allowRecovery) {
+      throw new Error('Transaction journal recovery is not enabled');
+    }
+    const hash = normalizeSourceHash(sourceTransactionHash);
+    const previousOwner = validateOwnerId(expectedOwnerId);
+
+    return this.store.transaction(this.chainIdentity, chain => {
+      const journal = requireJournal(chain);
+      const record = this._requireRecord(journal, hash);
+      if (record.state !== 'received') {
+        throw new Error(`Transaction in ${record.state} state cannot recover a received build claim`);
+      }
+      if (previousOwner === this.ownerId) {
+        throw new Error('Recovery owner conflict: previous and current owners must differ');
+      }
+      if (record.buildClaimOwner !== previousOwner) {
+        throw new Error('Recovery owner conflict: persisted owner does not match expected owner');
+      }
+
+      const claimed = { ...record, buildClaimOwner: this.ownerId };
+      journal.records[hash] = claimed;
+      chain.transactionJournal = journal;
+      return { record: claimed, shouldBuild: true };
     });
   }
 

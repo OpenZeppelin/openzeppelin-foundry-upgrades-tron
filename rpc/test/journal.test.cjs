@@ -149,14 +149,39 @@ test('grants only one native-build claim to concurrent receives in one boot', t 
   );
 });
 
-test('a restarted boot atomically takes over a stranded received build claim', t => {
+test('a second live boot cannot take over a received claim through ordinary receive', t => {
   const { journal, statePath } = fixture(t);
   assert.equal(journal.receive(SOURCE_BYTES).shouldBuild, true);
 
-  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+  const secondLiveBoot = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
     ownerId: 'boot-b',
   });
-  const takeover = restarted.receive(SOURCE_BYTES);
+  const retry = secondLiveBoot.receive(SOURCE_BYTES);
+  assert.equal(retry.shouldBuild, false);
+  assert.equal(retry.record.buildClaimOwner, 'boot-a');
+  assert.throws(
+    () => secondLiveBoot.recordFailed(SOURCE_HASH, { code: 'LIVE_BOOT', message: 'must not commit' }),
+    /build claim/i,
+  );
+  assert.throws(() => secondLiveBoot.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
+  assert.equal(journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()).state, 'native-built');
+});
+
+test('explicit startup recovery requires capability and the exact previous owner', t => {
+  const { journal, statePath } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+
+  const incapable = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.throws(() => incapable.recoverReceived(SOURCE_HASH, 'boot-a'), /recovery.*not enabled/i);
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+    allowRecovery: true,
+  });
+  assert.throws(() => restarted.recoverReceived(SOURCE_HASH, 'wrong-owner'), /owner.*conflict/i);
+  const takeover = restarted.recoverReceived(SOURCE_HASH, 'boot-a');
   assert.equal(takeover.shouldBuild, true);
   assert.equal(takeover.record.buildClaimOwner, 'boot-b');
   assert.equal(restarted.receive(SOURCE_BYTES).shouldBuild, false);
@@ -165,25 +190,26 @@ test('a restarted boot atomically takes over a stranded received build claim', t
     /build claim/i,
   );
   assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
-  assert.equal(restarted.recordNativeBuilt(SOURCE_HASH, nativeTransaction()).state, 'native-built');
-  assert.equal(restarted.get(SOURCE_HASH).buildClaimOwner, undefined);
-});
 
-test('the current takeover owner can terminally fail a stranded received claim', t => {
-  const { journal, statePath } = fixture(t);
-  journal.receive(SOURCE_BYTES);
-
-  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
-    ownerId: 'boot-b',
-  });
-  assert.equal(restarted.receive(SOURCE_BYTES).shouldBuild, true);
   const failed = restarted.recordFailed(SOURCE_HASH, {
     code: 'UNSUPPORTED_TRANSACTION',
     message: 'source cannot be translated',
   });
-
   assert.equal(failed.state, 'failed');
   assert.equal(failed.buildClaimOwner, undefined);
+  assert.throws(() => restarted.recoverReceived(SOURCE_HASH, 'boot-b'), /failed.*recover/i);
+});
+
+test('explicit recovery rejects a non-received transaction state', t => {
+  const { journal, statePath } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+    allowRecovery: true,
+  });
+  assert.throws(() => restarted.recoverReceived(SOURCE_HASH, 'boot-a'), /native-built.*recover/i);
 });
 
 test('never replaces a persisted native transaction during retry', t => {
@@ -300,6 +326,19 @@ test('refuses a persisted confirmation whose non-JSON receipt was omitted', t =>
     ownerId: 'boot-b',
   });
   assert.throws(() => restarted.get(SOURCE_HASH), /corrupt.*journal.*record/i);
+});
+
+test('refuses a persisted journal envelope with unknown keys', t => {
+  const { journal, statePath } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  state.chains['tre:728126428'].transactionJournal.unexpected = true;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.throws(() => restarted.get(SOURCE_HASH), /corrupt.*journal/i);
 });
 
 test('rejects a non-durable receipt before committing confirmation', t => {
