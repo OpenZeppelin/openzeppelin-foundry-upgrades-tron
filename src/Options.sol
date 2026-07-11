@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+/**
+ * @dev Exact library link used when the validated creation bytecode contains
+ * an unresolved Solidity linker placeholder.
+ */
 struct LinkedLibrary {
+    /// @dev Compiler source name that owns the library.
     string sourceName;
+    /// @dev Case-sensitive library name from the artifact link references.
     string libraryName;
+    /// @dev Deployed library address. The address must contain code.
     address libraryAddress;
 }
 

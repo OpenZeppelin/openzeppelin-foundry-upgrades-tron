@@ -39,6 +39,98 @@ test('modern Solidity surface does not export deployment implementation helpers'
   assert.doesNotMatch(source, /function\s+requireTRC1967Initialization\s*\(/u);
 });
 
+test('modern Solidity surface excludes unsupported Defender and evidence-gated legacy APIs', () => {
+  const sourceFiles = listFiles('src').filter(file => file.endsWith('.sol'));
+  const source = sourceFiles.map(file => fs.readFileSync(file, 'utf8')).join('\n');
+
+  assert.equal(sourceFiles.includes(path.join('src', 'Defender.sol')), false);
+  assert.equal(sourceFiles.includes(path.join('src', 'LegacyUpgrades.sol')), false);
+  assert.equal(
+    sourceFiles.some(file => /(?:legacy|v4).*upgrades/iu.test(file)),
+    false,
+  );
+  for (const unsupported of [
+    /\bDefenderOptions\b/u,
+    /\bTxOverrides\b/u,
+    /\bProposeUpgradeResponse\b/u,
+    /\bApprovalProcessResponse\b/u,
+    /\buseDefenderDeploy\b/u,
+    /\bskipVerifySourceCode\b/u,
+    /\bdeployContract\s*\(/u,
+    /\bproposeUpgrade\b/u,
+    /\bgetDeployApprovalProcess\b/u,
+    /\bgetUpgradeApprovalProcess\b/u,
+    /\bforceImport\s*\(/u,
+    /\bLegacyUpgrades\b/u,
+    /\bUnsafeLegacyUpgrades\b/u,
+  ]) {
+    assert.doesNotMatch(source, unsupported);
+  }
+});
+
+test('compile-only consumer locks all modern overload counts', () => {
+  const apiShape = fs.readFileSync('test/ApiShape.t.sol', 'utf8');
+  const validated = apiShape.match(/^    function validated[A-Za-z0-9_]*\s*\(/gmu) ?? [];
+  const unsafe = apiShape.match(/^    function unsafe[A-Za-z0-9_]*\s*\(/gmu) ?? [];
+
+  assert.equal(validated.length, 23);
+  assert.equal(unsafe.length, 11);
+});
+
+test('every supported modern library function has adjacent NatSpec', () => {
+  const source = fs.readFileSync('src/Upgrades.sol', 'utf8');
+  const functions = [...source.matchAll(/^    function\s+[A-Za-z0-9_]+\s*\(/gmu)];
+  let supportedFunctions = 0;
+
+  for (const match of functions) {
+    const signatureEnd = source.indexOf('{', match.index);
+    const signature = source.slice(match.index, signatureEnd);
+    if (/\bprivate\b/u.test(signature)) continue;
+    supportedFunctions += 1;
+    const prefix = source.slice(0, match.index).trimEnd();
+    const commentStart = prefix.lastIndexOf('/**');
+    const comment = prefix.slice(commentStart);
+    assert.ok(commentStart >= 0 && comment.endsWith('*/'), `missing adjacent NatSpec for ${signature.trim()}`);
+    assert.match(comment, /@dev\s+\S/u, `missing @dev summary for ${signature.trim()}`);
+  }
+
+  assert.equal(supportedFunctions, 34);
+});
+
+test('public documentation covers the supported modern TVM workflow and intentional divergences', () => {
+  const files = [
+    'README.md',
+    'CONTRIBUTING.md',
+    'CHANGELOG.md',
+    'docs/modules/pages/foundry-upgrades-tron.adoc',
+    'docs/modules/api/pages/api-foundry-upgrades-tron.adoc',
+    'docs/modules/api/pages/Options.adoc',
+    'docs/modules/api/pages/Upgrades.adoc',
+  ];
+  const documentation = files.map(file => fs.readFileSync(file, 'utf8')).join('\n');
+
+  for (const required of [
+    /openzeppelin-foundry-upgrades-tron\//u,
+    /openzeppelin-tron-solidity\//u,
+    /ffi\s*=\s*true/u,
+    /build_info\s*=\s*true/u,
+    /storageLayout/u,
+    /FOUNDRY_OUT/u,
+    /compiler provenance/iu,
+    /FFI security/iu,
+    /non-?empty initializer/iu,
+    /LinkedLibrary/u,
+    /UnsafeUpgrades/u,
+    /Defender[^.]{0,80}(?:unsupported|not supported|not included)/iu,
+    /(?:verification|source verification)[^.]{0,80}(?:unsupported|not supported|not translated)/iu,
+    /forking[^.]{0,80}(?:unsupported|not supported)/iu,
+    /legacy[^.]{0,120}(?:evidence-gated|not currently exported)/iu,
+    /actual[^.]{0,80}(?:TVM|TRON)[^.]{0,80}address/iu,
+  ]) {
+    assert.match(documentation, required);
+  }
+});
+
 test('published package contains runtime RPC files but no tests or fixture build output', () => {
   const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: path.resolve(__dirname, '..'),
@@ -112,3 +204,10 @@ test('documents the nonstandard fail-closed simulation requirement without overs
   assert.match(readme, /not archival or fork support/i);
   assert.doesNotMatch(readme, /Task \d+/i);
 });
+
+function listFiles(relativeDirectory) {
+  return fs.readdirSync(relativeDirectory, { withFileTypes: true }).flatMap(entry => {
+    const entryPath = path.join(relativeDirectory, entry.name);
+    return entry.isDirectory() ? listFiles(entryPath) : [entryPath];
+  });
+}

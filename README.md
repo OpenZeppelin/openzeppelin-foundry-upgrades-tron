@@ -7,16 +7,41 @@ transactions into native TRON transactions.
 
 ## Install
 
-Install this repository and add its remapping to your Foundry project:
+The source installation keeps the Solidity library, its TRON proxy contracts,
+and the adapter together:
 
 ```sh
 forge install OpenZeppelin/openzeppelin-foundry-upgrades-tron
+(cd lib/openzeppelin-foundry-upgrades-tron && npm install)
 ```
 
 ```text
 openzeppelin-foundry-upgrades-tron/=lib/openzeppelin-foundry-upgrades-tron/src/
 openzeppelin-tron-solidity/=lib/openzeppelin-foundry-upgrades-tron/lib/openzeppelin-tron-solidity/
 ```
+
+For an npm consumer, install the library and the exact validation CLI, then add
+OpenZeppelin Contracts for TRON and forge-std as Forge dependencies:
+
+```sh
+npm install @openzeppelin/foundry-upgrades-tron @openzeppelin/upgrades-core@1.46.0
+forge install foundry-rs/forge-std@v1.9.5
+forge install OpenZeppelin/tron-contracts@06d69bcfc94ff7ba6824290959b75baf86d91f6c
+```
+
+```text
+openzeppelin-foundry-upgrades-tron/=node_modules/@openzeppelin/foundry-upgrades-tron/src/
+openzeppelin-tron-solidity/=lib/tron-contracts/
+forge-std/=lib/forge-std/src/
+```
+
+The npm package does not vendor mutable Forge dependencies. Pin the TRON
+contracts commit in the consuming repository. Node.js 20 or newer, Bash, and
+forge-std 1.9.5 or newer are required. On Windows, set
+`OPENZEPPELIN_BASH_PATH` to the absolute forward-slash path of a trusted Bash
+executable.
+
+## Configure Foundry
 
 The consuming project's `foundry.toml` must expose validation build data and
 allow the upgrades library to invoke the pinned validation CLI:
@@ -26,13 +51,130 @@ ffi = true
 ast = true
 build_info = true
 extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "./" }]
 ```
+
+Run scripts and tests with `--force`, or run `forge clean` before them, so the
+artifact and build-info describe the same compilation. If `out` is customized,
+grant read access to that directory and set `FOUNDRY_OUT` to the same relative
+or absolute path.
 
 Import the library from Solidity:
 
 ```solidity
-import {Upgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
+import { UnsafeUpgrades, Upgrades } from 'openzeppelin-foundry-upgrades-tron/Upgrades.sol';
+import { LinkedLibrary, Options } from 'openzeppelin-foundry-upgrades-tron/Options.sol';
 ```
+
+## Use the modern Solidity API
+
+The validated `Upgrades` library supports UUPS, transparent, and beacon proxies
+using OpenZeppelin Contracts for TRON v5. The following examples assume an
+implementation contract named `Box` with an `initialize` function.
+
+Deploy a UUPS proxy:
+
+```solidity
+address proxy = Upgrades.deployUUPSProxy(
+    "Box.sol:Box",
+    abi.encodeCall(Box.initialize, (initialOwner, 1))
+);
+```
+
+Deploy a transparent proxy and assign ownership of its internally-created
+ProxyAdmin:
+
+```solidity
+address proxy = Upgrades.deployTransparentProxy(
+    "Box.sol:Box",
+    proxyAdminOwner,
+    abi.encodeCall(Box.initialize, (initialOwner, 1))
+);
+```
+
+Deploy a beacon and one of its proxies:
+
+```solidity
+address beacon = Upgrades.deployBeacon("Box.sol:Box", beaconOwner);
+address proxy = Upgrades.deployBeaconProxy(
+    beacon,
+    abi.encodeCall(Box.initialize, (initialOwner, 1))
+);
+```
+
+TVM's `TRC1967Proxy` requires a non-empty initializer call for UUPS and
+transparent deployments. Beacon proxies may intentionally use empty
+initializer data.
+
+Before an upgrade, identify the previous implementation with either
+`@custom:oz-upgrades-from` on the new contract or `referenceContract`:
+
+```solidity
+Options memory opts;
+opts.referenceContract = "Box.sol:Box";
+Upgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
+// Or: Upgrades.upgradeBeacon(beacon, "BoxV2.sol:BoxV2", opts);
+```
+
+For a historical build, set `referenceBuildInfoDir` and prefix the reference
+with that directory's unique short name, for example
+`build-info-v1:contracts/Box.sol:Box`. Historical build-info is trusted release
+input and should be retained and reviewed like source code.
+
+`validateImplementation` and `validateUpgrade` perform checks without a chain
+write. `deployImplementation` validates and deploys a standalone
+implementation. `prepareUpgrade` validates against a reference and deploys the
+implementation for an administrator-controlled later upgrade. The TRC1967
+admin, implementation, and beacon slots are exposed through the three
+`get*Address` helpers.
+
+### Options and linked libraries
+
+`constructorData` contains implementation constructor arguments; it is not
+proxy initializer data. `exclude` controls source globs passed to
+upgrades-core. `unsafeAllow`, `unsafeAllowRenames`,
+`unsafeSkipProxyAdminCheck`, and `unsafeSkipStorageCheck` waive individual
+safety checks. `unsafeSkipAllChecks` also bypasses compiler provenance binding
+and should be a last resort.
+
+Unlinked artifacts require an exact `LinkedLibrary` for every compiler link
+reference:
+
+```solidity
+Options memory opts;
+opts.linkedLibraries = new LinkedLibrary[](1);
+opts.linkedLibraries[0] = LinkedLibrary({
+    sourceName: "src/Math.sol",
+    libraryName: "Math",
+    libraryAddress: deployedMath
+});
+```
+
+Source and library names are case-sensitive. Every mapping must match at least
+one reference, repeated placeholders reuse the same mapping identity, the
+address must contain code, and duplicate or extra mappings are rejected. A
+prelinked artifact must not receive a mapping.
+
+`UnsafeUpgrades` accepts already-deployed implementation addresses and runs no
+upgrade-safety, storage-layout, or compiler-provenance validation. It is useful
+for local tests and coverage, but should not replace validated deployment
+scripts.
+
+## Compiler provenance and FFI security
+
+Validation and deployment consume the same artifact snapshot. Before and after
+the pinned upgrades-core CLI runs, the library binds the artifact to its
+build-info, exact compiler build, source hashes, creation bytecode, linker
+references, output directory, and artifact snapshot hash. A mismatch fails
+before deployment. Do not validate stock-solc build-info and then replace the
+artifact with bytecode from another compiler pipeline.
+
+The validation path uses Forge FFI to run trusted Bash and Node.js code plus
+`@openzeppelin/upgrades-core@1.46.0`. FFI security therefore depends on the
+integrity of the installed package, its remapping, build artifacts, historical
+references, `PATH`, Bash, Node.js, and npm configuration. Review and pin those
+inputs; do not run the library against artifacts or dependencies supplied by an
+untrusted party.
 
 ## Start the RPC adapter
 
@@ -51,15 +193,15 @@ the readiness record is printed.
 Configuration is environment-only so credentials do not appear in shell
 history or process arguments:
 
-| Variable | Default on TRE | Purpose |
-| --- | --- | --- |
-| `TRON_NETWORK` | `tre` | `tre`, `mainnet`, `nile`, or `shasta` |
-| `TRON_RPC_URL` | `http://127.0.0.1:9090` | TRON full-node base URL; `/jsonrpc` is derived automatically |
-| `TRON_PRIVATE_KEY` | TRE development key | Native transaction signer; mandatory and explicit on public networks |
-| `TRON_CHAIN_ID` | `3360022319` | Durable state namespace and Forge chain ID; explicit on public networks |
-| `TRON_FEE_LIMIT` | `1000000000` | Native transaction fee limit |
-| `TRON_STATE_FILE` | `<cwd>/.openzeppelin-upgrades/tron-rpc-state.json` | Absolute path required when explicitly set |
-| `FOUNDRY_OUT` | `<cwd>/out` | Absolute Foundry artifact directory required when explicitly set |
+| Variable           | Default on TRE                                     | Purpose                                                                 |
+| ------------------ | -------------------------------------------------- | ----------------------------------------------------------------------- |
+| `TRON_NETWORK`     | `tre`                                              | `tre`, `mainnet`, `nile`, or `shasta`                                   |
+| `TRON_RPC_URL`     | `http://127.0.0.1:9090`                            | TRON full-node base URL; `/jsonrpc` is derived automatically            |
+| `TRON_PRIVATE_KEY` | TRE development key                                | Native transaction signer; mandatory and explicit on public networks    |
+| `TRON_CHAIN_ID`    | `3360022319`                                       | Durable state namespace and Forge chain ID; explicit on public networks |
+| `TRON_FEE_LIMIT`   | `1000000000`                                       | Native transaction fee limit                                            |
+| `TRON_STATE_FILE`  | `<cwd>/.openzeppelin-upgrades/tron-rpc-state.json` | Absolute path required when explicitly set                              |
+| `FOUNDRY_OUT`      | `<cwd>/out`                                        | Absolute Foundry artifact directory required when explicitly set        |
 
 Public networks never inherit the TRE endpoint or development key. To bind the
 adapter beyond loopback, pass both the host and the explicit acknowledgement:
@@ -95,7 +237,7 @@ mapping; the zero address is the only unmapped identity result.
 The same lookup is exposed over JSON-RPC:
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tron_resolveAddress","params":["0x1234567890123456789012345678901234567890"]}
+{ "jsonrpc": "2.0", "id": 1, "method": "tron_resolveAddress", "params": ["0x1234567890123456789012345678901234567890"] }
 ```
 
 ## Adapter behavior
@@ -143,6 +285,34 @@ retries with `latest` only after the node returns TRE's exact unsupported-
 quantity error. This is head-state compatibility for Forge script hydration,
 not archival or fork support. Stock TRE reports an Ethereum block gas limit of
 zero, so Forge broadcasts must include `--disable-block-gas-limit`.
+
+## TVM differences and unsupported surfaces
+
+Forge returns an Ethereum-style predicted address when a contract is created.
+The adapter maps it durably to the actual TRON/TVM address after a successful,
+confirmed receipt. Continue using the predicted address inside the same Forge
+workflow so calls and ABI address arguments can be rewritten. Resolve the
+actual TVM address before passing a deployment to TronWeb, Hardhat, an explorer,
+or another process that does not use the adapter.
+
+The modern Solidity function shapes intentionally track OpenZeppelin Foundry
+Upgrades v0.4.1, with `LinkedLibrary` as a TVM artifact-provenance extension.
+The following EVM features are intentionally outside the supported surface:
+
+- OpenZeppelin Defender deployment and proposal APIs are not supported or
+  included.
+- Ethereum-style source verification is not translated by the adapter and is
+  not supported; use an appropriate TRON verification workflow separately.
+- Foundry forking is not supported. Numbered block reads exist only to hydrate
+  Forge's immediate broadcast receipts and are not archival or fork support.
+- Hardhat manifests, implementation reuse, kind inference, and `forceImport`
+  are not part of the Solidity API.
+- Typed Ethereum transactions and generic `CREATE2` are rejected by the
+  adapter. Stock constant simulation also rejects ambiguous child creation.
+
+Legacy OpenZeppelin Contracts v4 interfaces remain evidence-gated and are not
+currently exported. They will only be added after real pinned v4 contracts pass
+the complete TRE lifecycle; do not treat locally-authored lookalikes as support.
 
 ## Development
 
