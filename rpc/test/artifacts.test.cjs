@@ -377,3 +377,23 @@ test('detects replacement of FOUNDRY_OUT by a different tree at the same path', 
     error => error.code === 'PROVENANCE_CHANGED',
   );
 });
+
+test('binds FOUNDRY_OUT identity before deployment candidate enumeration', t => {
+  const out = basicOut(t);
+  const displaced = `${out}-enumerated`;
+
+  assert.throws(
+    () =>
+      matchDeploymentArtifact({
+        outputDirectory: out,
+        initcode: '0x6001600055deadbeef',
+        hooks: {
+          afterCandidateMatch() {
+            fs.renameSync(out, displaced);
+            fs.cpSync(displaced, out, { recursive: true });
+          },
+        },
+      }),
+    error => error.code === 'PROVENANCE_CHANGED',
+  );
+});

@@ -320,13 +320,21 @@ function throwVerificationError(result) {
   throw new ArtifactProvenanceError(code, `Artifact provenance failed (${code}): ${result.detailA}`, details);
 }
 
-function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifactPath: artifactPathArg, hooks }) {
+function verifyArtifactProvenance(options) {
+  return verifyArtifactProvenanceBound(options);
+}
+
+function verifyArtifactProvenanceBound(
+  { outputDirectory: outputDirectoryArg, artifactPath: artifactPathArg, hooks },
+  expectedOutputIdentity,
+) {
   const outputDirectory = requireAbsoluteOutput(outputDirectoryArg);
-  const expectedOutputIdentity = outputIdentity(outputDirectory);
+  const boundOutputIdentity = expectedOutputIdentity ?? outputIdentity(outputDirectory);
+  assertStableOutput(outputDirectory, boundOutputIdentity);
   let artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPathArg);
   callHook(hooks, 'afterArtifactBoundaryCheck');
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedOutputIdentity);
+  assertStableOutput(outputDirectory, boundOutputIdentity);
   const buildInfoRoot = path.normalize(buildInfoDirectory(outputDirectory));
   assertNoSymlinksInTree(buildInfoRoot);
   const initial = readArtifact(artifactPath);
@@ -336,7 +344,7 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
   const first = decodeVerification(firstEncoded);
   if (first.numericCode !== CODE.success) throwVerificationError(first);
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedOutputIdentity);
+  assertStableOutput(outputDirectory, boundOutputIdentity);
   if (keccak256(toUtf8Bytes(initial.snapshot)) !== first.artifactSnapshotHash) {
     throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'Artifact changed during provenance verification');
   }
@@ -358,7 +366,7 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
   if (finalLoaded.error !== undefined) throwVerificationError(decodeVerification(finalLoaded.error));
   const finalLoadedSnapshot = snapshotBuildInfo(finalLoaded, outputDirectory);
   artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
-  assertStableOutput(outputDirectory, expectedOutputIdentity);
+  assertStableOutput(outputDirectory, boundOutputIdentity);
   if (
     secondEncoded !== firstEncoded ||
     readArtifact(artifactPath).snapshot !== initial.snapshot ||
@@ -432,6 +440,7 @@ function matchBytecodePrefix(artifact, initcode) {
 
 function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode: initcodeArg, hooks }) {
   const outputDirectory = requireAbsoluteOutput(outputDirectoryArg);
+  const expectedOutputIdentity = outputIdentity(outputDirectory);
   if (typeof initcodeArg !== 'string' || !HEX_BYTES.test(initcodeArg)) {
     throw new ArtifactProvenanceError('INVALID_INITCODE', 'Raw initcode must be even-length hexadecimal bytes');
   }
@@ -447,13 +456,22 @@ function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode
       // Invalid, unrelated JSON cannot be selected as a deployment artifact.
     }
   }
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
   if (preliminary.length === 0) {
     throw new ArtifactProvenanceError('ARTIFACT_NOT_FOUND', 'No verified artifact matches the raw initcode prefix');
   }
   callHook(hooks, 'afterCandidateMatch');
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
 
   const matches = preliminary.map(candidate => ({
-    ...verifyArtifactProvenance({ outputDirectory, artifactPath: candidate.artifactPath, hooks }),
+    ...verifyArtifactProvenanceBound(
+      {
+        outputDirectory,
+        artifactPath: candidate.artifactPath,
+        hooks,
+      },
+      expectedOutputIdentity,
+    ),
   }));
   if (matches.length !== 1) {
     throw new ArtifactProvenanceError(
@@ -471,6 +489,7 @@ function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode
       'The provenance-verified artifact no longer matches the raw initcode prefix',
     );
   }
+  assertStableOutput(outputDirectory, expectedOutputIdentity);
   return {
     artifact: match.artifact,
     abi: structuredClone(match.artifact.abi),
