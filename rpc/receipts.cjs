@@ -104,7 +104,11 @@ function translateReceipt(snapshot, context = {}) {
 
   const blockNumber = quantity(info.blockNumber, 'block number');
   const blockHash = normalizeHash(info.blockHash, 'block hash');
-  const transactionIndex = quantity(info.transactionIndex ?? info.transaction_index, 'transaction index');
+  const nativeTransactionIndex = info.transactionIndex ?? info.transaction_index;
+  if (nativeTransactionIndex === undefined || nativeTransactionIndex === null) {
+    throw new Error('Invalid transaction index');
+  }
+  const transactionIndex = quantity(nativeTransactionIndex, 'transaction index');
   const { type: contractType, value: nativeContract } = contractData(transaction);
   const resolveAddress = typeof context.resolveAddress === 'function' ? context.resolveAddress : undefined;
   const from = resolvedAddress(nativeContract.owner_address, resolveAddress);

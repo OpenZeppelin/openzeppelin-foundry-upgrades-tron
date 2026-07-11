@@ -36,61 +36,84 @@ function stripHex(value, label, allowEmpty = true) {
   return normalized;
 }
 
-function readVarint(bytes, offset) {
+function encodeVarint(value) {
+  let remaining = BigInt(value);
+  const encoded = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining !== 0n) byte |= 0x80;
+    encoded.push(byte);
+  } while (remaining !== 0n);
+  return Buffer.from(encoded);
+}
+
+function readCanonicalVarint(bytes, offset, label) {
   let value = 0n;
   let shift = 0n;
   for (let index = offset; index < bytes.length && index < offset + 10; index += 1) {
     const byte = bytes[index];
     value |= BigInt(byte & 0x7f) << shift;
     if ((byte & 0x80) === 0) {
-      if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Malformed signed native transaction protobuf');
+      if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`Malformed signed native transaction protobuf ${label}`);
+      }
+      const encoded = encodeVarint(value);
+      const consumed = bytes.subarray(offset, index + 1);
+      if (!consumed.equals(encoded)) {
+        throw new Error(`Noncanonical signed native transaction protobuf ${label}`);
+      }
       return { value: Number(value), offset: index + 1 };
     }
     shift += 7n;
   }
-  throw new Error('Malformed signed native transaction protobuf');
+  throw new Error(`Overlong signed native transaction protobuf ${label}`);
 }
 
-function rawDataFromSignedBytes(signedNativeTransaction) {
+function parseCanonicalSignedTransaction(signedNativeTransaction) {
   const bytes = Buffer.from(normalizeSignedBytes(signedNativeTransaction), 'hex');
   let offset = 0;
   let rawData;
+  let signatureCount = 0;
+  const canonicalFields = [];
   while (offset < bytes.length) {
-    const tag = readVarint(bytes, offset);
+    const tag = readCanonicalVarint(bytes, offset, 'tag');
     offset = tag.offset;
-    const field = tag.value >>> 3;
-    const wireType = tag.value & 7;
-    if (wireType === 0) {
-      offset = readVarint(bytes, offset).offset;
-      continue;
+    if (tag.value !== 0x0a && tag.value !== 0x12) {
+      throw new Error('Unsupported signed native transaction protobuf field');
     }
-    if (wireType === 1) {
-      offset += 8;
-      if (offset > bytes.length) throw new Error('Malformed signed native transaction protobuf');
-      continue;
+    if (tag.value === 0x0a && (rawData !== undefined || signatureCount !== 0)) {
+      throw new Error('Duplicate or out-of-order signed native transaction raw_data');
     }
-    if (wireType === 5) {
-      offset += 4;
-      if (offset > bytes.length) throw new Error('Malformed signed native transaction protobuf');
-      continue;
+    if (tag.value === 0x12 && rawData === undefined) {
+      throw new Error('Signed native transaction signature precedes raw_data');
     }
-    if (wireType !== 2) throw new Error('Malformed signed native transaction protobuf');
-    const length = readVarint(bytes, offset);
+    const length = readCanonicalVarint(bytes, offset, 'length');
     offset = length.offset;
     const end = offset + length.value;
     if (end > bytes.length) throw new Error('Malformed signed native transaction protobuf');
-    if (field === 1) {
-      if (rawData !== undefined) throw new Error('Malformed signed native transaction raw_data');
+    const payload = bytes.subarray(offset, end);
+    if (tag.value === 0x0a) {
+      if (payload.length === 0) throw new Error('Signed native transaction has empty raw_data');
       rawData = bytes.subarray(offset, end);
+    } else {
+      if (payload.length !== 65) throw new Error('Signed native transaction signature must be 65 bytes');
+      signatureCount += 1;
     }
+    canonicalFields.push(Buffer.from([tag.value]), encodeVarint(payload.length), payload);
     offset = end;
   }
   if (rawData === undefined || rawData.length === 0) throw new Error('Signed native transaction is missing raw_data');
-  return rawData;
+  if (signatureCount === 0) throw new Error('Signed native transaction is missing a signature');
+  if (!Buffer.concat(canonicalFields).equals(bytes)) {
+    throw new Error('Noncanonical signed native transaction protobuf wrapper');
+  }
+  return { rawData, signatureCount };
 }
 
 function nativeTxIdFromSignedBytes(signedNativeTransaction) {
-  return createHash('sha256').update(rawDataFromSignedBytes(signedNativeTransaction)).digest('hex');
+  const { rawData } = parseCanonicalSignedTransaction(signedNativeTransaction);
+  return createHash('sha256').update(rawData).digest('hex');
 }
 
 function serializeSignedTransaction(transaction) {
@@ -149,6 +172,13 @@ function duplicateResponse(response) {
   const code = typeof response.code === 'string' ? response.code : '';
   const message = responseMessage(response);
   return /DUP_TRANSACTION/i.test(code) || /duplicate transaction/i.test(message);
+}
+
+class RetryableNativeQueryError extends Error {
+  constructor(path, cause) {
+    super(`Transient TRON query failure at ${path}`, { cause });
+    this.name = 'RetryableNativeQueryError';
+  }
 }
 
 class TronClient {
@@ -317,9 +347,16 @@ class TronClient {
 
   async getTransaction(nativeTransactionId) {
     const txid = normalizeTxId(nativeTransactionId);
+    const request = async (path, body) => {
+      try {
+        return await this.transport.request(path, body);
+      } catch (error) {
+        throw new RetryableNativeQueryError(path, error);
+      }
+    };
     const [transaction, info] = await Promise.all([
-      this.transport.request('wallet/gettransactionbyid', { value: txid }),
-      this.transport.request('walletsolidity/gettransactioninfobyid', { value: txid }),
+      request('wallet/gettransactionbyid', { value: txid }),
+      request('walletsolidity/gettransactioninfobyid', { value: txid }),
     ]);
     if (emptyResponse(transaction)) return null;
     if (normalizeTxId(transaction.txID) !== txid)
@@ -329,22 +366,64 @@ class TronClient {
     }
     if (normalizeTxId(info.id) !== txid)
       throw new Error('Native transaction receipt returned a different transaction ID');
-    let confirmedInfo = info;
-    if (confirmedInfo.blockHash === undefined) {
-      const block = await this.transport.request('walletsolidity/getblockbynum', { num: info.blockNumber });
-      if (!emptyResponse(block) && block.blockID !== undefined) confirmedInfo = { ...info, blockHash: block.blockID };
+    if (!Number.isSafeInteger(info.blockNumber) || info.blockNumber < 0) {
+      throw new Error('Invalid confirmed block number');
     }
-    return { transaction, info: confirmedInfo, confirmed: true };
+    const block = await request('walletsolidity/getblockbynum', { num: info.blockNumber });
+    if (
+      emptyResponse(block) ||
+      typeof block.blockID !== 'string' ||
+      !Array.isArray(block.transactions) ||
+      !Number.isSafeInteger(block.block_header?.raw_data?.number) ||
+      block.block_header.raw_data.number < 0 ||
+      block.block_header.raw_data.number !== info.blockNumber
+    ) {
+      throw new Error('Confirmed solid block number or transaction list mismatch');
+    }
+    const blockHash = normalizeTxId(block.blockID);
+    if (info.blockHash !== undefined && normalizeTxId(info.blockHash) !== blockHash) {
+      throw new Error('Confirmed solid block hash mismatch');
+    }
+    const matchingIndexes = [];
+    for (let index = 0; index < block.transactions.length; index += 1) {
+      const blockTransaction = block.transactions[index];
+      if (!isObject(blockTransaction) || typeof blockTransaction.txID !== 'string') {
+        throw new Error('Invalid confirmed solid block transaction');
+      }
+      if (normalizeTxId(blockTransaction.txID) === txid) matchingIndexes.push(index);
+    }
+    if (matchingIndexes.length !== 1) {
+      throw new Error('Confirmed transaction is not uniquely present in its solid block');
+    }
+    const transactionIndex = matchingIndexes[0];
+    if (info.transactionIndex !== undefined && info.transactionIndex !== transactionIndex) {
+      throw new Error('Confirmed transaction index mismatch');
+    }
+    return {
+      transaction,
+      info: { ...info, blockHash, transactionIndex },
+      confirmed: true,
+    };
   }
 
   async waitForReceipt(nativeTransactionId, context = {}) {
     const txid = normalizeTxId(nativeTransactionId);
     const deadline = this.now() + this.receiptTimeoutMs;
+    let lastCause;
     for (;;) {
-      const snapshot = await this.getTransaction(txid);
+      let snapshot;
+      try {
+        snapshot = await this.getTransaction(txid);
+      } catch (error) {
+        if (!(error instanceof RetryableNativeQueryError)) throw error;
+        lastCause = error.cause ?? error;
+      }
       if (snapshot?.confirmed === true) return translateReceipt(snapshot, context);
-      if (this.now() >= deadline) throw new Error(`Timed out waiting for native transaction ${txid}`);
-      await this.sleep(this.pollIntervalMs);
+      const remaining = deadline - this.now();
+      if (remaining <= 0) {
+        throw new Error(`Timed out waiting for native transaction ${txid}`, { cause: lastCause });
+      }
+      await this.sleep(Math.min(this.pollIntervalMs, remaining));
     }
   }
 }

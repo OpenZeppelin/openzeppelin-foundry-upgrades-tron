@@ -27,6 +27,7 @@ function confirmedInfo(overrides = {}) {
   return {
     id: NATIVE_TXID,
     blockNumber: 42,
+    transactionIndex: 2,
     blockTimeStamp: 1_700_000_000_000,
     blockHash: 'cc'.repeat(32),
     contract_address: ACTUAL_CONTRACT,
@@ -72,7 +73,7 @@ test('translates a successful native deployment receipt including block, contrac
 
   assert.deepEqual(receipt, {
     transactionHash: SOURCE_HASH,
-    transactionIndex: '0x0',
+    transactionIndex: '0x2',
     blockHash: `0x${'cc'.repeat(32)}`,
     blockNumber: '0x2a',
     from: `0x${'11'.repeat(20)}`,
@@ -87,7 +88,7 @@ test('translates a successful native deployment receipt including block, contrac
         data: '0x1234',
         blockNumber: '0x2a',
         transactionHash: SOURCE_HASH,
-        transactionIndex: '0x0',
+        transactionIndex: '0x2',
         blockHash: `0x${'cc'.repeat(32)}`,
         logIndex: '0x0',
         removed: false,
@@ -208,5 +209,13 @@ test('refuses unconfirmed, mismatched, or malformed native receipt data', () => 
         { sourceTransactionHash: SOURCE_HASH },
       ),
     /block hash/i,
+  );
+  assert.throws(
+    () =>
+      translateReceipt(
+        { transaction: nativeTransaction(), info: confirmedInfo({ transactionIndex: undefined }) },
+        { sourceTransactionHash: SOURCE_HASH },
+      ),
+    /transaction index/i,
   );
 });

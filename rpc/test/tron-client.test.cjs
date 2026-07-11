@@ -4,6 +4,7 @@ const test = require('node:test');
 const { TronWeb, utils } = require('tronweb');
 
 const { TronClient, nativeTxIdFromSignedBytes, serializeSignedTransaction } = require('../tron-client.cjs');
+const { translateReceipt } = require('../receipts.cjs');
 
 const PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
 const OWNER = `41${'11'.repeat(20)}`;
@@ -39,6 +40,47 @@ function unsignedTransaction() {
 
 function signedFixture() {
   return utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
+}
+
+function encodeVarint(value) {
+  let remaining = BigInt(value);
+  const bytes = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining !== 0n);
+  return Buffer.from(bytes);
+}
+
+function readTestVarint(bytes, offset) {
+  let value = 0;
+  let shift = 0;
+  for (;;) {
+    const byte = bytes[offset];
+    value |= (byte & 0x7f) << shift;
+    offset += 1;
+    if ((byte & 0x80) === 0) return { value, offset };
+    shift += 7;
+  }
+}
+
+function signedWrapperParts() {
+  const bytes = Buffer.from(serializeSignedTransaction(signedFixture()), 'hex');
+  assert.equal(bytes[0], 0x0a);
+  const rawLength = readTestVarint(bytes, 1);
+  const rawEnd = rawLength.offset + rawLength.value;
+  assert.equal(bytes[rawEnd], 0x12);
+  const signatureLength = readTestVarint(bytes, rawEnd + 1);
+  const signatureEnd = signatureLength.offset + signatureLength.value;
+  assert.equal(signatureEnd, bytes.length);
+  return {
+    rawField: bytes.subarray(0, rawEnd),
+    rawPayload: bytes.subarray(rawLength.offset, rawEnd),
+    signatureField: bytes.subarray(rawEnd),
+    signaturePayload: bytes.subarray(signatureLength.offset, signatureEnd),
+  };
 }
 
 function fixture(overrides = {}) {
@@ -221,6 +263,65 @@ test('serializes the complete signed protobuf and derives a signature-independen
   assert.equal(nativeTxIdFromSignedBytes(serialized), signed.txID);
   assert.equal(nativeTxIdFromSignedBytes(serializeSignedTransaction(withRepeatedSignature)), signed.txID);
   assert.throws(() => nativeTxIdFromSignedBytes('00'), /raw_data|protobuf/i);
+});
+
+test('rejects noncanonical or structurally invalid durable TRON transaction protobuf wrappers', async t => {
+  const { rawField, rawPayload, signatureField, signaturePayload } = signedWrapperParts();
+  const malformed = {
+    unsigned: rawField,
+    'duplicate raw_data': Buffer.concat([rawField, rawField, signatureField]),
+    'signature before raw_data': Buffer.concat([signatureField, rawField]),
+    'wrong signature size': Buffer.concat([rawField, Buffer.from([0x12, 0x40]), signaturePayload.subarray(0, 64)]),
+    'unknown top-level field': Buffer.concat([rawField, signatureField, Buffer.from([0x1a, 0x00])]),
+    'nonminimal signature tag': Buffer.concat([
+      rawField,
+      Buffer.from([0x92, 0x00]),
+      encodeVarint(signaturePayload.length),
+      signaturePayload,
+    ]),
+    'nonminimal raw length': Buffer.concat([
+      Buffer.from([
+        0x0a,
+        ...encodeVarint(rawPayload.length).map((byte, index, values) =>
+          index === values.length - 1 ? byte | 0x80 : byte,
+        ),
+        0x00,
+      ]),
+      rawPayload,
+      signatureField,
+    ]),
+    'overlong tag': Buffer.concat([Buffer.alloc(10, 0x80), rawField, signatureField]),
+    'empty signature': Buffer.concat([rawField, Buffer.from([0x12, 0x00])]),
+  };
+
+  for (const [name, bytes] of Object.entries(malformed)) {
+    await t.test(name, () => {
+      assert.throws(() => nativeTxIdFromSignedBytes(bytes.toString('hex')), /signed|protobuf|signature|raw_data/i);
+    });
+  }
+});
+
+test('rejects unsigned and malformed-signature bytes before simulation or broadcast transport calls', async () => {
+  const { rawField, signaturePayload } = signedWrapperParts();
+  const invalid = [
+    rawField.toString('hex'),
+    Buffer.concat([rawField, Buffer.from([0x12, 0x40]), signaturePayload.subarray(0, 64)]).toString('hex'),
+  ];
+  let requests = 0;
+  const { client } = fixture({
+    transport: {
+      async request() {
+        requests += 1;
+        throw new Error('must not be called');
+      },
+    },
+  });
+
+  for (const bytes of invalid) {
+    await assert.rejects(() => client.simulateSigned(bytes), /signed|signature/i);
+    await assert.rejects(() => client.broadcastSigned(bytes), /signed|signature/i);
+  }
+  assert.equal(requests, 0);
 });
 
 test('simulates the exact signed transaction and returns a complete ordered child-attempt trace', async () => {
@@ -416,6 +517,7 @@ test('polls unconfirmed transactions until a confirmed translated receipt exists
         blockNumber: 42,
         blockTimeStamp: 1_700_000_000_000,
         blockHash: 'ef'.repeat(32),
+        transactionIndex: 0,
         receipt: { result: 'SUCCESS', energy_usage_total: 50, energy_fee: 100 },
         fee: 125,
       },
@@ -437,6 +539,8 @@ test('polls unconfirmed transactions until a confirmed translated receipt exists
 test('loads the confirmed block hash while querying a native receipt', async () => {
   const transaction = unsignedTransaction();
   const txid = transaction.txID;
+  const before = { txID: 'aa'.repeat(32) };
+  const after = { txID: 'bb'.repeat(32) };
   const requests = [];
   const { client } = fixture({
     transport: {
@@ -444,9 +548,21 @@ test('loads the confirmed block hash while querying a native receipt', async () 
         requests.push({ path, body });
         if (path === 'wallet/gettransactionbyid') return transaction;
         if (path === 'walletsolidity/gettransactioninfobyid') {
-          return { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } };
+          return {
+            id: txid,
+            blockNumber: 7,
+            blockTimeStamp: 1_700_000_000_000,
+            receipt: { result: 'SUCCESS', energy_usage_total: 1 },
+            log: [{ address: CONTRACT.slice(2), topics: [], data: '' }],
+          };
         }
-        if (path === 'walletsolidity/getblockbynum') return { blockID: 'ef'.repeat(32) };
+        if (path === 'walletsolidity/getblockbynum') {
+          return {
+            blockID: 'ef'.repeat(32),
+            block_header: { raw_data: { number: 7 } },
+            transactions: [before, transaction, after],
+          };
+        }
         throw new Error(`Unexpected request: ${path}`);
       },
     },
@@ -456,7 +572,82 @@ test('loads the confirmed block hash while querying a native receipt', async () 
 
   assert.equal(snapshot.confirmed, true);
   assert.equal(snapshot.info.blockHash, 'ef'.repeat(32));
+  assert.equal(snapshot.info.transactionIndex, 1);
+  const translated = translateReceipt(snapshot, {
+    sourceTransactionHash: `0x${'ab'.repeat(32)}`,
+  });
+  assert.equal(translated.transactionIndex, '0x1');
+  assert.equal(translated.logs[0].transactionIndex, '0x1');
   assert.deepEqual(requests.at(-1), { path: 'walletsolidity/getblockbynum', body: { num: 7 } });
+});
+
+test('rejects confirmed solid blocks that cannot uniquely bind the transaction, block, and index', async t => {
+  const transaction = unsignedTransaction();
+  const txid = transaction.txID;
+  const cases = [
+    {
+      name: 'transaction absent',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: { blockID: 'ef'.repeat(32), block_header: { raw_data: { number: 7 } }, transactions: [] },
+      pattern: /transaction.*block/i,
+    },
+    {
+      name: 'transaction duplicated',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 7 } },
+        transactions: [transaction, transaction],
+      },
+      pattern: /transaction.*block/i,
+    },
+    {
+      name: 'block number mismatch',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 8 } },
+        transactions: [transaction],
+      },
+      pattern: /block number/i,
+    },
+    {
+      name: 'invalid negative block number',
+      info: { id: txid, blockNumber: -1, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: -1 } },
+        transactions: [transaction],
+      },
+      pattern: /block number/i,
+    },
+    {
+      name: 'reported index mismatch',
+      info: { id: txid, blockNumber: 7, transactionIndex: 1, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 7 } },
+        transactions: [transaction],
+      },
+      pattern: /transaction index/i,
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const { client } = fixture({
+        transport: {
+          async request(path) {
+            if (path === 'wallet/gettransactionbyid') return transaction;
+            if (path === 'walletsolidity/gettransactioninfobyid') return item.info;
+            if (path === 'walletsolidity/getblockbynum') return item.block;
+            throw new Error(`Unexpected request: ${path}`);
+          },
+        },
+      });
+      await assert.rejects(() => client.getTransaction(txid), item.pattern);
+    });
+  }
 });
 
 test('does not confirm from full-node transaction inclusion without a solid receipt', async () => {
@@ -486,6 +677,92 @@ test('does not confirm from full-node transaction inclusion without a solid rece
   );
   assert.ok(paths.includes('walletsolidity/gettransactioninfobyid'));
   assert.ok(!paths.includes('wallet/gettransactioninfobyid'));
+});
+
+test('retries transient solid-node query failures and then returns the confirmed receipt', async () => {
+  const transaction = unsignedTransaction();
+  let solidAttempts = 0;
+  const sleeps = [];
+  const { client } = fixture({
+    sleep: async delay => sleeps.push(delay),
+    transport: {
+      async request(path) {
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        if (path === 'walletsolidity/gettransactioninfobyid') {
+          solidAttempts += 1;
+          if (solidAttempts === 1) throw new Error('temporary solid-node outage');
+          return {
+            id: transaction.txID,
+            blockNumber: 7,
+            blockTimeStamp: 1_700_000_000_000,
+            receipt: { result: 'SUCCESS', energy_usage_total: 1 },
+          };
+        }
+        if (path === 'walletsolidity/getblockbynum') {
+          return {
+            blockID: 'ef'.repeat(32),
+            block_header: { raw_data: { number: 7 } },
+            transactions: [transaction],
+          };
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    },
+  });
+
+  const receipt = await client.waitForReceipt(transaction.txID, {
+    sourceTransactionHash: `0x${'ab'.repeat(32)}`,
+  });
+
+  assert.equal(receipt.status, '0x1');
+  assert.equal(solidAttempts, 2);
+  assert.deepEqual(sleeps, [500]);
+});
+
+test('times out repeated transient receipt queries with the last transport failure as cause', async () => {
+  const transaction = unsignedTransaction();
+  let clock = 0;
+  const { client } = fixture({
+    now: () => clock,
+    receiptTimeoutMs: 10,
+    pollIntervalMs: 5,
+    sleep: async delay => {
+      clock += delay;
+    },
+    transport: {
+      async request(path) {
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        throw new Error(`offline at ${path}`);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    error => /timed out/i.test(error.message) && /offline.*walletsolidity/i.test(error.cause?.message ?? ''),
+  );
+});
+
+test('fails immediately on a permanent queried transaction ID mismatch', async () => {
+  const transaction = unsignedTransaction();
+  const wrong = { ...transaction, txID: 'ff'.repeat(32) };
+  let sleeps = 0;
+  const { client } = fixture({
+    sleep: async () => {
+      sleeps += 1;
+    },
+    transport: {
+      async request(path) {
+        return path === 'wallet/gettransactionbyid' ? wrong : {};
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    /different transaction id/i,
+  );
+  assert.equal(sleeps, 0);
 });
 
 test('times out receipt polling without treating an unconfirmed transaction as failure', async () => {
