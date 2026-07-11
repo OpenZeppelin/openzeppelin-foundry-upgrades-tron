@@ -205,13 +205,16 @@ async function closeReservations(servers, sockets) {
   }
 }
 
-function assertStateLockHeld(capability) {
+function assertStateLockHeld(capability, expectedStatePath) {
   const record = capabilityRecords.get(capability);
   if (record === undefined) {
     throw new Error('Expected an authentic state lock capability');
   }
   if (!record.held || record.servers.some(server => !server.listening)) {
     throw new Error('State lock is no longer held');
+  }
+  if (expectedStatePath !== undefined && !crypto.timingSafeEqual(record.stateId, stateIdentity(expectedStatePath))) {
+    throw new Error('State lock capability belongs to a different state path');
   }
   return capability;
 }
@@ -230,7 +233,7 @@ async function releaseStateLock(capability) {
   await closeReservations(record.servers, record.sockets);
 }
 
-function createCapability(servers, sockets) {
+function createCapability(servers, sockets, stateId) {
   const ports = Object.freeze(servers.map(server => server.address().port));
   let capability;
   capability = Object.freeze({
@@ -245,7 +248,7 @@ function createCapability(servers, sockets) {
     },
   });
 
-  const record = { closing: false, held: true, servers, sockets };
+  const record = { closing: false, held: true, servers, sockets, stateId };
   capabilityRecords.set(capability, record);
   const invalidate = () => {
     if (!record.held || record.closing) {
@@ -294,7 +297,7 @@ async function acquireStateLock(statePath, options = {}) {
       throw new Error('Unable to acquire the state lock because all 8 candidate ports are occupied');
     }
 
-    return createCapability(servers, sockets);
+    return createCapability(servers, sockets, stateId);
   } catch (error) {
     try {
       await closeReservations(servers, sockets);

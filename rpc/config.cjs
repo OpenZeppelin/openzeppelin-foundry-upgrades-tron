@@ -1,7 +1,13 @@
+const path = require('node:path');
+
+const { computeAddress } = require('ethers');
+
 const DEFAULT_TRE_ENDPOINT = 'http://127.0.0.1:9090';
 const DEFAULT_TRE_PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
 const DEFAULT_FEE_LIMIT = 1_000_000_000;
 const MAX_FEE_LIMIT = 1_000_000_000;
+const DEFAULT_CHAIN_ID = 728126428n;
+const DEFAULT_STATE_FILE = '.openzeppelin-upgrades/tron-rpc-state.json';
 
 const PUBLIC_NETWORKS = new Set(['mainnet', 'nile', 'shasta']);
 const SUPPORTED_NETWORKS = new Set(['tre', ...PUBLIC_NETWORKS]);
@@ -73,6 +79,26 @@ function parseFeeLimit(value) {
   return feeLimit;
 }
 
+function parseChainId(value) {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) {
+    throw new Error('TRON_CHAIN_ID must be a positive canonical decimal integer');
+  }
+  const chainId = BigInt(value);
+  if (chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error('TRON_CHAIN_ID exceeds the supported safe integer range');
+  }
+  return chainId;
+}
+
+function explicitAbsolutePath(environment, key, fallback) {
+  const value = environment[key];
+  if (value === undefined) return path.resolve(fallback);
+  if (typeof value !== 'string' || value.length === 0 || !path.isAbsolute(value)) {
+    throw new Error(`${key} must be an absolute path`);
+  }
+  return path.normalize(value);
+}
+
 function parseConfig(environment = process.env) {
   if (environment === null || typeof environment !== 'object') {
     throw new Error('Configuration environment must be an object');
@@ -100,6 +126,7 @@ function parseConfig(environment = process.env) {
   const feeLimit = Object.prototype.hasOwnProperty.call(environment, 'TRON_FEE_LIMIT')
     ? parseFeeLimit(environment.TRON_FEE_LIMIT)
     : DEFAULT_FEE_LIMIT;
+  const chainId = parseChainId(environment.TRON_CHAIN_ID ?? DEFAULT_CHAIN_ID.toString());
 
   return Object.freeze({
     network,
@@ -107,11 +134,18 @@ function parseConfig(environment = process.env) {
     ...endpoint,
     privateKey,
     feeLimit,
+    chainId,
+    chainIdentity: `${network}:${chainId}`,
+    expectedSender: computeAddress(`0x${privateKey}`).toLowerCase(),
+    foundryOut: explicitAbsolutePath(environment, 'FOUNDRY_OUT', 'out'),
+    stateFile: explicitAbsolutePath(environment, 'TRON_STATE_FILE', DEFAULT_STATE_FILE),
   });
 }
 
 module.exports = {
+  DEFAULT_CHAIN_ID,
   DEFAULT_FEE_LIMIT,
+  DEFAULT_STATE_FILE,
   DEFAULT_TRE_ENDPOINT,
   DEFAULT_TRE_PRIVATE_KEY,
   MAX_FEE_LIMIT,

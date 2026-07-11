@@ -555,6 +555,7 @@ async function rewriteCall(decoded, context, deps) {
 
 module.exports = {
   RewriteError,
+  assertOpaqueBytesSafe,
   rewriteAbiValues,
   rewriteCall,
   rewriteCalldata,

@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const test = require('node:test');
+
+const { computeAddress } = require('ethers');
 
 const {
   DEFAULT_FEE_LIMIT,
@@ -21,6 +24,32 @@ test('uses safe TRE-only defaults', () => {
   assert.equal(config.jsonRpcEndpoint, `${DEFAULT_TRE_ENDPOINT}/jsonrpc`);
   assert.equal(config.privateKey, DEFAULT_TRE_PRIVATE_KEY);
   assert.equal(config.feeLimit, DEFAULT_FEE_LIMIT);
+  assert.equal(config.chainId, 728126428n);
+  assert.equal(config.chainIdentity, 'tre:728126428');
+  assert.equal(config.expectedSender, computeAddress(`0x${DEFAULT_TRE_PRIVATE_KEY}`).toLowerCase());
+  assert.equal(config.foundryOut, path.resolve('out'));
+  assert.equal(config.stateFile, path.resolve('.openzeppelin-upgrades/tron-rpc-state.json'));
+});
+
+test('validates absolute state and Foundry output paths plus explicit chain identity', () => {
+  const foundryOut = path.resolve('/tmp', 'foundry-out');
+  const stateFile = path.resolve('/tmp', 'tron-rpc-state.json');
+  const config = parseConfig({
+    FOUNDRY_OUT: foundryOut,
+    TRON_STATE_FILE: stateFile,
+    TRON_CHAIN_ID: '12345',
+  });
+
+  assert.equal(config.foundryOut, foundryOut);
+  assert.equal(config.stateFile, stateFile);
+  assert.equal(config.chainId, 12345n);
+  assert.equal(config.chainIdentity, 'tre:12345');
+
+  assert.throws(() => parseConfig({ FOUNDRY_OUT: 'out' }), /FOUNDRY_OUT.*absolute/i);
+  assert.throws(() => parseConfig({ TRON_STATE_FILE: 'state.json' }), /TRON_STATE_FILE.*absolute/i);
+  for (const chainId of ['', '0', '-1', '1.5', '0x2a', '01']) {
+    assert.throws(() => parseConfig({ TRON_CHAIN_ID: chainId }), /TRON_CHAIN_ID/i);
+  }
 });
 
 test('requires an explicit endpoint and private key for every public network', () => {
