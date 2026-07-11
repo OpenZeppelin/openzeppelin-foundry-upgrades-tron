@@ -33,7 +33,12 @@ silently builds a replacement transaction.
 Only canonical, EIP-155-protected legacy Ethereum transactions from the
 configured sender and chain are accepted. Typed transaction envelopes,
 unprotected signatures, malformed RLP, `CREATE2`, and ambiguous opaque address
-payloads fail before native broadcast.
+payloads fail before native broadcast. Opaque bytes are rejected when they
+contain a known predicted address in packed 20-byte, fixed-bytes, or padded ABI
+form. Before a mapped contract ABI is reused, its current artifact provenance
+must still match the provenance recorded for its confirmed deployment; derived
+ProxyAdmin metadata is additionally bound through its parent transparent proxy
+deployment.
 
 Stock TRE does not serve historical state for numbered block tags. The adapter
 retries numbered balance, code, storage, and call reads against `latest` only

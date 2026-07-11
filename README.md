@@ -197,8 +197,10 @@ Validation and deployment consume the same artifact snapshot. Before and after
 the pinned upgrades-core CLI runs, the library binds the artifact to its
 build-info, exact compiler build, source hashes, creation bytecode, linker
 references, output directory, and artifact snapshot hash. A mismatch fails
-before deployment. Do not validate stock-solc build-info and then replace the
-artifact with bytecode from another compiler pipeline.
+before deployment. The RPC adapter also rechecks the persisted deployment
+provenance before using an artifact ABI for any later address rewrite, so a
+changed same-name artifact fails closed. Do not validate stock-solc build-info
+and then replace the artifact with bytecode from another compiler pipeline.
 
 The validation path uses Forge FFI to run trusted Bash and Node.js code plus
 `@openzeppelin/upgrades-core@1.46.0`. FFI security therefore depends on the
