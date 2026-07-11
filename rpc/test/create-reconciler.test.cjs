@@ -36,6 +36,12 @@ const PROXY_ADMIN_IDENTITY = {
   contractName: 'ProxyAdmin',
   fullyQualifiedName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
 };
+const UPSTREAM_V4_TRANSPARENT_IDENTITY = {
+  sourceName: 'node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+  contractName: 'TransparentUpgradeableProxy',
+  fullyQualifiedName:
+    'node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+};
 
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-reconciler-'));
@@ -255,6 +261,57 @@ test('fails closed outside the distinguishable stock constant-simulation CREATE 
       item.name,
     );
     assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  }
+});
+
+test('distinguishes v5 child-creating and upstream v4 zero-child transparent proxy profiles', t => {
+  const cases = [
+    {
+      name: 'TRON v5 accepts its one successful ProxyAdmin child',
+      operationContext: context(),
+      attempts: [attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`)],
+      accepted: true,
+    },
+    {
+      name: 'TRON v5 rejects a missing ProxyAdmin child',
+      operationContext: context(),
+      attempts: [],
+      accepted: false,
+    },
+    {
+      name: 'upstream v4 accepts its zero-child constructor profile',
+      operationContext: context({ artifactIdentity: UPSTREAM_V4_TRANSPARENT_IDENTITY }),
+      attempts: [],
+      accepted: true,
+    },
+    {
+      name: 'upstream v4 rejects a fabricated ProxyAdmin child',
+      operationContext: context({ artifactIdentity: UPSTREAM_V4_TRANSPARENT_IDENTITY }),
+      attempts: [attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`)],
+      accepted: false,
+    },
+  ];
+
+  for (const item of cases) {
+    const { journal, reconciler } = fixture(t);
+    const prepare = () =>
+      reconciler.recordPreparedNative(
+        SOURCE_HASH,
+        nativeTransaction(),
+        payloadSimulation(item.attempts),
+        item.operationContext,
+      );
+    if (item.accepted) {
+      assert.doesNotThrow(prepare, item.name);
+      assert.equal(journal.get(SOURCE_HASH).state, 'native-built');
+    } else {
+      assert.throws(
+        prepare,
+        error => error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
+        item.name,
+      );
+      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+    }
   }
 });
 
