@@ -448,12 +448,13 @@ function createRpcServer(rawOptions) {
       while (inFlight.size > 0) {
         await Promise.allSettled([...inFlight]);
       }
-      clearTimeout(forceClose);
       let closeError;
       try {
         await listenerClose;
       } catch (error) {
         closeError = error;
+      } finally {
+        clearTimeout(forceClose);
       }
       address = undefined;
       phase = 'stopped';

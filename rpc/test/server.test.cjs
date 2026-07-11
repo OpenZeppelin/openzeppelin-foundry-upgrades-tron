@@ -491,6 +491,31 @@ test('waits for in-flight handlers, releases last, and makes shutdown idempotent
   assert.equal(events.filter(event => event === 'release').length, 1);
 });
 
+test('grace-closes a request body that has not reached the handler', async t => {
+  let calls = 0;
+  const server = await startedServer(t, {
+    handlers: fakeHandlers({
+      async handle() {
+        calls += 1;
+      },
+    }),
+    requestTimeoutMs: 1_000,
+    shutdownGraceMs: 40,
+  });
+  const partial = await openPartialRequest(
+    server.address(),
+    'POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n{',
+  );
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const started = Date.now();
+
+  await server.stop();
+
+  assert.ok(Date.now() - started < 300);
+  assert.equal(await partial.response, '');
+  assert.equal(calls, 0);
+});
+
 test('sanitizes handler and serialization failures', async t => {
   const secret = 'private-key-material';
   const server = await startedServer(t, {
