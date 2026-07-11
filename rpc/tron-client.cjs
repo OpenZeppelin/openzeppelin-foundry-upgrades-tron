@@ -11,6 +11,7 @@ const HEX_BYTES_PATTERN = /^(?:0x)?(?:[0-9a-f]{2})+$/i;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const DEFAULT_RECEIPT_TIMEOUT_MS = 120_000;
 const DEFAULT_BROADCAST_ATTEMPTS = 3;
+const DEFAULT_SIMULATION_READINESS_TIMEOUT_MS = 10_000;
 const SIMULATION_PROBE_INITCODE = '6000600053600160006000f0506460006000fd6000526005601b6000f05060006000f3';
 
 function isObject(value) {
@@ -178,11 +179,7 @@ function duplicateResponse(response) {
 
 function explicitMissingSimulationCapability(value) {
   const status = numericHttpStatus(value);
-  if (status === 404 || status === 405 || status === 501) return true;
-  const message = [value?.message, value?.code, responseMessage(isObject(value) ? value : {})]
-    .filter(item => typeof item === 'string')
-    .join(' ');
-  return /\bmethod(?:\s+is)?\s+not\s+found\b/i.test(message);
+  return status === 404 || status === 405 || status === 501;
 }
 
 function singleNativeContract(transaction, label) {
@@ -414,6 +411,11 @@ class TronClient {
       'broadcast attempt count',
       DEFAULT_BROADCAST_ATTEMPTS,
     );
+    this.simulationReadinessTimeoutMs = positiveInteger(
+      options.simulationReadinessTimeoutMs,
+      'simulation readiness timeout',
+      DEFAULT_SIMULATION_READINESS_TIMEOUT_MS,
+    );
     this.simulationCapability = undefined;
     this.simulationProbePromise = undefined;
     this.constantTraceCapability = false;
@@ -473,7 +475,7 @@ class TronClient {
     return this.signBuiltTransaction(wrapper.transaction);
   }
 
-  async simulateSigned(signedNativeTransaction, expectedNativeTransactionId, builtTransaction) {
+  async simulateSigned(signedNativeTransaction, expectedNativeTransactionId, builtTransaction, options = {}) {
     const signed = normalizeSignedBytes(signedNativeTransaction);
     const nativeTransactionId = nativeTxIdFromSignedBytes(signed);
     if (
@@ -483,24 +485,28 @@ class TronClient {
       throw new Error('Native transaction ID mismatch before simulation');
     }
     if (this.simulationCapability === 'constant-create') {
-      return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+      return this.simulatePayload(signed, nativeTransactionId, builtTransaction, options.signal);
     }
     let response;
     try {
-      response = await this.transport.request('wallet/simulatesignedtransaction', { transaction: signed });
+      response = await this.transport.request(
+        'wallet/simulatesignedtransaction',
+        { transaction: signed },
+        { signal: options.signal },
+      );
     } catch (error) {
       if (explicitMissingSimulationCapability(error)) {
         if (builtTransaction === undefined) {
           throw new Error('Exact signed-transaction simulation is unavailable', { cause: error });
         }
-        return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+        return this.simulatePayload(signed, nativeTransactionId, builtTransaction, options.signal);
       }
       throw new Error('Exact signed-transaction simulation is unavailable', { cause: error });
     }
     if (!isObject(response) || response.result?.result !== true) {
       if (explicitMissingSimulationCapability(response)) {
         if (builtTransaction === undefined) throw new Error('Exact signed-transaction simulation is unavailable');
-        return this.simulatePayload(signed, nativeTransactionId, builtTransaction);
+        return this.simulatePayload(signed, nativeTransactionId, builtTransaction, options.signal);
       }
       throw new Error(
         `Exact signed-transaction simulation failed${responseMessage(response ?? {}) ? `: ${responseMessage(response)}` : ''}`,
@@ -547,9 +553,9 @@ class TronClient {
     };
   }
 
-  async simulatePayload(signed, nativeTransactionId, builtTransaction) {
+  async simulatePayload(signed, nativeTransactionId, builtTransaction, signal) {
     const payload = payloadFromSignedJson(signed, builtTransaction);
-    const response = await this.transport.request('wallet/triggerconstantcontract', payload.body);
+    const response = await this.transport.request('wallet/triggerconstantcontract', payload.body, { signal });
     if (!isObject(response) || response.result?.result !== true) {
       throw new Error(
         `Constant payload simulation failed${responseMessage(response ?? {}) ? `: ${responseMessage(response)}` : ''}`,
@@ -575,32 +581,49 @@ class TronClient {
     if (this.simulationCapability !== undefined) return this.simulationCapability;
     if (this.simulationProbePromise !== undefined) return this.simulationProbePromise;
     this.simulationProbePromise = (async () => {
-      const built = await this.buildCreate({
-        abi: [],
-        bytecode: SIMULATION_PROBE_INITCODE,
-        constructorData: '',
-        ownerAddress: this.ownerAddress(),
-        name: 'OpenZeppelinSimulationProbe',
-        callValue: 0,
+      const controller = new AbortController();
+      let timer;
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`TRON simulation readiness timed out after ${this.simulationReadinessTimeoutMs}ms`));
+        }, this.simulationReadinessTimeoutMs);
       });
-      const simulation = await this.simulateSigned(
-        built.signedNativeTransaction,
-        built.nativeTransactionId,
-        built.transaction,
-      );
-      if (
-        simulation.childCreateAttempts.length !== 2 ||
-        simulation.childCreateAttempts[0].success !== true ||
-        simulation.childCreateAttempts[1].success !== false ||
-        simulation.childCreateAttempts.some(attempt => attempt.callerAddress !== simulation.simulationRootAddress)
-      ) {
-        throw new Error(
-          'TRON simulation readiness probe did not expose ordered successful and rejected CREATE attempts',
+      const probe = (async () => {
+        const built = await this.buildCreate({
+          abi: [],
+          bytecode: SIMULATION_PROBE_INITCODE,
+          constructorData: '',
+          ownerAddress: this.ownerAddress(),
+          name: 'OpenZeppelinSimulationProbe',
+          callValue: 0,
+        });
+        const simulation = await this.simulateSigned(
+          built.signedNativeTransaction,
+          built.nativeTransactionId,
+          built.transaction,
+          { signal: controller.signal },
         );
+        if (
+          simulation.childCreateAttempts.length !== 2 ||
+          simulation.childCreateAttempts[0].success !== true ||
+          simulation.childCreateAttempts[1].success !== false ||
+          simulation.childCreateAttempts.some(attempt => attempt.callerAddress !== simulation.simulationRootAddress)
+        ) {
+          throw new Error(
+            'TRON simulation readiness probe did not expose ordered successful and rejected CREATE attempts',
+          );
+        }
+        return simulation.mode === 'exact-signed' ? 'exact-signed' : 'constant-create';
+      })();
+      try {
+        const capability = await Promise.race([probe, deadline]);
+        if (capability === 'constant-create') this.constantTraceCapability = true;
+        this.simulationCapability = capability;
+        return capability;
+      } finally {
+        clearTimeout(timer);
       }
-      if (simulation.mode === 'constant-create') this.constantTraceCapability = true;
-      this.simulationCapability = simulation.mode === 'exact-signed' ? 'exact-signed' : 'constant-create';
-      return this.simulationCapability;
     })();
     try {
       return await this.simulationProbePromise;

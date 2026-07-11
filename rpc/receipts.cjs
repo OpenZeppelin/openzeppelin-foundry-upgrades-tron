@@ -74,6 +74,9 @@ function contractData(transaction) {
 
 function translateInternalTransaction(transaction, resolveAddress) {
   if (!isObject(transaction)) throw new Error('Invalid native internal transaction');
+  if (transaction.rejected !== undefined && typeof transaction.rejected !== 'boolean') {
+    throw new Error('Invalid native internal transaction rejected marker');
+  }
   return {
     hash: normalizeHash(transaction.hash, 'internal transaction hash'),
     callerAddress: resolvedAddress(transaction.caller_address, resolveAddress),

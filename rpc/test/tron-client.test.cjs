@@ -652,6 +652,28 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
     assert.deepEqual(paths, ['wallet/simulatesignedtransaction']);
   });
 
+  for (const [name, response] of [
+    ['transport message without status', Promise.reject(new Error('method not found'))],
+    [
+      'HTTP-200 capability-looking message',
+      Promise.resolve({ result: { result: false }, code: 'METHOD_NOT_FOUND', message: 'method not found' }),
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const paths = [];
+      const { client } = fixture({
+        transport: {
+          async request(path) {
+            paths.push(path);
+            return response;
+          },
+        },
+      });
+      await assert.rejects(() => client.simulateSigned(signedBytes, txid, built), /exact.*simulation/i);
+      assert.deepEqual(paths, ['wallet/simulatesignedtransaction']);
+    });
+  }
+
   for (const [name, mutate, pattern] of [
     [
       'payload mismatch',
@@ -676,6 +698,31 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
       await assert.rejects(() => client.simulateSigned(signedBytes, txid, built), pattern);
     });
   }
+});
+
+test('bounds readiness with an adapter-owned timer and aborts stalled simulation transport cleanly', async () => {
+  const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction());
+  let observedSignal;
+  const { client } = fixture({
+    simulationReadinessTimeoutMs: 25,
+    transport: {
+      request(_path, _body, options) {
+        observedSignal = options.signal;
+        return new Promise(() => {});
+      },
+    },
+  });
+  client.buildCreate = async () => ({
+    transaction: built,
+    signedNativeTransaction: serializeSignedTransaction(built),
+    nativeTransactionId: built.txID,
+  });
+
+  const started = Date.now();
+  await assert.rejects(() => client.assertSimulationReady(), /readiness.*timed out/i);
+  assert.ok(Date.now() - started >= 15);
+  assert.ok(Date.now() - started < 500);
+  assert.equal(observedSignal.aborted, true);
 });
 
 test('refuses exact simulation when the capability is unavailable, mismatched, or incomplete', async t => {

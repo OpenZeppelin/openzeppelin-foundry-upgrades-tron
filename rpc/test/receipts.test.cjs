@@ -218,6 +218,16 @@ test('refuses unconfirmed, mismatched, or malformed native receipt data', () => 
       ),
     /transaction index/i,
   );
+  const malformedRejected = confirmedInfo();
+  malformedRejected.internal_transactions[0].rejected = 'false';
+  assert.throws(
+    () =>
+      translateReceipt(
+        { transaction: nativeTransaction(), info: malformedRejected },
+        { sourceTransactionHash: SOURCE_HASH },
+      ),
+    /rejected/i,
+  );
 });
 
 test('extracts only successful internal CREATE transactions while preserving receipt order', () => {
