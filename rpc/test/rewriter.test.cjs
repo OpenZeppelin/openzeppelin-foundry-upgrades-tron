@@ -57,7 +57,7 @@ function dependencies(overrides = {}) {
       return undefined;
     },
     async resolveBeaconImplementation(address) {
-      if ([PREDICTED_BEACON, ACTUAL_BEACON].includes(getAddress(address))) return PREDICTED_IMPLEMENTATION;
+      if (getAddress(address) === ACTUAL_BEACON) return ACTUAL_IMPLEMENTATION;
       return undefined;
     },
     ...overrides,
@@ -246,6 +246,52 @@ test('rewrites the canonical beacon constructor and BeaconProxy initializer', as
   assertInitializerRewritten(proxyArgs[1]);
 });
 
+test('resolves BeaconProxy metadata through mapped actual beacon and implementation addresses', async () => {
+  const seen = { beacon: undefined, implementation: undefined };
+  const deps = dependencies({
+    async resolveBeaconImplementation(address) {
+      seen.beacon = address;
+      return ACTUAL_IMPLEMENTATION;
+    },
+    async resolveArtifact(address) {
+      seen.implementation = address;
+      return { abi: initializerAbi, fullyQualifiedName: 'contracts/Implementation.sol:Implementation' };
+    },
+  });
+  const proxy = constructorMatch({
+    fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy',
+    inputs: [
+      { name: 'beacon', type: 'address' },
+      { name: 'data', type: 'bytes' },
+    ],
+    values: [PREDICTED_BEACON, initializerData()],
+  });
+
+  await rewriteDeployment(proxy, deps);
+
+  assert.equal(seen.beacon, ACTUAL_BEACON.toLowerCase());
+  assert.equal(seen.implementation, ACTUAL_IMPLEMENTATION);
+});
+
+test('rejects a BeaconProxy implementation resolver result that is not an address string', async () => {
+  const proxy = constructorMatch({
+    fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy',
+    inputs: [
+      { name: 'beacon', type: 'address' },
+      { name: 'data', type: 'bytes' },
+    ],
+    values: [PREDICTED_BEACON, initializerData()],
+  });
+
+  await assert.rejects(
+    rewriteDeployment(
+      proxy,
+      dependencies({ resolveBeaconImplementation: async () => ({ address: ACTUAL_IMPLEMENTATION }) }),
+    ),
+    /beacon implementation.*address|string.*address/i,
+  );
+});
+
 test('rewrites generic constructor addresses recursively', async () => {
   const match = constructorMatch({
     fullyQualifiedName: 'contracts/Widget.sol:Widget',
@@ -414,6 +460,86 @@ test('does not infer proxy semantics from a matching selector alone', async () =
   assert.equal(artifactLookups, 0);
 });
 
+for (const targetKind of ['transparent-proxy', 'beacon-proxy']) {
+  test(`routes ordinary ${targetKind} calls through its verified implementation ABI`, async () => {
+    const abi = ['function configure(address owner)'];
+    const iface = new Interface(abi);
+    const rewritten = await rewriteCall(
+      {
+        to: PREDICTED_PROXY,
+        kind: 'call',
+        data: iface.encodeFunctionData('configure', [PREDICTED_OWNER]),
+      },
+      { targetKind, abi },
+      dependencies(),
+    );
+
+    assert.equal(iface.decodeFunctionData('configure', rewritten.data).owner, ACTUAL_OWNER);
+  });
+}
+
+test('passes empty calldata only when receive or fallback is declared', async () => {
+  for (const abi of [
+    [{ type: 'receive', stateMutability: 'payable' }],
+    [{ type: 'fallback', stateMutability: 'payable' }],
+  ]) {
+    const rewritten = await rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data: '0x' },
+      { targetKind: 'transparent-proxy', abi },
+      dependencies(),
+    );
+    assert.equal(rewritten.data, '0x');
+  }
+
+  await assert.rejects(
+    rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data: '0x' },
+      { targetKind: 'contract', abi: ['function ping()'] },
+      dependencies(),
+    ),
+    /receive|fallback|calldata/i,
+  );
+});
+
+test('passes an unknown selector only through a declared fallback after opaque safety scanning', async () => {
+  const fallbackAbi = [{ type: 'fallback', stateMutability: 'payable' }];
+  const safe = '0x12345678deadbeef';
+  for (const targetKind of [
+    'contract',
+    'uups-proxy',
+    'proxy-admin',
+    'upgradeable-beacon',
+    'transparent-proxy',
+    'beacon-proxy',
+  ]) {
+    const rewritten = await rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data: safe },
+      { targetKind, abi: fallbackAbi },
+      dependencies(),
+    );
+    assert.equal(rewritten.data, safe);
+  }
+
+  const unsafe = `0x12345678ff${zeroPadValue(PREDICTED_OWNER, 32).slice(2)}`;
+  await assert.rejects(
+    rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data: unsafe },
+      { targetKind: 'beacon-proxy', abi: fallbackAbi },
+      dependencies(),
+    ),
+    error => error.code === 'OPAQUE_PREDICTED_ADDRESS',
+  );
+
+  await assert.rejects(
+    rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data: safe },
+      { targetKind: 'contract', abi: [{ type: 'receive', stateMutability: 'payable' }] },
+      dependencies(),
+    ),
+    /fallback|calldata/i,
+  );
+});
+
 test('preserves opaque safe bytes and rejects undecodable bytes containing a mapped ABI word at any byte offset', async () => {
   const abi = ['function carry(bytes payload)'];
   const iface = new Interface(abi);
@@ -540,5 +666,24 @@ test('rejects unresolved or malformed linked-library ranges', async t => {
     });
     match.requiresLinking = true;
     await assert.rejects(rewriteDeployment(match, dependencies()), /link.*range|20-byte/i);
+  });
+
+  await t.test('start plus length arithmetic overflow', async () => {
+    const match = constructorMatch({
+      fullyQualifiedName: 'contracts/Linked.sol:Linked',
+      inputs: [],
+      values: [],
+      creationBytecode: `0x6000${PREDICTED_LIBRARY.slice(2)}6001`,
+      artifact: {
+        bytecode: {
+          object: `0x6000__$${'5'.repeat(34)}$__6001`,
+          linkReferences: {
+            'contracts/Math.sol': { Math: [{ start: Number.MAX_SAFE_INTEGER - 10, length: 20 }] },
+          },
+        },
+      },
+    });
+    match.requiresLinking = true;
+    await assert.rejects(rewriteDeployment(match, dependencies()), /safe range|integer overflow/i);
   });
 });

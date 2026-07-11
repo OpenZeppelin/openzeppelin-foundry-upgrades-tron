@@ -286,15 +286,34 @@ async function rewriteConstructorValues(match, inputs, values, deps) {
     case 'upgradeable-beacon':
       return [await mapAddress(values[0], deps), await mapAddress(values[1], deps)];
     case 'beacon-proxy': {
-      if (values[1] === '0x') return [await mapAddress(values[0], deps), values[1]];
+      const actualBeacon = await mapAddress(values[0], deps);
+      if (values[1] === '0x') return [actualBeacon, values[1]];
       if (typeof deps.resolveBeaconImplementation !== 'function') {
         throw new RewriteError('MISSING_BEACON_METADATA', 'Beacon implementation resolver is required');
       }
-      const implementation = await deps.resolveBeaconImplementation(values[0]);
+      // Dependency contract: resolveBeaconImplementation receives the mapped
+      // actual beacon and returns its actual implementation as an EVM address string.
+      const implementation = await deps.resolveBeaconImplementation(actualBeacon);
       if (implementation === undefined) {
         throw new RewriteError('MISSING_BEACON_METADATA', 'Beacon implementation metadata is unavailable');
       }
-      return [await mapAddress(values[0], deps), await rewriteNestedPayload(values[1], implementation, deps)];
+      if (typeof implementation !== 'string') {
+        throw new RewriteError(
+          'INVALID_BEACON_METADATA',
+          'Beacon implementation resolver must return an address string',
+        );
+      }
+      try {
+        getAddress(implementation);
+      } catch (error) {
+        throw new RewriteError(
+          'INVALID_BEACON_METADATA',
+          'Beacon implementation resolver returned an invalid address string',
+          {},
+          { cause: error },
+        );
+      }
+      return [actualBeacon, await rewriteNestedPayload(values[1], implementation, deps)];
     }
     default:
       throw new RewriteError('INVALID_PROXY_METADATA', 'Unsupported canonical proxy metadata');
@@ -329,7 +348,8 @@ function flattenLinkRanges(references) {
           typeof entry !== 'object' ||
           !Number.isSafeInteger(entry.start) ||
           entry.start < 0 ||
-          entry.length !== 20
+          entry.length !== 20 ||
+          !Number.isSafeInteger(entry.start + entry.length)
         ) {
           throw new RewriteError('INVALID_LINK_RANGES', 'Every linked-library range must be a 20-byte safe range');
         }
@@ -405,7 +425,7 @@ function selectedFunction(iface, data) {
   requireBytes(data, 'Calldata');
   if (data.length < 10) return undefined;
   try {
-    return iface.getFunction(data.slice(0, 10));
+    return iface.getFunction(data.slice(0, 10)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -462,6 +482,44 @@ async function rewriteBeaconCall(data, deps) {
   return BEACON_INTERFACE.encodeFunctionData(functionFragment, [await mapAddress(decoded.newImplementation, deps)]);
 }
 
+function targetInterface(abi) {
+  if (!Array.isArray(abi)) {
+    throw new RewriteError('MISSING_TARGET_METADATA', 'Target ABI metadata is required for this call');
+  }
+  try {
+    return new Interface(abi);
+  } catch (error) {
+    throw new RewriteError('INVALID_ABI', 'Target ABI metadata is invalid', {}, { cause: error });
+  }
+}
+
+function hasReceive(iface) {
+  return iface.fragments.some(fragment => fragment.type === 'fallback' && fragment.inputs.length === 0);
+}
+
+function hasFallback(iface) {
+  return iface.fragments.some(fragment => fragment.type === 'fallback' && fragment.inputs.length > 0);
+}
+
+async function rewriteTargetCalldata(data, abi, deps) {
+  requireBytes(data, 'Calldata');
+  const iface = targetInterface(abi);
+  if (data === '0x') {
+    if (!hasReceive(iface) && !hasFallback(iface)) {
+      throw new RewriteError('UNDECODABLE_CALLDATA', 'Empty calldata requires a declared receive or fallback');
+    }
+    return data;
+  }
+
+  const functionFragment = selectedFunction(iface, data);
+  if (functionFragment !== undefined) return rewriteCalldata(data, abi, deps);
+  if (!hasFallback(iface)) {
+    throw new RewriteError('UNDECODABLE_CALLDATA', 'Unknown calldata selector requires a declared fallback');
+  }
+  await assertOpaqueBytesSafe(data, deps);
+  return data;
+}
+
 async function rewriteCall(decoded, context, deps) {
   requireDependencies(deps);
   if (decoded === null || typeof decoded !== 'object' || decoded.to === null || decoded.to === undefined) {
@@ -482,16 +540,15 @@ async function rewriteCall(decoded, context, deps) {
     case 'upgradeable-beacon':
       data = await rewriteBeaconCall(decoded.data, deps);
       break;
+    case 'transparent-proxy':
+    case 'beacon-proxy':
     case 'contract':
       break;
     default:
       throw new RewriteError('UNSUPPORTED_TARGET_KIND', `Unsupported target kind: ${context.targetKind}`);
   }
   if (data === undefined) {
-    if (!Array.isArray(context.abi)) {
-      throw new RewriteError('MISSING_TARGET_METADATA', 'Target ABI metadata is required for this call');
-    }
-    data = await rewriteCalldata(decoded.data, context.abi, deps);
+    data = await rewriteTargetCalldata(decoded.data, context.abi, deps);
   }
   return { ...decoded, to: await mapAddress(decoded.to, deps), data };
 }

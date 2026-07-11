@@ -153,8 +153,8 @@ test('rejects sender and chain mismatches', async () => {
   assert.throws(() => decodeLegacyTransaction(raw, { expectedSender: wallet.address, expectedChainId: 1 }), /chain/i);
 });
 
-test('maps the maximum exact TRON call value and rejects int64 overflow', async () => {
-  const maximum = (1n << 63n) - 1n;
+test('maps the maximum exact TronWeb call value and rejects unsafe integer overflow', async () => {
+  const maximum = BigInt(Number.MAX_SAFE_INTEGER);
   const decoded = decodeLegacyTransaction(await signed({ value: maximum }), {
     expectedSender: wallet.address,
     expectedChainId: 1337,
@@ -162,7 +162,7 @@ test('maps the maximum exact TRON call value and rejects int64 overflow', async 
   assert.equal(decoded.value, maximum);
   assert.equal(decoded.callValue, maximum.toString());
 
-  const overflow = await signed({ value: 1n << 63n });
+  const overflow = await signed({ value: maximum + 1n });
   assert.throws(
     () =>
       decodeLegacyTransaction(Transaction.from(overflow).serialized, {

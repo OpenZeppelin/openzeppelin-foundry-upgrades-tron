@@ -3,7 +3,7 @@
 const { Transaction, getAddress } = require('ethers');
 
 const RAW_TRANSACTION_PATTERN = /^0x(?:[0-9a-fA-F]{2})+$/;
-const MAX_TRON_CALL_VALUE = (1n << 63n) - 1n;
+const MAX_TRON_CALL_VALUE = BigInt(Number.MAX_SAFE_INTEGER);
 
 class TransactionDecodeError extends Error {
   constructor(code, message, options) {
@@ -89,7 +89,10 @@ function decodeLegacyTransaction(raw, options = {}) {
     );
   }
   if (transaction.value > MAX_TRON_CALL_VALUE) {
-    throw new TransactionDecodeError('VALUE_OUT_OF_RANGE', 'Transaction value exceeds the exact TRON int64 range');
+    throw new TransactionDecodeError(
+      'VALUE_OUT_OF_RANGE',
+      'Transaction value exceeds the exact TronWeb safe-integer range',
+    );
   }
   if (transaction.gasPrice === null) {
     throw new TransactionDecodeError('INVALID_RAW_TRANSACTION', 'Legacy transaction is missing gasPrice');
