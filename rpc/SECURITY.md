@@ -34,6 +34,12 @@ configured sender and chain are accepted. Typed transaction envelopes,
 unprotected signatures, malformed RLP, `CREATE2`, and ambiguous opaque address
 payloads fail before native broadcast.
 
+Stock TRE does not serve historical state for numbered block tags. The adapter
+retries numbered balance, code, storage, and call reads against `latest` only
+when the upstream node returns TRE's exact unsupported-quantity error. This
+compatibility path is read-only and intended to hydrate a Forge script at the
+current head; it does not provide archival state or EVM fork semantics.
+
 Exact signed-transaction simulation is preferred when the node exposes the
 nonstandard capability. Stock java-tron uses constant payload simulation only
 after a bounded, non-broadcasting probe proves ordered successful and rejected

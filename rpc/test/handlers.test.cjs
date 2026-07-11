@@ -876,6 +876,66 @@ test('maps code, storage, balance, and eth_call targets while preserving safe op
   assert.deepEqual(result.calls.at(-1).params, [`0x${'00'.repeat(20)}`, 'latest']);
 });
 
+test('retries numbered immutable reads as latest only after the explicit stock TRE quantity error', async t => {
+  const attempts = [];
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method, params) {
+        attempts.push({ method, params: structuredClone(params) });
+        if (params.at(-1) === '0x13') {
+          throw Object.assign(new Error('QUANTITY not supported, just support TAG as latest'), { code: -32602 });
+        }
+        return `${method}:latest`;
+      },
+    },
+  });
+
+  for (const [method, params] of [
+    ['eth_getCode', [TARGET, '0x13']],
+    ['eth_getBalance', [TARGET, '0x13']],
+    ['eth_getStorageAt', [TARGET, '0x0', '0x13']],
+    ['eth_call', [{ to: TARGET, data: '0x1234' }, '0x13']],
+  ]) {
+    const response = await result.handlers.handle({ jsonrpc: '2.0', id: method, method, params });
+    assert.equal(response.result, `${method}:latest`);
+  }
+  assert.deepEqual(
+    attempts.map(attempt => [attempt.method, attempt.params.at(-1)]),
+    [
+      ['eth_getCode', '0x13'],
+      ['eth_getCode', 'latest'],
+      ['eth_getBalance', '0x13'],
+      ['eth_getBalance', 'latest'],
+      ['eth_getStorageAt', '0x13'],
+      ['eth_getStorageAt', 'latest'],
+      ['eth_call', '0x13'],
+      ['eth_call', 'latest'],
+    ],
+  );
+
+  for (const error of [
+    Object.assign(new Error('different invalid params'), { code: -32602 }),
+    Object.assign(new Error('QUANTITY not supported, just support TAG as latest'), { code: -32000 }),
+  ]) {
+    const isolated = fixture(t, {
+      upstream: {
+        async request() {
+          throw error;
+        },
+      },
+    });
+    const response = await isolated.handlers.handle({
+      jsonrpc: '2.0',
+      id: error.code,
+      method: 'eth_getCode',
+      params: [TARGET, '0x13'],
+    });
+    assert.equal(response.error.code, error.code);
+    assert.equal(response.error.message, error.message);
+  }
+});
+
 test('rejects opaque call bytes containing a known predicted ABI word when metadata is unavailable', async t => {
   const result = fixture(t, { resolveCallContext: async () => undefined });
   result.addressMap.set({

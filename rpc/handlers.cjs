@@ -335,6 +335,20 @@ function normalizeUpstreamBlock(block) {
   return normalized;
 }
 
+async function requestStockCompatibleRead(upstream, method, params, blockTag) {
+  try {
+    return await upstream.request(method, params);
+  } catch (error) {
+    const stockQuantityError =
+      error?.code === -32602 &&
+      error?.message === 'QUANTITY not supported, just support TAG as latest' &&
+      typeof blockTag === 'string' &&
+      /^0x(?:0|[1-9a-f][0-9a-f]*)$/.test(blockTag);
+    if (!stockQuantityError) throw error;
+    return upstream.request(method, [...params.slice(0, -1), 'latest']);
+  }
+}
+
 function createRpcHandlers(rawOptions) {
   const options = validateDependencies(rawOptions);
   const { config, journal, addressMap, reconciler, nativeClient, upstream } = options;
@@ -668,11 +682,13 @@ function createRpcHandlers(rawOptions) {
       case 'eth_getCode':
       case 'eth_getBalance': {
         const [address, block] = requirePositional(params, 1, 2);
-        return upstream.request(method, [mappedAddress(address), ...(block === undefined ? [] : [block])]);
+        const rewritten = [mappedAddress(address), ...(block === undefined ? [] : [block])];
+        return requestStockCompatibleRead(upstream, method, rewritten, block);
       }
       case 'eth_getStorageAt': {
         const [address, slot, block] = requirePositional(params, 2, 3);
-        return upstream.request(method, [mappedAddress(address), slot, ...(block === undefined ? [] : [block])]);
+        const rewritten = [mappedAddress(address), slot, ...(block === undefined ? [] : [block])];
+        return requestStockCompatibleRead(upstream, method, rewritten, block);
       }
       case 'eth_getTransactionCount': {
         const [address, block] = requirePositional(params, 1, 2);
@@ -682,7 +698,10 @@ function createRpcHandlers(rawOptions) {
       case 'eth_estimateGas': {
         const [transaction, block] = requirePositional(params, 1, 2);
         const rewritten = await rewriteReadTransaction(transaction, method === 'eth_estimateGas');
-        return upstream.request(method, [rewritten, ...(block === undefined ? [] : [block])]);
+        const rewrittenParams = [rewritten, ...(block === undefined ? [] : [block])];
+        return method === 'eth_call'
+          ? requestStockCompatibleRead(upstream, method, rewrittenParams, block)
+          : upstream.request(method, rewrittenParams);
       }
       case 'eth_gasPrice':
         requirePositional(params, 0);

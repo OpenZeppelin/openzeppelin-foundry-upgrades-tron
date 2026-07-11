@@ -137,6 +137,13 @@ transaction. Because stock java-tron has no Ethereum account nonce method, the
 adapter serves Forge a virtual source nonce derived from that durable journal.
 Conflicting predicted/actual mappings are rejected.
 
+Stock TRE also rejects numbered block tags for `eth_getBalance`, `eth_getCode`,
+`eth_getStorageAt`, and `eth_call`. For those read-only methods, the adapter
+retries with `latest` only after the node returns TRE's exact unsupported-
+quantity error. This is head-state compatibility for Forge script hydration,
+not archival or fork support. Stock TRE reports an Ethereum block gas limit of
+zero, so Forge broadcasts must include `--disable-block-gas-limit`.
+
 ## Development
 
 ```sh

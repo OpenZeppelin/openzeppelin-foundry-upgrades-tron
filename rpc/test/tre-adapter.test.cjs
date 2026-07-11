@@ -140,6 +140,16 @@ test(
     let adapter = await startAdapter(config);
     t.after(async () => adapter.runtime.server.stop());
     assert.equal(await rpc(adapter.url, 'net_version'), DEFAULT_CHAIN_ID.toString(10));
+    const head = await rpc(`${tre.endpoint}/jsonrpc`, 'eth_blockNumber');
+    for (const [method, address] of [
+      ['eth_getBalance', wallet.address],
+      ['eth_getCode', `0x${'00'.repeat(20)}`],
+    ]) {
+      assert.equal(
+        await rpc(adapter.url, method, [address, head]),
+        await rpc(`${tre.endpoint}/jsonrpc`, method, [address, 'latest']),
+      );
+    }
     const castBlock = await execFileAsync('cast', ['block', 'latest', '--rpc-url', adapter.url, '--json'], {
       encoding: 'utf8',
       timeout: 30_000,

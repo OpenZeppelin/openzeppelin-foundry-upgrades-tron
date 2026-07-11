@@ -103,5 +103,7 @@ test('documents the nonstandard fail-closed simulation requirement without overs
   assert.match(readme, /stock TRE and java-tron/);
   assert.match(readme, /constant, non-broadcasting[\s\S]{0,80}capability probe/i);
   assert.match(readme, /ambiguous child creations fail before broadcast/i);
+  assert.match(readme, /numbered block tags[\s\S]{0,180}latest/i);
+  assert.match(readme, /not archival or fork support/i);
   assert.doesNotMatch(readme, /Task \d+/i);
 });
