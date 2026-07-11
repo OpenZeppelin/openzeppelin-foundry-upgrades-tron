@@ -10,7 +10,7 @@ const { Transaction, Wallet, getCreateAddress, keccak256, toBeHex } = require('e
 
 const { AddressMap } = require('../address-map.cjs');
 const { createRpcHandlers, nativeContractAddress } = require('../handlers.cjs');
-const { TransactionJournal } = require('../journal.cjs');
+const { TransactionJournal, recordRetainedFailureInChain } = require('../journal.cjs');
 const { acquireStateLock } = require('../state-lock.cjs');
 const { JsonStore } = require('../store.cjs');
 
@@ -214,6 +214,103 @@ test('reports chain ID and forwards nonce, gas price, and gas/energy estimates',
   );
 });
 
+test('provenance-matches and address-rewrites deployment gas estimates without building or journaling', async t => {
+  const senderActual = `0x${'a1'.repeat(20)}`;
+  for (const [dataKey, target] of [
+    ['data', undefined],
+    ['input', null],
+  ]) {
+    await t.test(`${dataKey}/${target === null ? 'null target' : 'absent target'}`, async t => {
+      let matched;
+      let rewritten;
+      const result = fixture(t, {
+        matchDeploymentArtifact(value) {
+          matched = value;
+          return {
+            provenanceHash: `0x${'55'.repeat(32)}`,
+            constructorData: `0x${'00'.repeat(32)}`,
+            creationBytecode: '0x6000',
+          };
+        },
+        async rewriteDeployment(match, dependencies) {
+          rewritten = { match, mappedConstructorAddress: dependencies.addressMap.toActual(TARGET) };
+          return { ...match, initcode: '0x60aabb' };
+        },
+      });
+      result.addressMap.set({
+        predicted: WALLET.address,
+        actual: senderActual,
+        creator: WALLET.address,
+        sender: WALLET.address,
+        sourceTransaction: SOURCE_TX,
+      });
+      result.addressMap.set({
+        predicted: TARGET,
+        actual: TARGET_ACTUAL,
+        creator: WALLET.address,
+        sender: WALLET.address,
+        sourceTransaction: SOURCE_TX,
+      });
+      const transaction = { from: WALLET.address, [dataKey]: '0x6000', value: '0x0' };
+      if (target === null) transaction.to = null;
+
+      const response = await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_estimateGas',
+        params: [transaction],
+      });
+      assert.equal(response.result, 'eth_estimateGas:result');
+      assert.deepEqual(matched, { outputDirectory: result.out, initcode: '0x6000' });
+      assert.equal(rewritten.match.provenanceHash, `0x${'55'.repeat(32)}`);
+      assert.equal(rewritten.mappedConstructorAddress, TARGET_ACTUAL);
+      assert.deepEqual(result.calls.at(-1), {
+        type: 'upstream',
+        method: 'eth_estimateGas',
+        params: [
+          {
+            from: senderActual,
+            [dataKey]: '0x60aabb',
+            value: '0x0',
+            ...(target === null ? { to: null } : {}),
+          },
+        ],
+      });
+      assert.equal(
+        result.calls.some(call => call.type === 'buildCreate' || call.type === 'buildCall'),
+        false,
+      );
+      assert.deepEqual(result.journal.list(), []);
+    });
+  }
+});
+
+test('rejects malformed or provenance-mismatched deployment estimates before upstream or native work', async t => {
+  for (const [name, transaction] of [
+    ['conflicting data/input', { data: '0x6000', input: '0x6001' }],
+    ['artifact mismatch', { data: '0xdeadbeef' }],
+  ]) {
+    await t.test(name, async t => {
+      const result = fixture(t, {
+        matchDeploymentArtifact() {
+          const error = new Error('No provenance-verified deployment artifact matches');
+          error.code = 'ARTIFACT_NOT_FOUND';
+          throw error;
+        },
+      });
+      const response = await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_estimateGas',
+        params: [transaction],
+      });
+      assert.equal(response.error.code, transaction.input === undefined ? -32000 : -32602);
+      assert.equal(result.calls.length, 0);
+      assert.deepEqual(result.journal.list(), []);
+    });
+  }
+});
+
 test('composes deployment decode, provenance, rewrite, exact simulation, durable prepare, broadcast, wait, and reconcile', async t => {
   const raw = await signedTransaction();
   const sourceHash = keccak256(raw);
@@ -379,6 +476,71 @@ test('replays durable receipts and Ethereum transactions after restart', async t
   assert.equal(transaction.result.from, WALLET.address);
   assert.equal(transaction.result.to, null);
   assert.equal(transaction.result.v, toBeHex(Transaction.from(raw).signature.networkV));
+});
+
+test('replays receipts only from confirmed journal records and hides retained success-shaped failure receipts', async t => {
+  for (const state of ['received', 'native-built', 'broadcast', 'failed-retained']) {
+    await t.test(state, async t => {
+      const raw = await signedTransaction({
+        nonce: 20 + ['received', 'native-built', 'broadcast', 'failed-retained'].indexOf(state),
+      });
+      const sourceHash = keccak256(raw);
+      const result = fixture(t);
+      result.journal.receive(raw);
+      if (state !== 'received') {
+        const operationContext = {
+          kind: 'deployment',
+          from: WALLET.address,
+          to: null,
+          nonce: String(20 + ['received', 'native-built', 'broadcast', 'failed-retained'].indexOf(state)),
+          predictedContractAddress: getCreateAddress({
+            from: WALLET.address,
+            nonce: 20 + ['received', 'native-built', 'broadcast', 'failed-retained'].indexOf(state),
+          }),
+          actualTarget: ACTUAL_TARGET,
+          contractKind: 'contract',
+          artifactIdentity: ARTIFACT_IDENTITY,
+          provenanceHash: `0x${'55'.repeat(32)}`,
+        };
+        result.journal.recordNativeBuilt(
+          sourceHash,
+          { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID },
+          {
+            operationContext,
+            childCreatePlan: {
+              version: 1,
+              sender: WALLET.address,
+              attempts: [],
+              counterBases: {},
+              counterFinals: {},
+            },
+          },
+        );
+        if (state === 'broadcast' || state === 'failed-retained') result.journal.recordBroadcast(sourceHash);
+        if (state === 'failed-retained') {
+          const retained = translatedReceipt(sourceHash, operationContext, { status: '0x1' });
+          result.store.transaction(CHAIN, chain =>
+            recordRetainedFailureInChain(
+              chain,
+              sourceHash,
+              { code: 'CHILD_CREATE_MISMATCH', message: 'receipt reconciliation failed' },
+              retained,
+            ),
+          );
+          assert.equal(result.journal.get(sourceHash).receipt.status, '0x1');
+        }
+      }
+
+      const response = await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getTransactionReceipt',
+        params: [sourceHash],
+      });
+      assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: null });
+      assert.equal(result.calls.filter(call => call.type === 'upstream').length, 0);
+    });
+  }
 });
 
 test('maps code, storage, balance, and eth_call targets while preserving safe opaque calldata', async t => {

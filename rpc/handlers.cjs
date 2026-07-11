@@ -351,14 +351,23 @@ function createRpcHandlers(rawOptions) {
   const resolveCallContext = options.resolveCallContext ?? defaultResolveCallContext;
   const rewriteDependencies = { addressMap, resolveArtifact, resolveBeaconImplementation };
 
-  async function rewriteReadTransaction(transaction) {
+  async function rewriteReadTransaction(transaction, deploymentEstimate = false) {
     if (!isObject(transaction)) throw new RpcError(-32602, 'Invalid transaction call object');
     if (own(transaction, 'data') && own(transaction, 'input') && transaction.data !== transaction.input) {
       throw new RpcError(-32602, 'Transaction data and input conflict');
     }
     const dataKey = own(transaction, 'input') && !own(transaction, 'data') ? 'input' : 'data';
     const data = transaction[dataKey] ?? '0x';
-    if (transaction.to === undefined || transaction.to === null) return { ...transaction };
+    if (transaction.to === undefined || transaction.to === null) {
+      if (!deploymentEstimate) return { ...transaction };
+      const match = matchArtifact({ outputDirectory: config.foundryOut, initcode: data });
+      const deployment = await rewriteDeploy(match, rewriteDependencies);
+      return {
+        ...transaction,
+        ...(transaction.from === undefined ? {} : { from: mappedAddress(transaction.from) }),
+        [dataKey]: deployment.initcode,
+      };
+    }
     const target = normalizeEvmAddress(transaction.to, 'transaction target');
     const context = await resolveCallContext(target);
     let rewritten;
@@ -540,7 +549,11 @@ function createRpcHandlers(rawOptions) {
         const [hashValue] = requirePositional(params, 1);
         const hash = normalizeHash(hashValue);
         const record = journal.get(hash);
-        return record === undefined ? upstream.request(method, params) : (record.receipt ?? null);
+        return record === undefined
+          ? upstream.request(method, params)
+          : record.state === 'confirmed'
+            ? record.receipt
+            : null;
       }
       case 'eth_getTransactionByHash': {
         const [hashValue] = requirePositional(params, 1);
@@ -568,7 +581,7 @@ function createRpcHandlers(rawOptions) {
       case 'eth_call':
       case 'eth_estimateGas': {
         const [transaction, block] = requirePositional(params, 1, 2);
-        const rewritten = await rewriteReadTransaction(transaction);
+        const rewritten = await rewriteReadTransaction(transaction, method === 'eth_estimateGas');
         return upstream.request(method, [rewritten, ...(block === undefined ? [] : [block])]);
       }
       case 'eth_gasPrice':
