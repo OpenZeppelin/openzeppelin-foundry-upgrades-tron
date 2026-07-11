@@ -114,6 +114,21 @@ function positiveInteger(value, label, fallback) {
   return actual;
 }
 
+function normalizeCallValue(value) {
+  let parsed;
+  if (typeof value === 'bigint') {
+    parsed = value;
+  } else if (typeof value === 'string' && /^[0-9]+$/.test(value)) {
+    parsed = BigInt(value);
+  } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    parsed = BigInt(value);
+  } else {
+    throw new Error('Invalid call value');
+  }
+  if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Invalid call value');
+  return Number(parsed);
+}
+
 function emptyResponse(value) {
   return !isObject(value) || Object.keys(value).length === 0;
 }
@@ -189,11 +204,11 @@ class TronClient {
 
   async buildCreate({ abi, bytecode, constructorData = '', ownerAddress, name = '', callValue = 0 } = {}) {
     if (!Array.isArray(abi)) throw new Error('Invalid contract ABI');
-    if (!Number.isSafeInteger(callValue) || callValue < 0) throw new Error('Invalid call value');
+    const exactCallValue = normalizeCallValue(callValue);
     const options = {
       abi,
       bytecode: stripHex(bytecode, 'contract bytecode', false),
-      callValue,
+      callValue: exactCallValue,
       feeLimit: this.config.feeLimit,
       name,
       rawParameter: stripHex(constructorData, 'constructor data'),
@@ -206,14 +221,15 @@ class TronClient {
   }
 
   async buildCall({ contractAddress, data = '', ownerAddress, callValue = 0 } = {}) {
-    if (!Number.isSafeInteger(callValue) || callValue < 0) throw new Error('Invalid call value');
+    const exactCallValue = normalizeCallValue(callValue);
     const wrapper = await this.tronWeb.transactionBuilder.triggerSmartContract(
       toTronHexAddress(contractAddress),
       '',
       {
-        callValue,
+        callValue: exactCallValue,
         feeLimit: this.config.feeLimit,
         input: stripHex(data, 'call data'),
+        txLocal: true,
       },
       [],
       this.ownerAddress(ownerAddress),
@@ -303,7 +319,7 @@ class TronClient {
     const txid = normalizeTxId(nativeTransactionId);
     const [transaction, info] = await Promise.all([
       this.transport.request('wallet/gettransactionbyid', { value: txid }),
-      this.transport.request('wallet/gettransactioninfobyid', { value: txid }),
+      this.transport.request('walletsolidity/gettransactioninfobyid', { value: txid }),
     ]);
     if (emptyResponse(transaction)) return null;
     if (normalizeTxId(transaction.txID) !== txid)
@@ -315,7 +331,7 @@ class TronClient {
       throw new Error('Native transaction receipt returned a different transaction ID');
     let confirmedInfo = info;
     if (confirmedInfo.blockHash === undefined) {
-      const block = await this.transport.request('wallet/getblockbynum', { num: info.blockNumber });
+      const block = await this.transport.request('walletsolidity/getblockbynum', { num: info.blockNumber });
       if (!emptyResponse(block) && block.blockID !== undefined) confirmedInfo = { ...info, blockHash: block.blockID };
     }
     return { transaction, info: confirmedInfo, confirmed: true };

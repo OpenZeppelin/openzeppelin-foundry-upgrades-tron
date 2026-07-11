@@ -65,7 +65,7 @@ test('translates a successful native deployment receipt including block, contrac
       sourceTransactionHash: SOURCE_HASH,
       predictedContractAddress: PREDICTED_CONTRACT,
       resolveAddress(address) {
-        return address.toLowerCase() === `0x${'22'.repeat(20)}` ? PREDICTED_CONTRACT : address;
+        return address.toLowerCase() === `0x${'22'.repeat(20)}` ? PREDICTED_CONTRACT : undefined;
       },
     },
   );
@@ -135,11 +135,12 @@ test('translates confirmed native reverts as status zero and preserves the resul
 
   const receipt = translateReceipt(
     { transaction, info },
-    { sourceTransactionHash: SOURCE_HASH, resolveAddress: address => address },
+    { sourceTransactionHash: SOURCE_HASH, resolveAddress: () => undefined },
   );
 
   assert.equal(receipt.status, '0x0');
   assert.equal(receipt.contractAddress, null);
+  assert.equal(receipt.from, `0x${'11'.repeat(20)}`);
   assert.equal(receipt.to, `0x${'22'.repeat(20)}`);
   assert.equal(receipt.gasUsed, '0x9');
   assert.equal(receipt.effectiveGasPrice, '0x3');

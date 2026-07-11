@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { utils } = require('tronweb');
+const { TronWeb, utils } = require('tronweb');
 
 const { TronClient, nativeTxIdFromSignedBytes, serializeSignedTransaction } = require('../tron-client.cjs');
 
@@ -136,11 +136,79 @@ test('prebuilds a raw TriggerSmartContract call without ABI re-encoding', async 
       callValue: 11,
       feeLimit: 1_000_000_000,
       input: data.slice(2),
+      txLocal: true,
     },
     parameters: [],
     issuerAddress: OWNER,
   });
   assert.equal(built.nativeTransactionId, nativeTxIdFromSignedBytes(built.signedNativeTransaction));
+});
+
+test('accepts exact safe call values from bigint, decimal string, and number and rejects lossy values', async t => {
+  const max = Number.MAX_SAFE_INTEGER;
+  for (const value of [BigInt(max), String(max), max]) {
+    await t.test(typeof value, async () => {
+      const { calls, client } = fixture();
+      await client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value });
+      assert.equal(calls[0].options.callValue, max);
+    });
+  }
+
+  for (const value of [BigInt(max) + 1n, String(BigInt(max) + 1n), -1, 1.5, '1e3', null]) {
+    await t.test(`rejects ${String(value)}`, async () => {
+      const { calls, client } = fixture();
+      await assert.rejects(
+        () => client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value }),
+        /call value/i,
+      );
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('uses TronWeb 6.4 to encode and sign the exact native create and trigger protobuf fields', async () => {
+  const tronWeb = new TronWeb({ fullHost: 'http://127.0.0.1:9090', privateKey: PRIVATE_KEY });
+  tronWeb.trx.getCurrentRefBlockParams = async () => ({
+    ref_block_bytes: '1234',
+    ref_block_hash: '0102030405060708',
+    expiration: 1_700_000_060_000,
+    timestamp: 1_700_000_000_000,
+  });
+  const client = new TronClient({
+    config: { privateKey: PRIVATE_KEY, feeLimit: 1_000_000_000, fullHost: 'http://127.0.0.1:9090' },
+    tronWeb,
+    transport: { request: async path => assert.fail(`Unexpected network request: ${path}`) },
+  });
+  const callValue = BigInt(Number.MAX_SAFE_INTEGER);
+  const abi = [{ type: 'constructor', inputs: [], stateMutability: 'payable' }];
+
+  const created = await client.buildCreate({
+    abi,
+    bytecode: '0x6000',
+    constructorData: '0x1234',
+    name: 'Exact',
+    callValue: callValue.toString(),
+  });
+  const createRaw = utils.deserializeTx.deserializeTransaction('CreateSmartContract', created.transaction.raw_data_hex);
+  const createContract = createRaw.contract[0];
+  assert.equal(createContract.type, 'CreateSmartContract');
+  assert.equal(createContract.parameter.value.new_contract.bytecode, '60001234');
+  assert.equal(createContract.parameter.value.new_contract.call_value, Number.MAX_SAFE_INTEGER);
+  assert.equal(createContract.parameter.value.new_contract.name, 'Exact');
+  assert.equal(created.nativeTransactionId, nativeTxIdFromSignedBytes(created.signedNativeTransaction));
+
+  const called = await client.buildCall({
+    contractAddress: CONTRACT,
+    data: '0x1234abcd',
+    callValue,
+  });
+  const callRaw = utils.deserializeTx.deserializeTransaction('TriggerSmartContract', called.transaction.raw_data_hex);
+  const callContract = callRaw.contract[0];
+  assert.equal(callContract.type, 'TriggerSmartContract');
+  assert.equal(callContract.parameter.value.contract_address.toLowerCase(), CONTRACT);
+  assert.equal(callContract.parameter.value.data, '1234ABCD');
+  assert.equal(callContract.parameter.value.call_value, Number.MAX_SAFE_INTEGER);
+  assert.equal(called.nativeTransactionId, nativeTxIdFromSignedBytes(called.signedNativeTransaction));
 });
 
 test('serializes the complete signed protobuf and derives a signature-independent stable transaction ID', () => {
@@ -266,9 +334,9 @@ test('queries an existing native transaction and distinguishes unconfirmed and a
     requests.map(request => request.path),
     [
       'wallet/gettransactionbyid',
-      'wallet/gettransactioninfobyid',
+      'walletsolidity/gettransactioninfobyid',
       'wallet/gettransactionbyid',
-      'wallet/gettransactioninfobyid',
+      'walletsolidity/gettransactioninfobyid',
     ],
   );
   assert.ok(requests.every(request => request.body.value === txid));
@@ -375,10 +443,10 @@ test('loads the confirmed block hash while querying a native receipt', async () 
       async request(path, body) {
         requests.push({ path, body });
         if (path === 'wallet/gettransactionbyid') return transaction;
-        if (path === 'wallet/gettransactioninfobyid') {
+        if (path === 'walletsolidity/gettransactioninfobyid') {
           return { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } };
         }
-        if (path === 'wallet/getblockbynum') return { blockID: 'ef'.repeat(32) };
+        if (path === 'walletsolidity/getblockbynum') return { blockID: 'ef'.repeat(32) };
         throw new Error(`Unexpected request: ${path}`);
       },
     },
@@ -388,7 +456,36 @@ test('loads the confirmed block hash while querying a native receipt', async () 
 
   assert.equal(snapshot.confirmed, true);
   assert.equal(snapshot.info.blockHash, 'ef'.repeat(32));
-  assert.deepEqual(requests.at(-1), { path: 'wallet/getblockbynum', body: { num: 7 } });
+  assert.deepEqual(requests.at(-1), { path: 'walletsolidity/getblockbynum', body: { num: 7 } });
+});
+
+test('does not confirm from full-node transaction inclusion without a solid receipt', async () => {
+  const transaction = unsignedTransaction();
+  let clock = 0;
+  const paths = [];
+  const { client } = fixture({
+    now: () => clock,
+    receiptTimeoutMs: 5,
+    pollIntervalMs: 5,
+    sleep: async delay => {
+      clock += delay;
+    },
+    transport: {
+      async request(path) {
+        paths.push(path);
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        if (path === 'walletsolidity/gettransactioninfobyid') return {};
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    /timed out/i,
+  );
+  assert.ok(paths.includes('walletsolidity/gettransactioninfobyid'));
+  assert.ok(!paths.includes('wallet/gettransactioninfobyid'));
 });
 
 test('times out receipt polling without treating an unconfirmed transaction as failure', async () => {

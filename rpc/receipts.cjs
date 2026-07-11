@@ -47,7 +47,7 @@ function normalizeData(value, label) {
 
 function resolvedAddress(address, resolveAddress) {
   const evm = toEvmAddress(address);
-  return toEvmAddress(resolveAddress ? resolveAddress(evm) : evm);
+  return toEvmAddress(resolveAddress?.(evm) ?? evm);
 }
 
 function decodeResultMessage(value) {
