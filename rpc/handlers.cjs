@@ -9,6 +9,7 @@ const { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } =
 const { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } = require('./rewriter.cjs');
 const { assertStateLockHeld } = require('./state-lock.cjs');
 const { decodeLegacyTransaction } = require('./transactions.cjs');
+const { retryableTransportError } = require('./tron-client.cjs');
 
 const JSON_RPC_VERSION = '2.0';
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
@@ -26,6 +27,16 @@ const FORWARDED_METHODS = new Set([
   'eth_getTransactionByBlockNumberAndIndex',
   'net_version',
   'web3_clientVersion',
+]);
+const CANONICAL_CONTRACT_KINDS = new Map([
+  ['openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol:TRC1967Proxy', 'uups-proxy'],
+  [
+    'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+    'transparent-proxy',
+  ],
+  ['openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin', 'proxy-admin'],
+  ['openzeppelin-tron-solidity/contracts/proxy/beacon/UpgradeableBeacon.sol:UpgradeableBeacon', 'upgradeable-beacon'],
+  ['openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy', 'beacon-proxy'],
 ]);
 
 class RpcError extends Error {
@@ -88,13 +99,16 @@ function artifactIdentity(match) {
 }
 
 function contractKindForArtifact(identity) {
-  const name = identity.contractName;
-  if (name === 'TRC1967Proxy' || name === 'ERC1967Proxy') return 'uups-proxy';
-  if (name === 'TransparentUpgradeableProxy') return 'transparent-proxy';
-  if (name === 'ProxyAdmin') return 'proxy-admin';
-  if (name === 'UpgradeableBeacon') return 'upgradeable-beacon';
-  if (name === 'BeaconProxy') return 'beacon-proxy';
-  return 'contract';
+  if (
+    !isObject(identity) ||
+    typeof identity.sourceName !== 'string' ||
+    typeof identity.contractName !== 'string' ||
+    identity.fullyQualifiedName !== `${identity.sourceName}:${identity.contractName}`
+  ) {
+    return 'contract';
+  }
+  const sourceName = identity.sourceName.startsWith('lib/') ? identity.sourceName.slice(4) : identity.sourceName;
+  return CANONICAL_CONTRACT_KINDS.get(`${sourceName}:${identity.contractName}`) ?? 'contract';
 }
 
 function validateDependencies(options) {
@@ -467,7 +481,7 @@ function createRpcHandlers(rawOptions) {
       return sourceHash;
     } catch (error) {
       const current = journal.get(sourceHash);
-      if (current?.state === 'received') {
+      if (current?.state === 'received' && !retryableTransportError(error)) {
         journal.recordFailed(sourceHash, { code: failureCode(error), message: error?.message || 'Translation failed' });
       }
       throw error;
@@ -497,6 +511,9 @@ function createRpcHandlers(rawOptions) {
     if (record.state === 'failed')
       throw Object.assign(new Error(record.failure.message), { code: record.failure.code });
     if (record.state === 'received') {
+      if (record.buildClaimOwner === journal.ownerId) {
+        return runTracked(hash, () => processClaimed(record.signedEthereumTransaction, hash));
+      }
       const error = new Error('Source transaction native build is owned by another live handler');
       error.code = 'TRANSACTION_IN_PROGRESS';
       throw error;

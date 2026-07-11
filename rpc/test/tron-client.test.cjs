@@ -3,7 +3,12 @@ const test = require('node:test');
 
 const { TronWeb, utils } = require('tronweb');
 
-const { TronClient, nativeTxIdFromSignedBytes, serializeSignedTransaction } = require('../tron-client.cjs');
+const {
+  TronClient,
+  nativeTxIdFromSignedBytes,
+  retryableTransportError,
+  serializeSignedTransaction,
+} = require('../tron-client.cjs');
 const { translateReceipt } = require('../receipts.cjs');
 
 const PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
@@ -126,6 +131,24 @@ function fixture(overrides = {}) {
     tronWeb,
   };
 }
+
+test('classifies retryable transport failures recursively through wrapped causes', () => {
+  for (const cause of [
+    { status: 408 },
+    { statusCode: 429 },
+    { response: { status: 503 } },
+    { code: 'ECONNRESET' },
+    new Error('temporary network outage'),
+  ]) {
+    assert.equal(retryableTransportError(new Error('operation wrapper', { cause })), true);
+  }
+  assert.equal(
+    retryableTransportError(new Error('outer', { cause: new Error('middle', { cause: { code: 'UND_ERR_SOCKET' } }) })),
+    true,
+  );
+  assert.equal(retryableTransportError(Object.assign(new Error('forbidden'), { response: { status: 403 } })), false);
+  assert.equal(retryableTransportError(new Error('deterministic artifact mismatch')), false);
+});
 
 test('prebuilds and signs a native CreateSmartContract using normalized owner and exact constructor suffix', async () => {
   const { calls, client } = fixture();

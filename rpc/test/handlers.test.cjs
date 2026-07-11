@@ -9,7 +9,7 @@ const test = require('node:test');
 const { Transaction, Wallet, getCreateAddress, keccak256, toBeHex } = require('ethers');
 
 const { AddressMap } = require('../address-map.cjs');
-const { createRpcHandlers, nativeContractAddress } = require('../handlers.cjs');
+const { contractKindForArtifact, createRpcHandlers, nativeContractAddress } = require('../handlers.cjs');
 const { TransactionJournal, recordRetainedFailureInChain } = require('../journal.cjs');
 const { acquireStateLock } = require('../state-lock.cjs');
 const { JsonStore } = require('../store.cjs');
@@ -29,6 +29,12 @@ const ARTIFACT_IDENTITY = {
   contractName: 'Box',
   fullyQualifiedName: 'contracts/Box.sol:Box',
 };
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(resolvePromise => (resolve = resolvePromise));
+  return { promise, resolve };
+}
 
 async function signedTransaction(overrides = {}) {
   return WALLET.signTransaction({
@@ -350,6 +356,87 @@ test('joins concurrent source retries and never invokes a second native builder'
   assert.equal((await first).result, keccak256(raw));
   assert.equal((await second).result, keccak256(raw));
   assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+});
+
+test('same-owner retries resume a transient builder failure without concurrent duplicate work', async t => {
+  const raw = await signedTransaction({ nonce: 30 });
+  const sourceHash = keccak256(raw);
+  const result = fixture(t, { sourceHash });
+  const originalBuild = result.nativeClient.buildCreate.bind(result.nativeClient);
+  const firstBuild = deferred();
+  let buildAttempts = 0;
+  result.nativeClient.buildCreate = async value => {
+    buildAttempts += 1;
+    if (buildAttempts === 1) {
+      await firstBuild.promise;
+      throw new Error('TRON builder temporarily unavailable', {
+        cause: Object.assign(new Error('socket reset'), { code: 'ECONNRESET' }),
+      });
+    }
+    return originalBuild(value);
+  };
+
+  const first = send(result.handlers, raw, 1);
+  const joined = send(result.handlers, raw, 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(buildAttempts, 1);
+  firstBuild.resolve();
+  assert.equal((await first).error.code, -32000);
+  assert.equal((await joined).error.code, -32000);
+  assert.equal(result.journal.get(sourceHash).state, 'received');
+  assert.equal(result.journal.get(sourceHash).buildClaimOwner, result.journal.ownerId);
+  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 0);
+
+  assert.equal((await send(result.handlers, raw, 3)).result, sourceHash);
+  assert.equal(buildAttempts, 2);
+  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+  assert.equal(result.journal.get(sourceHash).state, 'confirmed');
+});
+
+test('same-owner retries rebuild after a transient exact-simulation transport failure', async t => {
+  const raw = await signedTransaction({ nonce: 31 });
+  const sourceHash = keccak256(raw);
+  const result = fixture(t, { sourceHash });
+  const originalSimulation = result.nativeClient.simulateSigned.bind(result.nativeClient);
+  let simulationAttempts = 0;
+  result.nativeClient.simulateSigned = async (...args) => {
+    simulationAttempts += 1;
+    if (simulationAttempts === 1) {
+      throw new Error('Exact signed-transaction simulation is unavailable', {
+        cause: Object.assign(new Error('service unavailable'), { response: { status: 503 } }),
+      });
+    }
+    return originalSimulation(...args);
+  };
+
+  assert.equal((await send(result.handlers, raw, 1)).error.code, -32000);
+  assert.equal(result.journal.get(sourceHash).state, 'received');
+  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 0);
+
+  assert.equal((await send(result.handlers, raw, 2)).result, sourceHash);
+  assert.equal(simulationAttempts, 2);
+  assert.equal(result.calls.filter(call => call.type === 'buildCreate').length, 2);
+  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+});
+
+test('ordinary send retries cannot take over a received claim owned by another boot', async t => {
+  const raw = await signedTransaction({ nonce: 32 });
+  const sourceHash = keccak256(raw);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-foreign-claim-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new JsonStore(path.join(directory, 'state.json'));
+  new TransactionJournal(store, CHAIN, { ownerId: 'boot-old' }).receive(raw);
+  const journal = new TransactionJournal(store, CHAIN, { ownerId: 'boot-new' });
+  const result = fixture(t, { journal, addressMap: new AddressMap(store, CHAIN) });
+
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.data.code, 'TRANSACTION_IN_PROGRESS');
+  assert.equal(result.journal.get(sourceHash).state, 'received');
+  assert.equal(result.journal.get(sourceHash).buildClaimOwner, 'boot-old');
+  assert.equal(
+    result.calls.some(call => call.type === 'buildCreate' || call.type === 'broadcast'),
+    false,
+  );
 });
 
 test('rewrites and builds a native call once with durable target metadata', async t => {
@@ -756,5 +843,55 @@ test('turns deterministic prebuild failures into durable terminal failures and n
       })
     ).result,
     null,
+  );
+});
+
+test('classifies privileged contract kinds only for exact canonical TRON artifact identities', () => {
+  const canonical = [
+    ['openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol', 'TRC1967Proxy', 'uups-proxy'],
+    [
+      'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+      'TransparentUpgradeableProxy',
+      'transparent-proxy',
+    ],
+    ['openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol', 'ProxyAdmin', 'proxy-admin'],
+    [
+      'openzeppelin-tron-solidity/contracts/proxy/beacon/UpgradeableBeacon.sol',
+      'UpgradeableBeacon',
+      'upgradeable-beacon',
+    ],
+    ['openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol', 'BeaconProxy', 'beacon-proxy'],
+  ];
+  for (const [sourceName, contractName, expected] of canonical) {
+    for (const prefix of ['', 'lib/']) {
+      const source = `${prefix}${sourceName}`;
+      assert.equal(
+        contractKindForArtifact({ sourceName: source, contractName, fullyQualifiedName: `${source}:${contractName}` }),
+        expected,
+      );
+    }
+  }
+
+  for (const contractName of [
+    'TRC1967Proxy',
+    'ERC1967Proxy',
+    'TransparentUpgradeableProxy',
+    'ProxyAdmin',
+    'UpgradeableBeacon',
+    'BeaconProxy',
+  ]) {
+    const sourceName = `contracts/unrelated/${contractName}.sol`;
+    assert.equal(
+      contractKindForArtifact({ sourceName, contractName, fullyQualifiedName: `${sourceName}:${contractName}` }),
+      'contract',
+    );
+  }
+  assert.equal(
+    contractKindForArtifact({
+      sourceName: 'vendor/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
+      contractName: 'ProxyAdmin',
+      fullyQualifiedName: 'vendor/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
+    }),
+    'contract',
   );
 });

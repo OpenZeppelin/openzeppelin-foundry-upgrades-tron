@@ -197,11 +197,19 @@ function numericHttpStatus(error) {
 }
 
 function retryableTransportError(error) {
-  const status = numericHttpStatus(error);
-  if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status <= 599);
-  if (typeof error?.code === 'string' && RETRYABLE_NETWORK_CODES.has(error.code.toUpperCase())) return true;
-  const message = typeof error?.message === 'string' ? error.message : '';
-  return /network|socket|reset|timed?\s*out|timeout|offline|outage|fetch failed/i.test(message);
+  const seen = new Set();
+  let current = error;
+  while ((typeof current === 'object' && current !== null) || typeof current === 'function') {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    const status = numericHttpStatus(current);
+    if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status <= 599);
+    if (typeof current.code === 'string' && RETRYABLE_NETWORK_CODES.has(current.code.toUpperCase())) return true;
+    const message = typeof current.message === 'string' ? current.message : '';
+    if (/network|socket|reset|timed?\s*out|timeout|offline|outage|fetch failed/i.test(message)) return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 class RetryableNativeQueryError extends Error {
@@ -462,5 +470,6 @@ class TronClient {
 module.exports = {
   TronClient,
   nativeTxIdFromSignedBytes,
+  retryableTransportError,
   serializeSignedTransaction,
 };
