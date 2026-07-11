@@ -8,6 +8,7 @@ const { AbiCoder, keccak256, toUtf8Bytes } = require('ethers');
 const {
   buildInfoDirectory,
   isAbsolutePath,
+  loadBuildInfo,
   resolvePath,
   validateLinkReferences,
   verify,
@@ -68,4 +69,15 @@ test('accepts only the exact lowercase link-placeholder identity', () => {
   assert.equal(validateLinkReferences(`73__$${identity}$__6000`, references, references), true);
   assert.equal(validateLinkReferences(`73__$${'1'.repeat(34)}$__6000`, references, references), null);
   assert.equal(validateLinkReferences(`73__$${identity.toUpperCase()}$__6000`, references, references), null);
+});
+
+test('exposes both Hardhat 3 split build-info files to snapshot consumers', () => {
+  const outputDirectory = path.resolve('test/fixtures/provenance/hh3-valid/artifacts/contracts');
+  const artifact = JSON.parse(fs.readFileSync(path.join(outputDirectory, 'contracts/Widget.sol/Widget.json'), 'utf8'));
+  const loaded = loadBuildInfo(artifact, outputDirectory, 'Widget', 'contracts/Widget.sol:Widget');
+
+  assert.deepEqual(loaded.buildInfoFiles, [
+    path.resolve('test/fixtures/provenance/hh3-valid/artifacts/build-info/solc-0_8_22-valid.json'),
+    path.resolve('test/fixtures/provenance/hh3-valid/artifacts/build-info/solc-0_8_22-valid.output.json'),
+  ]);
 });

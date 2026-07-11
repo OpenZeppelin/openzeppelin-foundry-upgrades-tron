@@ -223,6 +223,7 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
     if (target === undefined) return { error: response(CODE.buildInfoNotFound, ZERO_HASH, fullyQualifiedName) };
     return {
       buildInfoFile: mainPath,
+      buildInfoFiles: [mainPath, outputPath],
       inputSources,
       target,
       sourceLookup: source => canonicalToUser[source] ?? source,
@@ -242,6 +243,7 @@ function loadBuildInfo(artifact, outputDirectory, contractName, fullyQualifiedNa
   const { file, buildInfo } = candidates[0];
   return {
     buildInfoFile: file,
+    buildInfoFiles: [file],
     inputSources: buildInfo.input?.sources ?? {},
     target: buildInfo.output.contracts[artifactSourceName][contractName],
     sourceLookup: source => source,

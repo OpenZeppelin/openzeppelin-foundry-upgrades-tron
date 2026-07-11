@@ -7,6 +7,7 @@ const { AbiCoder, keccak256, toUtf8Bytes } = require('ethers');
 
 const {
   CODE,
+  buildInfoDirectory,
   findJsonFiles,
   loadBuildInfo,
   normalizeBytecode,
@@ -16,6 +17,7 @@ const {
 
 const RESULT_TYPES = ['uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'string', 'string', 'bytes32', 'bytes32'];
 const HEX_BYTES = /^(?:0x)?(?:[0-9a-fA-F]{2})*$/;
+const NO_FOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const CODE_NAMES = Object.freeze({
   [CODE.buildInfoNotFound]: 'BUILD_INFO_NOT_FOUND',
   [CODE.ambiguousBuildInfo]: 'AMBIGUOUS_BUILD_INFO',
@@ -59,6 +61,50 @@ function isWithin(parent, child) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
+function assertStableOutput(outputDirectory, expectedRealOutput) {
+  if (fs.realpathSync(outputDirectory) !== expectedRealOutput) {
+    throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'FOUNDRY_OUT changed during provenance verification');
+  }
+}
+
+function assertNoSymlinkPath(root, target) {
+  if (!isWithin(root, target)) {
+    throw new ArtifactProvenanceError('ARTIFACT_OUTSIDE_OUTPUT', 'Provenance path is outside its trusted tree', {
+      target,
+      root,
+    });
+  }
+  const relative = path.relative(root, target);
+  let cursor = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    if (fs.lstatSync(cursor).isSymbolicLink()) {
+      throw new ArtifactProvenanceError('ARTIFACT_OUTSIDE_OUTPUT', 'Provenance paths cannot contain symlinks', {
+        target,
+        symlink: cursor,
+      });
+    }
+  }
+}
+
+function assertNoSymlinksInTree(directory) {
+  if (!fs.existsSync(directory)) return;
+  if (fs.lstatSync(directory).isSymbolicLink()) {
+    throw new ArtifactProvenanceError('ARTIFACT_OUTSIDE_OUTPUT', 'Build-info directory cannot be a symlink', {
+      directory,
+    });
+  }
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new ArtifactProvenanceError('ARTIFACT_OUTSIDE_OUTPUT', 'Build-info paths cannot contain symlinks', {
+        path: entryPath,
+      });
+    }
+    if (entry.isDirectory()) assertNoSymlinksInTree(entryPath);
+  }
+}
+
 function requireArtifactWithinOutput(outputDirectory, artifactPath) {
   if (typeof artifactPath !== 'string') {
     throw new ArtifactProvenanceError('INVALID_ARTIFACT_PATH', 'Artifact path must be a string');
@@ -73,6 +119,7 @@ function requireArtifactWithinOutput(outputDirectory, artifactPath) {
   if (!fs.existsSync(normalized) || !fs.statSync(normalized).isFile()) {
     throw new ArtifactProvenanceError('ARTIFACT_NOT_FOUND', `Artifact does not exist: ${normalized}`);
   }
+  assertNoSymlinkPath(outputDirectory, normalized);
   const realOutput = fs.realpathSync(outputDirectory);
   const realArtifact = fs.realpathSync(normalized);
   if (!isWithin(realOutput, realArtifact)) {
@@ -98,7 +145,13 @@ function readArtifact(artifactPath) {
   let snapshot;
   let artifact;
   try {
-    snapshot = fs.readFileSync(artifactPath, 'utf8');
+    const descriptor = fs.openSync(artifactPath, fs.constants.O_RDONLY | NO_FOLLOW);
+    try {
+      if (!fs.fstatSync(descriptor).isFile()) throw new Error('Artifact is not a regular file');
+      snapshot = fs.readFileSync(descriptor, 'utf8');
+    } finally {
+      fs.closeSync(descriptor);
+    }
     artifact = JSON.parse(snapshot);
   } catch (error) {
     throw new ArtifactProvenanceError('INVALID_ARTIFACT', `Cannot read artifact: ${artifactPath}`, { cause: error });
@@ -107,6 +160,41 @@ function readArtifact(artifactPath) {
     throw new ArtifactProvenanceError('INVALID_ARTIFACT', `Artifact must contain a JSON object: ${artifactPath}`);
   }
   return { artifact, snapshot };
+}
+
+function callHook(hooks, name) {
+  const hook = hooks?.[name];
+  if (hook !== undefined) {
+    if (typeof hook !== 'function') {
+      throw new ArtifactProvenanceError('INVALID_TEST_HOOK', `${name} must be a function`);
+    }
+    hook();
+  }
+}
+
+function snapshotBuildInfo(loaded, outputDirectory) {
+  const directory = path.normalize(buildInfoDirectory(outputDirectory));
+  const files = (loaded.buildInfoFiles ?? [loaded.buildInfoFile]).map(file => path.normalize(file));
+  const snapshots = [];
+  for (const file of files) {
+    assertNoSymlinkPath(directory, file);
+    const descriptor = fs.openSync(file, fs.constants.O_RDONLY | NO_FOLLOW);
+    try {
+      if (!fs.fstatSync(descriptor).isFile()) throw new Error('Build-info is not a regular file');
+      snapshots.push(fs.readFileSync(descriptor, 'utf8'));
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+  return JSON.stringify({
+    files,
+    snapshots,
+    buildInfoFile: loaded.buildInfoFile,
+    solcVersion: loaded.solcVersion,
+    solcLongVersion: loaded.solcLongVersion,
+    hardhat3: loaded.hardhat3,
+    target: loaded.target,
+  });
 }
 
 function artifactFiles(outputDirectory) {
@@ -194,23 +282,50 @@ function throwVerificationError(result) {
   throw new ArtifactProvenanceError(code, `Artifact provenance failed (${code}): ${result.detailA}`, details);
 }
 
-function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifactPath: artifactPathArg }) {
+function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifactPath: artifactPathArg, hooks }) {
   const outputDirectory = requireAbsoluteOutput(outputDirectoryArg);
-  const artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPathArg);
+  const expectedRealOutput = fs.realpathSync(outputDirectory);
+  let artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPathArg);
+  callHook(hooks, 'afterArtifactBoundaryCheck');
+  artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
+  assertStableOutput(outputDirectory, expectedRealOutput);
+  const buildInfoRoot = path.normalize(buildInfoDirectory(outputDirectory));
+  assertNoSymlinksInTree(buildInfoRoot);
   const initial = readArtifact(artifactPath);
   const identity = artifactIdentity(initial.artifact, artifactPath);
   const args = [outputDirectory, artifactPath, identity.sourceName, identity.contractName, identity.fullyQualifiedName];
   const firstEncoded = verify(args);
   const first = decodeVerification(firstEncoded);
   if (first.numericCode !== CODE.success) throwVerificationError(first);
+  artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
+  assertStableOutput(outputDirectory, expectedRealOutput);
   if (keccak256(toUtf8Bytes(initial.snapshot)) !== first.artifactSnapshotHash) {
     throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'Artifact changed during provenance verification');
   }
 
+  callHook(hooks, 'afterInitialVerification');
+  assertNoSymlinksInTree(buildInfoRoot);
   const loaded = loadBuildInfo(initial.artifact, outputDirectory, identity.contractName, identity.fullyQualifiedName);
   if (loaded.error !== undefined) throwVerificationError(decodeVerification(loaded.error));
+  const loadedSnapshot = snapshotBuildInfo(loaded, outputDirectory);
+  callHook(hooks, 'afterBuildInfoLoad');
+  assertNoSymlinksInTree(buildInfoRoot);
   const secondEncoded = verify(args);
-  if (secondEncoded !== firstEncoded || fs.readFileSync(artifactPath, 'utf8') !== initial.snapshot) {
+  const finalLoaded = loadBuildInfo(
+    initial.artifact,
+    outputDirectory,
+    identity.contractName,
+    identity.fullyQualifiedName,
+  );
+  if (finalLoaded.error !== undefined) throwVerificationError(decodeVerification(finalLoaded.error));
+  const finalLoadedSnapshot = snapshotBuildInfo(finalLoaded, outputDirectory);
+  artifactPath = requireArtifactWithinOutput(outputDirectory, artifactPath);
+  assertStableOutput(outputDirectory, expectedRealOutput);
+  if (
+    secondEncoded !== firstEncoded ||
+    readArtifact(artifactPath).snapshot !== initial.snapshot ||
+    finalLoadedSnapshot !== loadedSnapshot
+  ) {
     throw new ArtifactProvenanceError('PROVENANCE_CHANGED', 'Artifact or build-info changed during verification');
   }
 
@@ -218,7 +333,9 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
     typeof initial.artifact.bytecode === 'string' ? initial.artifact.bytecode : initial.artifact.bytecode?.object,
   );
   const outputMetadata =
-    typeof loaded.target.metadata === 'string' ? JSON.parse(loaded.target.metadata) : loaded.target.metadata;
+    typeof finalLoaded.target.metadata === 'string'
+      ? JSON.parse(finalLoaded.target.metadata)
+      : finalLoaded.target.metadata;
   return {
     artifact: initial.artifact,
     artifactPath,
@@ -233,8 +350,8 @@ function verifyArtifactProvenance({ outputDirectory: outputDirectoryArg, artifac
     compiler: {
       artifactVersion: initial.artifact.metadata.compiler.version,
       outputVersion: outputMetadata.compiler.version,
-      solcVersion: loaded.solcVersion,
-      solcLongVersion: loaded.solcLongVersion,
+      solcVersion: finalLoaded.solcVersion,
+      solcLongVersion: finalLoaded.solcLongVersion,
     },
   };
 }
@@ -275,7 +392,7 @@ function matchBytecodePrefix(artifact, initcode) {
   return prefix.slice(cursor).toLowerCase() === template.slice(cursor).toLowerCase() ? prefix : undefined;
 }
 
-function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode: initcodeArg }) {
+function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode: initcodeArg, hooks }) {
   const outputDirectory = requireAbsoluteOutput(outputDirectoryArg);
   if (typeof initcodeArg !== 'string' || !HEX_BYTES.test(initcodeArg)) {
     throw new ArtifactProvenanceError('INVALID_INITCODE', 'Raw initcode must be even-length hexadecimal bytes');
@@ -295,10 +412,10 @@ function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode
   if (preliminary.length === 0) {
     throw new ArtifactProvenanceError('ARTIFACT_NOT_FOUND', 'No verified artifact matches the raw initcode prefix');
   }
+  callHook(hooks, 'afterCandidateMatch');
 
   const matches = preliminary.map(candidate => ({
-    ...verifyArtifactProvenance({ outputDirectory, artifactPath: candidate.artifactPath }),
-    prefix: candidate.prefix,
+    ...verifyArtifactProvenance({ outputDirectory, artifactPath: candidate.artifactPath, hooks }),
   }));
   if (matches.length !== 1) {
     throw new ArtifactProvenanceError(
@@ -309,8 +426,12 @@ function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode
   }
 
   const [match] = matches;
-  if (match.prefix.length !== match.templateBytecode.length) {
-    throw new ArtifactProvenanceError('BYTECODE_MISMATCH', 'Verified creation bytecode length changed during matching');
+  const prefix = matchBytecodePrefix(match.artifact, initcode);
+  if (prefix === undefined) {
+    throw new ArtifactProvenanceError(
+      'ARTIFACT_NOT_FOUND',
+      'The provenance-verified artifact no longer matches the raw initcode prefix',
+    );
   }
   return {
     artifact: match.artifact,
@@ -319,8 +440,8 @@ function matchDeploymentArtifact({ outputDirectory: outputDirectoryArg, initcode
     sourceName: match.sourceName,
     contractName: match.contractName,
     fullyQualifiedName: match.fullyQualifiedName,
-    creationBytecode: `0x${match.prefix.toLowerCase()}`,
-    constructorData: `0x${initcode.slice(match.prefix.length).toLowerCase()}`,
+    creationBytecode: `0x${prefix.toLowerCase()}`,
+    constructorData: `0x${initcode.slice(prefix.length).toLowerCase()}`,
     requiresLinking: match.requiresLinking,
     compiler: match.compiler,
     provenanceHash: match.provenanceHash,

@@ -218,3 +218,130 @@ test('requires raw initcode to contain the complete verified creation-bytecode p
   assert.throws(() => matchDeploymentArtifact({ outputDirectory: out, initcode: '0x60016000' }), /no.*artifact/i);
   assert.throws(() => matchDeploymentArtifact({ outputDirectory: out, initcode: '0x6001600054' }), /no.*artifact/i);
 });
+
+test('rebinds the raw initcode prefix to the artifact snapshot selected by provenance', t => {
+  const out = basicOut(t);
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const buildInfoPath = path.join(out, 'build-info/build.json');
+
+  assert.throws(
+    () =>
+      matchDeploymentArtifact({
+        outputDirectory: out,
+        initcode: '0x6001600055deadbeef',
+        hooks: {
+          afterCandidateMatch() {
+            const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+            artifact.bytecode.object = '0x6002600055';
+            fs.writeFileSync(artifactPath, JSON.stringify(artifact));
+            const buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8'));
+            buildInfo.output.contracts['contracts/Widget.sol'].Widget.evm.bytecode.object = '6002600055';
+            fs.writeFileSync(buildInfoPath, JSON.stringify(buildInfo));
+          },
+        },
+      }),
+    error => error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'PROVENANCE_CHANGED',
+  );
+});
+
+test('never returns compiler fields from transient unverified build-info', t => {
+  const out = basicOut(t);
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const buildInfoPath = path.join(out, 'build-info/build.json');
+  const original = fs.readFileSync(buildInfoPath, 'utf8');
+  const transient = JSON.parse(original);
+  transient.solcVersion = '9.9.9';
+  transient.solcLongVersion = '9.9.9+commit.transient';
+  transient.output.contracts['contracts/Widget.sol'].Widget.metadata = JSON.stringify({
+    compiler: { version: '9.9.9+commit.transient' },
+  });
+
+  assert.throws(
+    () =>
+      verifyArtifactProvenance({
+        outputDirectory: out,
+        artifactPath,
+        hooks: {
+          afterInitialVerification() {
+            fs.writeFileSync(buildInfoPath, JSON.stringify(transient));
+          },
+          afterBuildInfoLoad() {
+            fs.writeFileSync(buildInfoPath, original);
+          },
+        },
+      }),
+    error => error.code === 'PROVENANCE_CHANGED',
+  );
+});
+
+test('rejects a build-info symlink that escapes the absolute output tree', t => {
+  const out = basicOut(t);
+  const buildInfoPath = path.join(out, 'build-info/build.json');
+  const outsideDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-build-info-'));
+  t.after(() => fs.rmSync(outsideDirectory, { recursive: true, force: true }));
+  const outsideBuildInfo = path.join(outsideDirectory, 'build.json');
+  fs.renameSync(buildInfoPath, outsideBuildInfo);
+  fs.symlinkSync(outsideBuildInfo, buildInfoPath);
+
+  assert.throws(
+    () =>
+      verifyArtifactProvenance({
+        outputDirectory: out,
+        artifactPath: path.join(out, 'Widget.sol/Widget.json'),
+      }),
+    error => error.code === 'ARTIFACT_OUTSIDE_OUTPUT',
+  );
+});
+
+test('rejects an artifact leaf swapped to an escaping symlink after its boundary check', t => {
+  const out = basicOut(t);
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const outsideDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-artifact-swap-'));
+  t.after(() => fs.rmSync(outsideDirectory, { recursive: true, force: true }));
+  const outsideArtifact = path.join(outsideDirectory, 'Widget.json');
+  fs.copyFileSync(artifactPath, outsideArtifact);
+
+  assert.throws(
+    () =>
+      verifyArtifactProvenance({
+        outputDirectory: out,
+        artifactPath,
+        hooks: {
+          afterArtifactBoundaryCheck() {
+            fs.rmSync(artifactPath);
+            fs.symlinkSync(outsideArtifact, artifactPath);
+          },
+        },
+      }),
+    error => error.code === 'ARTIFACT_OUTSIDE_OUTPUT',
+  );
+});
+
+test('binds both Hardhat 3 split build-info files to one verification snapshot', t => {
+  const fixture = copyTree(t, path.join(provenanceFixtures, 'hh3-valid'));
+  const out = path.join(fixture, 'artifacts/contracts');
+  const artifactPath = path.join(out, 'contracts/Widget.sol/Widget.json');
+  const outputPath = path.join(fixture, 'artifacts/build-info/solc-0_8_22-valid.output.json');
+  const original = fs.readFileSync(outputPath, 'utf8');
+  const transient = JSON.parse(original);
+  transient.output.contracts['project/contracts/Widget.sol'].Widget.metadata = JSON.stringify({
+    compiler: { version: '0.8.22+commit.transient' },
+  });
+
+  assert.throws(
+    () =>
+      verifyArtifactProvenance({
+        outputDirectory: out,
+        artifactPath,
+        hooks: {
+          afterInitialVerification() {
+            fs.writeFileSync(outputPath, JSON.stringify(transient));
+          },
+          afterBuildInfoLoad() {
+            fs.writeFileSync(outputPath, original);
+          },
+        },
+      }),
+    error => error.code === 'PROVENANCE_CHANGED',
+  );
+});
