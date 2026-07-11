@@ -648,6 +648,30 @@ test('rewrites and builds a native call once with durable target metadata', asyn
   assert.deepEqual(operation.artifactIdentity, ARTIFACT_IDENTITY);
 });
 
+test('presents a confirmed call target in the same predicted or actual domain signed by Forge', async t => {
+  for (const [index, sourceTarget] of [TARGET, TARGET_ACTUAL].entries()) {
+    await t.test(index === 0 ? 'predicted source target' : 'actual source target', async t => {
+      const raw = await signedTransaction({ to: sourceTarget, nonce: 40 + index, data: '0x1234' });
+      const sourceHash = keccak256(raw);
+      const result = fixture(t, { sourceHash });
+      result.addressMap.set({
+        predicted: TARGET,
+        actual: TARGET_ACTUAL,
+        creator: WALLET.address,
+        sender: WALLET.address,
+        sourceTransaction: SOURCE_TX,
+      });
+
+      assert.equal((await send(result.handlers, raw)).result, sourceHash);
+      const operation = result.calls.find(call => call.type === 'prepared').operationContext;
+      const receiptResolvers = result.calls.find(call => call.type === 'wait').context;
+      assert.equal(operation.to.toLowerCase(), sourceTarget.toLowerCase());
+      assert.equal(operation.actualTarget, TARGET_ACTUAL);
+      assert.equal(receiptResolvers.resolveAddress(TARGET_ACTUAL), sourceTarget.toLowerCase());
+    });
+  }
+});
+
 test('recovers native-built and broadcast records without ever calling a builder', async t => {
   for (const [initialState, present, expectedBroadcasts] of [
     ['native-built', true, 0],

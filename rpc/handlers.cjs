@@ -239,6 +239,9 @@ function receiptContext(addressMap, record) {
       if (operation.kind === 'deployment' && actual === operation.actualTarget) {
         return operation.predictedContractAddress;
       }
+      if (operation.kind === 'call' && actual === operation.actualTarget) {
+        return normalizeEvmAddress(operation.to, 'source call target');
+      }
       return addressMap.toPredicted(actual) ?? actual;
     },
     resolveInternalAddress(address) {
