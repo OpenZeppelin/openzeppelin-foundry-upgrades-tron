@@ -18,6 +18,8 @@ function containsTest(directory) {
 if (containsTest(path.join(root, 'test'))) {
   fs.rmSync(path.join(root, 'out-unlinked'), { recursive: true, force: true });
   fs.rmSync(path.join(root, 'cache-unlinked'), { recursive: true, force: true });
+  fs.rmSync(path.join(root, 'out-prelinked'), { recursive: true, force: true });
+  fs.rmSync(path.join(root, 'cache-prelinked'), { recursive: true, force: true });
 
   const unlinkedBuild = spawnSync('forge', ['build', '--force'], {
     cwd: root,
@@ -32,9 +34,29 @@ if (containsTest(path.join(root, 'test'))) {
     return;
   }
 
+  const prelinkedBuild = spawnSync('forge', ['build', '--force'], {
+    cwd: root,
+    env: { ...process.env, FOUNDRY_OUT: 'out-prelinked', FOUNDRY_PROFILE: 'prelinked' },
+    stdio: 'inherit',
+  });
+  if (prelinkedBuild.error) {
+    throw prelinkedBuild.error;
+  }
+  if (prelinkedBuild.status !== 0) {
+    process.exitCode = prelinkedBuild.status ?? 1;
+    return;
+  }
+
   const result = spawnSync(
     'forge',
-    ['test', '-vvv', '--ffi', '--force', '--no-match-test', 'testValidatedDeploymentLinksBoundExternalLibraryArtifact'],
+    [
+      'test',
+      '-vvv',
+      '--ffi',
+      '--force',
+      '--no-match-test',
+      'testValidatedDeployment(LinksBound|UsesPrelinked)ExternalLibraryArtifact',
+    ],
     {
       cwd: root,
       env: { ...process.env, FOUNDRY_OUT: 'out', FOUNDRY_PROFILE: 'default' },
@@ -61,5 +83,22 @@ if (containsTest(path.join(root, 'test'))) {
   if (linkedResult.error) {
     throw linkedResult.error;
   }
-  process.exitCode = linkedResult.status ?? 1;
+  if (linkedResult.status !== 0) {
+    process.exitCode = linkedResult.status ?? 1;
+    return;
+  }
+
+  const prelinkedResult = spawnSync(
+    'forge',
+    ['test', '-vvv', '--ffi', '--match-test', 'testValidatedDeploymentUsesPrelinkedExternalLibraryArtifact'],
+    {
+      cwd: root,
+      env: { ...process.env, FOUNDRY_OUT: 'out-prelinked', FOUNDRY_PROFILE: 'prelinked' },
+      stdio: 'inherit',
+    },
+  );
+  if (prelinkedResult.error) {
+    throw prelinkedResult.error;
+  }
+  process.exitCode = prelinkedResult.status ?? 1;
 }

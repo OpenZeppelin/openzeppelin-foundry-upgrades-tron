@@ -1,7 +1,9 @@
 # Compiler files
 cache/
+cache-prelinked/
 cache-unlinked/
 out/
+out-prelinked/
 out-unlinked/
 test_artifacts*/
 

@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {LinkedLibrary, Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
 import {Upgrades, UnsafeUpgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
+import {ArtifactProvenance} from "openzeppelin-foundry-upgrades-tron/internal/ArtifactProvenance.sol";
 import {IBeacon} from "openzeppelin-tron-solidity/contracts/proxy/beacon/IBeacon.sol";
 import {ProxyAdmin} from "openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol";
 
@@ -157,6 +158,30 @@ contract UpgradesTest is Test {
 
         assertEq(WithExternalLibrary(implementation).twice(21), 42);
         assertEq(WithExternalLibrary(unboundImplementation).twice(22), 44);
+    }
+
+    function testValidatedDeploymentUsesPrelinkedExternalLibraryArtifact() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out-prelinked/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        assertTrue(vm.keyExistsJson(artifact, ".bytecode.linkReferences"));
+        assertEq(vm.parseJsonKeys(artifact, ".bytecode.linkReferences").length, 0);
+        assertFalse(ArtifactProvenance.requiresLinkingFromSnapshot(artifact));
+
+        deployCodeTo("WithExternalLibrary.sol:ExternalMath", EXTERNAL_MATH);
+        Options memory opts;
+        opts.unsafeAllow = "external-library-linking";
+        opts.linkedLibraries = new LinkedLibrary[](0);
+
+        address implementation = Upgrades.deployImplementation("WithExternalLibrary.sol:WithExternalLibrary", opts);
+        opts.unsafeSkipAllChecks = true;
+        address unboundImplementation = Upgrades.deployImplementation(
+            "WithExternalLibrary.sol:WithExternalLibrary",
+            opts
+        );
+
+        assertEq(WithExternalLibrary(implementation).twice(23), 46);
+        assertEq(WithExternalLibrary(unboundImplementation).twice(24), 48);
     }
 
     function testPrepareUpgradeValidatesAgainstReferenceThenDeploys() public {
