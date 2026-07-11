@@ -34,6 +34,14 @@ const CANONICAL_CONTRACT_KINDS = new Map([
   ['openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin', 'proxy-admin'],
   ['openzeppelin-tron-solidity/contracts/proxy/beacon/UpgradeableBeacon.sol:UpgradeableBeacon', 'upgradeable-beacon'],
   ['openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy', 'beacon-proxy'],
+  ['node_modules/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy', 'uups-proxy'],
+  [
+    'node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+    'transparent-proxy',
+  ],
+  ['node_modules/@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin', 'proxy-admin'],
+  ['node_modules/@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol:UpgradeableBeacon', 'upgradeable-beacon'],
+  ['node_modules/@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy', 'beacon-proxy'],
 ]);
 
 class RpcError extends Error {

@@ -163,10 +163,11 @@ scripts.
 ### Existing OpenZeppelin Contracts v4 upgrades
 
 `LegacyUpgrades.sol` provides the upstream upgrade-only interface for existing
-deployments built with OpenZeppelin Contracts v4. It intentionally has no proxy,
-beacon, implementation deployment, or standalone implementation-validation
-helpers. New deployments use `Upgrades.sol` with OpenZeppelin Contracts for
-TRON v5.
+deployments built with OpenZeppelin Contracts v4. It intentionally has no proxy
+or beacon deployment helpers and no general-purpose `deployImplementation` or
+`validateImplementation` helpers. Its `prepareUpgrade` function does validate
+and deploy an implementation as part of an upgrade workflow. New deployments
+use `Upgrades.sol` with OpenZeppelin Contracts for TRON v5.
 
 ```solidity
 import {

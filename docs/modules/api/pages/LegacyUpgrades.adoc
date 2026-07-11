@@ -29,9 +29,10 @@ The unsafe legacy library exports these seven functions and overloads:
 * `getImplementationAddress(address) -> address`
 * `getBeaconAddress(address) -> address`
 
-Neither library deploys proxies, beacons, or standalone implementations.
-`validateImplementation` and `deployImplementation` are intentionally absent.
-New deployments use the modern API.
+Neither library deploys proxies or beacons. General-purpose
+`validateImplementation` and `deployImplementation` helpers are intentionally
+absent, while validated `prepareUpgrade` does deploy an implementation as part
+of an upgrade workflow. New deployments use the modern API.
 
 Local tests cover v4-style UUPS `upgradeTo`, ProxyAdmin `upgrade` and
 `upgradeAndCall`, and strict v5 dispatch. External stock-TRE compatibility

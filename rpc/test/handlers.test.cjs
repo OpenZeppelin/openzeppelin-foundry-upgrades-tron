@@ -1141,7 +1141,7 @@ test('turns deterministic prebuild failures into durable terminal failures and n
   );
 });
 
-test('classifies privileged contract kinds only for exact canonical TRON artifact identities', () => {
+test('classifies privileged contract kinds only for exact canonical TRON and upstream v4 artifact identities', () => {
   const canonical = [
     ['openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol', 'TRC1967Proxy', 'uups-proxy'],
     [
@@ -1165,6 +1165,27 @@ test('classifies privileged contract kinds only for exact canonical TRON artifac
         expected,
       );
     }
+  }
+
+  for (const [sourceName, contractName, expected] of [
+    ['node_modules/@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol', 'ERC1967Proxy', 'uups-proxy'],
+    [
+      'node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+      'TransparentUpgradeableProxy',
+      'transparent-proxy',
+    ],
+    ['node_modules/@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol', 'ProxyAdmin', 'proxy-admin'],
+    [
+      'node_modules/@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol',
+      'UpgradeableBeacon',
+      'upgradeable-beacon',
+    ],
+    ['node_modules/@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol', 'BeaconProxy', 'beacon-proxy'],
+  ]) {
+    assert.equal(
+      contractKindForArtifact({ sourceName, contractName, fullyQualifiedName: `${sourceName}:${contractName}` }),
+      expected,
+    );
   }
 
   for (const contractName of [
