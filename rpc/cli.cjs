@@ -132,6 +132,9 @@ function resolveFromState(addressMap, value) {
   const byActual =
     normalized === ZERO_ADDRESS || byPredicted !== undefined ? undefined : addressMap.resolveActual(normalized);
   const mapping = byPredicted ?? byActual;
+  if (normalized !== ZERO_ADDRESS && mapping === undefined) {
+    throw new Error(`No address mapping found for ${normalized}`);
+  }
   const predicted = mapping?.predicted ?? normalized;
   const actual = mapping?.actual ?? normalized;
   const encoded = normalizeAddress(actual);
@@ -177,8 +180,8 @@ async function startCommand(parsed, context) {
     stopPromise ??= Promise.resolve().then(() => server.stop());
     return stopPromise;
   };
-  context.signalTarget.once('SIGINT', requestShutdown);
-  context.signalTarget.once('SIGTERM', requestShutdown);
+  context.signalTarget.on('SIGINT', requestShutdown);
+  context.signalTarget.on('SIGTERM', requestShutdown);
   try {
     const address = await server.start();
     if (!shutdownRequested) {

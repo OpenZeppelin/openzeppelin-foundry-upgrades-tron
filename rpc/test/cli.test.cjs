@@ -169,6 +169,51 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
   assert.equal(signals.listenerCount('SIGTERM'), 0);
 });
 
+test('keeps both signal handlers installed throughout draining and still stops only once', async () => {
+  const signals = new EventEmitter();
+  const stdout = output();
+  let stopCalls = 0;
+  let finishStop;
+  const draining = new Promise(resolve => {
+    finishStop = resolve;
+  });
+  const server = {
+    start: async () => ({ host: '127.0.0.1', port: 18545 }),
+    async stop() {
+      stopCalls += 1;
+      await draining;
+    },
+  };
+  stdout.stream.write = () => {
+    signals.emit('SIGINT');
+    return true;
+  };
+
+  const running = run(['start'], {
+    environment: {},
+    stdout: stdout.stream,
+    stderr: output().stream,
+    signalTarget: signals,
+    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    runtimeFactory: () => ({ server }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(stopCalls, 1);
+  assert.equal(signals.listenerCount('SIGINT'), 1);
+  assert.equal(signals.listenerCount('SIGTERM'), 1);
+  signals.emit('SIGINT');
+  signals.emit('SIGTERM');
+  signals.emit('SIGTERM');
+  assert.equal(stopCalls, 1);
+  finishStop();
+
+  assert.equal(await running, 0);
+  assert.equal(stopCalls, 1);
+  assert.equal(signals.listenerCount('SIGINT'), 0);
+  assert.equal(signals.listenerCount('SIGTERM'), 0);
+});
+
 test('requires explicit opt-in before binding to a non-loopback host', async () => {
   const stderr = output();
   let starts = 0;
@@ -301,6 +346,37 @@ test('resolve is read-only, credential-free, and stable for predicted and actual
       })}\n`,
     );
   }
+});
+
+test('resolve fails clearly for an unknown nonzero address but permits the zero-address identity', async t => {
+  const directory = temporaryDirectory(t);
+  const stateFile = path.join(directory, 'state.json');
+  const environment = readOnlyEnvironment(stateFile);
+  const unknown = output();
+
+  assert.equal(
+    await run(['resolve', `0x${'99'.repeat(20)}`], {
+      environment,
+      stdout: output().stream,
+      stderr: unknown.stream,
+    }),
+    1,
+  );
+  assert.match(unknown.read(), /no address mapping found/i);
+
+  const zero = output();
+  assert.equal(
+    await run(['resolve', `0x${'00'.repeat(20)}`], {
+      environment,
+      stdout: zero.stream,
+      stderr: output().stream,
+    }),
+    0,
+  );
+  const resolved = JSON.parse(zero.read());
+  assert.equal(resolved.predicted, `0x${'00'.repeat(20)}`);
+  assert.equal(resolved.actual, `0x${'00'.repeat(20)}`);
+  assert.equal(resolved.mapping, null);
 });
 
 test('mappings returns predicted-address-sorted stable JSON without private key or network access', async t => {

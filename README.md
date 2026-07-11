@@ -86,7 +86,9 @@ npm run rpc:mappings
 `resolve` returns the predicted and actual EVM-form addresses, TRON hex,
 Base58, mapping provenance, and artifact metadata. `mappings` returns all
 records sorted by predicted address. Both commands emit stable JSON and only
-read `TRON_NETWORK`, `TRON_CHAIN_ID`, and `TRON_STATE_FILE`.
+read `TRON_NETWORK`, `TRON_CHAIN_ID`, and `TRON_STATE_FILE`. Resolving an
+unknown nonzero address fails instead of presenting an unverified identity
+mapping; the zero address is the only unmapped identity result.
 
 The same lookup is exposed over JSON-RPC:
 
@@ -101,6 +103,20 @@ endpoint and translates `eth_sendRawTransaction` into native contract-create or
 contract-call transactions. Before broadcast it verifies artifacts and
 constructor/call payloads, rewrites mapped ABI address values, journals the
 exact signed native transaction, and simulates child `CREATE` operations.
+
+Write translation requires a nonstandard POST
+`wallet/simulatesignedtransaction` capability. Its result must contain the
+matching native transaction ID, `trace_complete: true`, and ordered
+`child_create_attempts`. The stock public java-tron API and current stock TRE
+image do not provide this complete capability, so write requests fail closed
+before native broadcast on those nodes. Supplying public-network credentials
+does not by itself make write translation operational.
+
+Task 10's TRE integration readiness diagnostic must probe this exact simulation
+contract before reporting the write adapter ready; ordinary node or `/jsonrpc`
+health is not sufficient. Until that gate passes against a capability-enabled
+node, the adapter's read path and offline mapping inspection remain usable, but
+write support is not claimed for stock TRE or public java-tron deployments.
 
 State is written atomically and keyed by network plus chain ID. Replaying a
 Forge transaction reuses the journaled native transaction; restart recovery
