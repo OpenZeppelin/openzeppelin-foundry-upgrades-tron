@@ -1,4 +1,5 @@
 const { isDeepStrictEqual } = require('node:util');
+const { randomUUID } = require('node:crypto');
 
 const { keccak256 } = require('ethers');
 
@@ -8,6 +9,7 @@ const JOURNAL_VERSION = 1;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-f]{64}$/;
 const NATIVE_TRANSACTION_ID_PATTERN = /^(?:0x)?[0-9a-fA-F]{64}$/;
 const HEX_BYTES_PATTERN = /^(?:0x)?(?:[0-9a-fA-F]{2})+$/;
+const OWNER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const STATES = new Set(['received', 'native-built', 'broadcast', 'confirmed', 'failed']);
 
 function isObject(value) {
@@ -81,6 +83,29 @@ function validateFailure(failure) {
   return structuredClone(failure);
 }
 
+function validateOwnerId(ownerId) {
+  if (typeof ownerId !== 'string' || !OWNER_ID_PATTERN.test(ownerId)) {
+    throw new Error('Invalid transaction journal owner ID');
+  }
+  return ownerId;
+}
+
+function durableReceipt(receipt) {
+  try {
+    if (!isObject(receipt)) {
+      throw new Error('receipt must be an object');
+    }
+    const clonedReceipt = structuredClone(receipt);
+    const normalized = JSON.parse(JSON.stringify(clonedReceipt));
+    if (!isDeepStrictEqual(clonedReceipt, normalized)) {
+      throw new Error('receipt is not JSON-safe');
+    }
+    return normalized;
+  } catch (error) {
+    throw new Error('Invalid confirmed receipt', { cause: error });
+  }
+}
+
 function validateRecord(record, expectedHash) {
   if (!isObject(record) || !STATES.has(record.state)) {
     throw new Error('Corrupt transaction journal record');
@@ -105,7 +130,12 @@ function validateRecord(record, expectedHash) {
 
   const baseKeys = ['signedEthereumTransaction', 'sourceTransactionHash', 'state'];
   if (record.state === 'received') {
-    if (!exactKeys(record, baseKeys)) {
+    try {
+      validateOwnerId(record.buildClaimOwner);
+    } catch (error) {
+      throw new Error('Corrupt transaction journal record', { cause: error });
+    }
+    if (!exactKeys(record, [...baseKeys, 'buildClaimOwner'].sort())) {
       throw new Error('Corrupt transaction journal record');
     }
     return record;
@@ -157,6 +187,15 @@ function validateRecord(record, expectedHash) {
   if (!own(record, 'receipt') || !exactKeys(record, [...nativeKeys, 'receipt'].sort())) {
     throw new Error('Corrupt transaction journal record');
   }
+  let normalizedReceipt;
+  try {
+    normalizedReceipt = durableReceipt(record.receipt);
+  } catch (error) {
+    throw new Error('Corrupt transaction journal record', { cause: error });
+  }
+  if (!isDeepStrictEqual(record.receipt, normalizedReceipt)) {
+    throw new Error('Corrupt transaction journal record');
+  }
   return record;
 }
 
@@ -186,7 +225,7 @@ function transitionError(record, targetState) {
 }
 
 class TransactionJournal {
-  constructor(store, chainIdentity) {
+  constructor(store, chainIdentity, options = {}) {
     if (
       store === null ||
       typeof store !== 'object' ||
@@ -195,8 +234,12 @@ class TransactionJournal {
     ) {
       throw new Error('A durable store is required');
     }
+    if (!isObject(options)) {
+      throw new Error('Invalid transaction journal options');
+    }
     this.store = store;
     this.chainIdentity = validateChainIdentity(chainIdentity);
+    this.ownerId = validateOwnerId(options.ownerId ?? randomUUID());
   }
 
   receive(signedEthereumTransaction) {
@@ -209,17 +252,28 @@ class TransactionJournal {
         if (existing.signedEthereumTransaction !== source) {
           throw new Error('Source transaction retry conflict');
         }
-        return existing;
+        if (existing.state !== 'received') {
+          return { record: existing, shouldBuild: false };
+        }
+        if (existing.buildClaimOwner === this.ownerId) {
+          return { record: existing, shouldBuild: false };
+        }
+
+        const claimed = { ...existing, buildClaimOwner: this.ownerId };
+        journal.records[sourceTransactionHash] = claimed;
+        chain.transactionJournal = journal;
+        return { record: claimed, shouldBuild: true };
       }
 
       const record = {
         sourceTransactionHash,
         signedEthereumTransaction: source,
         state: 'received',
+        buildClaimOwner: this.ownerId,
       };
       journal.records[sourceTransactionHash] = record;
       chain.transactionJournal = journal;
-      return record;
+      return { record, shouldBuild: true };
     });
   }
 
@@ -241,8 +295,16 @@ class TransactionJournal {
       if (record.state !== 'received') {
         transitionError(record, 'native-built');
       }
+      if (record.buildClaimOwner !== this.ownerId) {
+        throw new Error('Native build claim is owned by another journal instance');
+      }
 
-      const next = { ...record, state: 'native-built', ...native };
+      const next = {
+        sourceTransactionHash: record.sourceTransactionHash,
+        signedEthereumTransaction: record.signedEthereumTransaction,
+        state: 'native-built',
+        ...native,
+      };
       journal.records[hash] = next;
       chain.transactionJournal = journal;
       return next;
@@ -255,24 +317,12 @@ class TransactionJournal {
 
   recordConfirmed(sourceTransactionHash, receipt) {
     const hash = normalizeSourceHash(sourceTransactionHash);
-    let durableReceipt;
-    try {
-      if (!isObject(receipt)) {
-        throw new Error('receipt must be an object');
-      }
-      const clonedReceipt = structuredClone(receipt);
-      durableReceipt = JSON.parse(JSON.stringify(clonedReceipt));
-      if (!isDeepStrictEqual(clonedReceipt, durableReceipt)) {
-        throw new Error('receipt is not JSON-safe');
-      }
-    } catch (error) {
-      throw new Error('Invalid confirmed receipt', { cause: error });
-    }
+    const persistedReceipt = durableReceipt(receipt);
     return this.store.transaction(this.chainIdentity, chain => {
       const journal = requireJournal(chain);
       const record = this._requireRecord(journal, hash);
       if (record.state === 'confirmed') {
-        if (!isDeepStrictEqual(record.receipt, durableReceipt)) {
+        if (!isDeepStrictEqual(record.receipt, persistedReceipt)) {
           throw new Error('Confirmed receipt retry conflict');
         }
         return record;
@@ -281,7 +331,7 @@ class TransactionJournal {
         transitionError(record, 'confirmed');
       }
 
-      const next = { ...record, state: 'confirmed', receipt: durableReceipt };
+      const next = { ...record, state: 'confirmed', receipt: persistedReceipt };
       journal.records[hash] = next;
       chain.transactionJournal = journal;
       return next;

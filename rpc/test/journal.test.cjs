@@ -14,12 +14,12 @@ const SOURCE_HASH = keccak256(SOURCE_BYTES);
 const NATIVE_BYTES = `0a02ABcd${'42'.repeat(40)}`;
 const NATIVE_TXID = `${'cd'.repeat(32)}`;
 
-function fixture(t, chain = 'tre:728126428') {
+function fixture(t, chain = 'tre:728126428', ownerId = 'boot-a') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-journal-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const statePath = path.join(directory, 'state.json');
   return {
-    journal: new TransactionJournal(new JsonStore(statePath), chain),
+    journal: new TransactionJournal(new JsonStore(statePath), chain, { ownerId }),
     statePath,
   };
 }
@@ -36,9 +36,13 @@ test('durably follows received -> native-built -> broadcast -> confirmed', t => 
   const { journal } = fixture(t);
 
   assert.deepEqual(journal.receive(SOURCE_BYTES), {
-    sourceTransactionHash: SOURCE_HASH,
-    signedEthereumTransaction: SOURCE_BYTES,
-    state: 'received',
+    shouldBuild: true,
+    record: {
+      sourceTransactionHash: SOURCE_HASH,
+      signedEthereumTransaction: SOURCE_BYTES,
+      state: 'received',
+      buildClaimOwner: 'boot-a',
+    },
   });
   assert.deepEqual(journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), {
     sourceTransactionHash: SOURCE_HASH,
@@ -115,12 +119,50 @@ test('returns an existing record for an identical source retry', t => {
   journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
 
   assert.deepEqual(journal.receive(SOURCE_BYTES.toUpperCase().replace('0X', '0x')), {
-    sourceTransactionHash: SOURCE_HASH,
-    signedEthereumTransaction: SOURCE_BYTES,
-    state: 'native-built',
-    ...nativeTransaction(),
+    shouldBuild: false,
+    record: {
+      sourceTransactionHash: SOURCE_HASH,
+      signedEthereumTransaction: SOURCE_BYTES,
+      state: 'native-built',
+      ...nativeTransaction(),
+    },
   });
   assert.equal(journal.list().length, 1);
+});
+
+test('grants only one native-build claim to concurrent receives in one boot', t => {
+  const { journal } = fixture(t);
+
+  const first = journal.receive(SOURCE_BYTES);
+  const inProgressRetry = journal.receive(SOURCE_BYTES);
+
+  assert.equal(first.shouldBuild, true);
+  assert.equal(inProgressRetry.shouldBuild, false);
+  assert.deepEqual(inProgressRetry.record, first.record);
+  assert.throws(
+    () =>
+      new TransactionJournal(journal.store, 'tre:728126428', { ownerId: 'boot-same' }).recordNativeBuilt(
+        SOURCE_HASH,
+        nativeTransaction(),
+      ),
+    /build claim/i,
+  );
+});
+
+test('a restarted boot atomically takes over a stranded received build claim', t => {
+  const { journal, statePath } = fixture(t);
+  assert.equal(journal.receive(SOURCE_BYTES).shouldBuild, true);
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  const takeover = restarted.receive(SOURCE_BYTES);
+  assert.equal(takeover.shouldBuild, true);
+  assert.equal(takeover.record.buildClaimOwner, 'boot-b');
+  assert.equal(restarted.receive(SOURCE_BYTES).shouldBuild, false);
+  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
+  assert.equal(restarted.recordNativeBuilt(SOURCE_HASH, nativeTransaction()).state, 'native-built');
+  assert.equal(restarted.get(SOURCE_HASH).buildClaimOwner, undefined);
 });
 
 test('never replaces a persisted native transaction during retry', t => {
@@ -151,8 +193,13 @@ test('resumes the exact signed native transaction after a crash at native-built'
   journal.receive(SOURCE_BYTES);
   journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
 
-  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428');
-  assert.deepEqual(restarted.receive(SOURCE_BYTES), journal.get(SOURCE_HASH));
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.deepEqual(restarted.receive(SOURCE_BYTES), {
+    record: journal.get(SOURCE_HASH),
+    shouldBuild: false,
+  });
   assert.equal(restarted.get(SOURCE_HASH).signedNativeTransaction, NATIVE_BYTES);
   assert.equal(restarted.get(SOURCE_HASH).nativeTransactionId, NATIVE_TXID);
 });
@@ -163,11 +210,14 @@ test('resumes the exact native transaction after a crash at broadcast', t => {
   journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
   journal.recordBroadcast(SOURCE_HASH);
 
-  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428');
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
   const resumed = restarted.receive(SOURCE_BYTES);
-  assert.equal(resumed.state, 'broadcast');
-  assert.equal(resumed.signedNativeTransaction, NATIVE_BYTES);
-  assert.equal(resumed.nativeTransactionId, NATIVE_TXID);
+  assert.equal(resumed.shouldBuild, false);
+  assert.equal(resumed.record.state, 'broadcast');
+  assert.equal(resumed.record.signedNativeTransaction, NATIVE_BYTES);
+  assert.equal(resumed.record.nativeTransactionId, NATIVE_TXID);
 });
 
 test('replays a persisted receipt after restart without changing it', t => {
@@ -182,13 +232,53 @@ test('replays a persisted receipt after restart without changing it', t => {
   journal.recordBroadcast(SOURCE_HASH);
   journal.recordConfirmed(SOURCE_HASH, receipt);
 
-  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428');
-  assert.deepEqual(restarted.receive(SOURCE_BYTES).receipt, receipt);
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.deepEqual(restarted.receive(SOURCE_BYTES).record.receipt, receipt);
   assert.deepEqual(restarted.recordConfirmed(SOURCE_HASH, structuredClone(receipt)).receipt, receipt);
   assert.throws(
     () => restarted.recordConfirmed(SOURCE_HASH, { ...receipt, blockHash: `0x${'aa'.repeat(32)}` }),
     /receipt.*conflict/i,
   );
+});
+
+test('refuses corrupt persisted confirmed receipt shapes after restart', t => {
+  const corruptReceipts = [null, [], 'receipt', 1, true];
+
+  for (const corruptReceipt of corruptReceipts) {
+    const { journal, statePath } = fixture(t);
+    journal.receive(SOURCE_BYTES);
+    journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+    journal.recordBroadcast(SOURCE_HASH);
+    journal.recordConfirmed(SOURCE_HASH, { status: '0x1' });
+
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    state.chains['tre:728126428'].transactionJournal.records[SOURCE_HASH].receipt = corruptReceipt;
+    fs.writeFileSync(statePath, JSON.stringify(state));
+
+    const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+      ownerId: 'boot-b',
+    });
+    assert.throws(() => restarted.get(SOURCE_HASH), /corrupt.*journal.*record/i);
+  }
+});
+
+test('refuses a persisted confirmation whose non-JSON receipt was omitted', t => {
+  const { journal, statePath } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  journal.recordBroadcast(SOURCE_HASH);
+  journal.recordConfirmed(SOURCE_HASH, { status: '0x1' });
+
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  state.chains['tre:728126428'].transactionJournal.records[SOURCE_HASH].receipt = undefined;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.throws(() => restarted.get(SOURCE_HASH), /corrupt.*journal.*record/i);
 });
 
 test('rejects a non-durable receipt before committing confirmation', t => {
