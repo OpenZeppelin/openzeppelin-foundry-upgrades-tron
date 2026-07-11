@@ -25,6 +25,7 @@
     "test:validation": "FOUNDRY_OUT=out FOUNDRY_PROFILE=default forge test --match-path test/Validation.t.sol -vvv --ffi --force",
     "test:reference-builds": "bash scripts/test-reference-builds.sh",
     "test:rpc": "node scripts/test-rpc.cjs",
+    "test:rpc:tre": "RUN_TRE_E2E=1 node --test rpc/test/tre-adapter.test.cjs",
     "lint": "node scripts/lint.cjs",
     "lint:fix": "node scripts/lint.cjs --write",
     "rpc": "node rpc/cli.cjs",

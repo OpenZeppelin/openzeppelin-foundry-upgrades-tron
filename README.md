@@ -143,6 +143,12 @@ npm run prepack
 
 Run only the adapter suite with `npm run test:rpc`.
 
+Run `npm run test:rpc:tre` to exercise real sequential deployments, calls,
+address resolution, restart, and receipt replay against an isolated
+`tronbox/tre:dev` container. The command requires Docker, uses deterministic
+development-only accounts, selects an ephemeral loopback port, and removes the
+container when the test finishes.
+
 ## License
 
 MIT

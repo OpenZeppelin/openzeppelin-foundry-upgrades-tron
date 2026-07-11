@@ -604,6 +604,47 @@ test('binds every top-level call receipt field before confirmation', async t => 
   }
 });
 
+test('accepts a native call receipt that reports the verified actual target', t => {
+  const callContext = context({
+    kind: 'call',
+    to: ROOT_PREDICTED,
+    predictedContractAddress: null,
+    contractKind: null,
+    artifactIdentity: null,
+    provenanceHash: null,
+  });
+  const { journal, reconciler } = fixture(t);
+  prepareAndBroadcast(journal, reconciler, [], callContext);
+  const callReceipt = receipt([]);
+  callReceipt.to = ROOT_PREDICTED;
+  callReceipt.contractAddress = null;
+  callReceipt.tron.actualContractAddress = ROOT_ACTUAL;
+
+  assert.equal(reconciler.reconcile(SOURCE_HASH, callReceipt).state, 'confirmed');
+});
+
+test('rejects a native call receipt that reports a different actual target', t => {
+  const callContext = context({
+    kind: 'call',
+    to: ROOT_PREDICTED,
+    predictedContractAddress: null,
+    contractKind: null,
+    artifactIdentity: null,
+    provenanceHash: null,
+  });
+  const { journal, reconciler } = fixture(t);
+  prepareAndBroadcast(journal, reconciler, [], callContext);
+  const callReceipt = receipt([]);
+  callReceipt.to = ROOT_PREDICTED;
+  callReceipt.contractAddress = null;
+  callReceipt.tron.actualContractAddress = CHILD_ACTUAL_3;
+
+  assert.throws(
+    () => reconciler.reconcile(SOURCE_HASH, callReceipt),
+    error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+  );
+});
+
 test('normalizes equivalent hash and address encodings while binding a deployment receipt', t => {
   const { addressMap, journal, reconciler } = fixture(t);
   prepareAndBroadcast(journal, reconciler, []);

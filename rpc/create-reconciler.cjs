@@ -430,7 +430,21 @@ function assertTopLevelReceipt(record, receipt) {
       cause: error,
     });
   }
-  if (to !== context.to || receipt.contractAddress !== null || receipt.tron.actualContractAddress !== null) {
+  let reportedActualTarget = null;
+  if (receipt.tron.actualContractAddress !== null) {
+    try {
+      reportedActualTarget = toEvmAddress(receipt.tron.actualContractAddress);
+    } catch (error) {
+      throw new CreateReconciliationError('TOP_LEVEL_RECEIPT_MISMATCH', 'Confirmed call native target is invalid', {
+        cause: error,
+      });
+    }
+  }
+  if (
+    to !== context.to ||
+    receipt.contractAddress !== null ||
+    (reportedActualTarget !== null && reportedActualTarget !== context.actualTarget)
+  ) {
     throw new CreateReconciliationError(
       'TOP_LEVEL_RECEIPT_MISMATCH',
       'Confirmed call receipt does not match its target',
