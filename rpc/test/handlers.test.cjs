@@ -208,14 +208,22 @@ async function send(handlers, raw, id = 1) {
   return handlers.handle({ jsonrpc: '2.0', id, method: 'eth_sendRawTransaction', params: [raw] });
 }
 
-test('reports chain ID and forwards nonce, gas price, and gas/energy estimates', async t => {
+test('reports chain ID and serves a virtual source nonce while forwarding gas queries', async t => {
   const { handlers, calls } = fixture(t);
   assert.deepEqual(await handlers.handle({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), {
     jsonrpc: '2.0',
     id: 1,
     result: `0x${CHAIN_ID.toString(16)}`,
   });
-  await handlers.handle({ jsonrpc: '2.0', id: 2, method: 'eth_getTransactionCount', params: [TARGET, 'latest'] });
+  assert.deepEqual(
+    await handlers.handle({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'eth_getTransactionCount',
+      params: [WALLET.address, 'latest'],
+    }),
+    { jsonrpc: '2.0', id: 2, result: '0x0' },
+  );
   await handlers.handle({ jsonrpc: '2.0', id: 3, method: 'eth_gasPrice', params: [] });
   await handlers.handle({
     jsonrpc: '2.0',
@@ -226,11 +234,68 @@ test('reports chain ID and forwards nonce, gas price, and gas/energy estimates',
   assert.deepEqual(
     calls.filter(call => call.type === 'upstream').map(call => [call.method, call.params]),
     [
-      ['eth_getTransactionCount', [TARGET, 'latest']],
       ['eth_gasPrice', []],
       ['eth_estimateGas', [{ to: TARGET_ACTUAL, data: '0x1234' }]],
     ],
   );
+});
+
+test('derives latest and pending source nonces from durable journal state without upstream support', async t => {
+  const raw = await signedTransaction({ nonce: 3 });
+  const result = fixture(t, { sourceHash: keccak256(raw) });
+  result.journal.receive(raw);
+
+  const count = block =>
+    result.handlers.handle({
+      jsonrpc: '2.0',
+      id: block === 'pending' ? 1 : 2,
+      method: 'eth_getTransactionCount',
+      params: [WALLET.address, block],
+    });
+  assert.equal((await count('latest')).result, '0x0');
+  assert.equal((await count('pending')).result, '0x4');
+  assert.equal(
+    (
+      await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'eth_getTransactionCount',
+        params: [TARGET, 'pending'],
+      })
+    ).result,
+    '0x0',
+  );
+  assert.equal(
+    (
+      await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'eth_getTransactionCount',
+        params: [WALLET.address, 'earliest'],
+      })
+    ).result,
+    '0x0',
+  );
+  assert.equal(
+    result.calls.some(call => call.type === 'upstream'),
+    false,
+  );
+
+  await result.handlers.dispatch('eth_sendRawTransaction', [raw]);
+  assert.equal((await count('latest')).result, '0x4');
+  assert.equal((await count('pending')).result, '0x4');
+  assert.equal(
+    result.calls.some(call => call.type === 'upstream'),
+    false,
+  );
+
+  const unsupported = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'eth_getTransactionCount',
+    params: [WALLET.address, '0x1'],
+  });
+  assert.equal(unsupported.error.code, -32602);
 });
 
 test('provenance-matches and address-rewrites deployment gas estimates without building or journaling', async t => {

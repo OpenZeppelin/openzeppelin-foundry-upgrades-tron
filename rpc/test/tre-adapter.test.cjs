@@ -136,8 +136,12 @@ test(
 
     let adapter = await startAdapter(config);
     t.after(async () => adapter.runtime.server.stop());
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'latest']), '0x0');
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'pending']), '0x0');
     assert.equal(await rpc(adapter.url, 'eth_sendRawTransaction', [firstRaw]), firstHash);
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'latest']), '0x1');
     assert.equal(await rpc(adapter.url, 'eth_sendRawTransaction', [secondRaw]), secondHash);
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'pending']), '0x2');
     const firstReceipt = await rpc(adapter.url, 'eth_getTransactionReceipt', [firstHash]);
     const secondReceipt = await rpc(adapter.url, 'eth_getTransactionReceipt', [secondHash]);
     assert.equal(firstReceipt.status, '0x1');

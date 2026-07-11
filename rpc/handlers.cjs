@@ -2,7 +2,7 @@
 
 const path = require('node:path');
 
-const { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256, toBeHex } = require('ethers');
+const { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256 } = require('ethers');
 
 const { normalizeAddress, toEvmAddress } = require('./address-codec.cjs');
 const { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } = require('./artifacts.cjs');
@@ -57,7 +57,9 @@ function own(object, key) {
 }
 
 function quantity(value) {
-  return toBeHex(BigInt(value));
+  const numeric = BigInt(value);
+  if (numeric < 0n) throw new Error('Quantity cannot be negative');
+  return `0x${numeric.toString(16)}`;
 }
 
 function normalizeHash(value, label = 'transaction hash') {
@@ -266,6 +268,37 @@ function ethereumTransaction(record) {
     r: transaction.signature.r,
     s: transaction.signature.s,
   };
+}
+
+function virtualTransactionCount(journal, expectedSender, address, blockTag = 'latest') {
+  const sender = normalizeEvmAddress(address, 'transaction-count address');
+  const expected = normalizeEvmAddress(expectedSender, 'configured sender');
+  if (!['earliest', 'latest', 'pending'].includes(blockTag)) {
+    throw new RpcError(-32602, 'Only earliest, latest, and pending transaction counts are supported');
+  }
+  if (blockTag === 'earliest' || sender !== expected) return '0x0';
+
+  let next = 0n;
+  for (const record of journal.list()) {
+    let nonce;
+    let from;
+    if (record.operationContext !== undefined) {
+      nonce = BigInt(record.operationContext.nonce);
+      from = record.operationContext.from;
+    } else if (blockTag === 'pending' && record.state === 'received') {
+      const source = Transaction.from(record.signedEthereumTransaction);
+      nonce = BigInt(source.nonce);
+      from = source.from.toLowerCase();
+    } else {
+      continue;
+    }
+    const included =
+      blockTag === 'pending' ||
+      record.state === 'confirmed' ||
+      (record.state === 'failed' && record.receipt !== undefined);
+    if (included && from === expected && nonce >= next) next = nonce + 1n;
+  }
+  return quantity(next);
 }
 
 function createRpcHandlers(rawOptions) {
@@ -606,7 +639,7 @@ function createRpcHandlers(rawOptions) {
       }
       case 'eth_getTransactionCount': {
         const [address, block] = requirePositional(params, 1, 2);
-        return upstream.request(method, [mappedAddress(address), ...(block === undefined ? [] : [block])]);
+        return virtualTransactionCount(journal, config.expectedSender, address, block);
       }
       case 'eth_call':
       case 'eth_estimateGas': {

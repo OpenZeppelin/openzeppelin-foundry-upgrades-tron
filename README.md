@@ -133,7 +133,9 @@ topology reconciliation.
 State is written atomically and keyed by network plus chain ID. Replaying a
 Forge transaction reuses the journaled native transaction; restart recovery
 queries or rebroadcasts those exact persisted bytes instead of building a new
-transaction. Conflicting predicted/actual mappings are rejected.
+transaction. Because stock java-tron has no Ethereum account nonce method, the
+adapter serves Forge a virtual source nonce derived from that durable journal.
+Conflicting predicted/actual mappings are rejected.
 
 ## Development
 
