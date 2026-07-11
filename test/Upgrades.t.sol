@@ -162,7 +162,7 @@ contract UpgradesTest is Test {
 
     function testValidatedDeploymentUsesPrelinkedExternalLibraryArtifact() public {
         string memory artifact = vm.readFile(
-            string.concat(vm.projectRoot(), "/out-prelinked/WithExternalLibrary.sol/WithExternalLibrary.json")
+            string.concat(vm.envString("FOUNDRY_OUT"), "/WithExternalLibrary.sol/WithExternalLibrary.json")
         );
         assertTrue(vm.keyExistsJson(artifact, ".bytecode.linkReferences"));
         assertEq(vm.parseJsonKeys(artifact, ".bytecode.linkReferences").length, 0);
