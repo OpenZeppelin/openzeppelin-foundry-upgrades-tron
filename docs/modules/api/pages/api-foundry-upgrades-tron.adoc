@@ -24,6 +24,6 @@ include::Upgrades.adoc[]
 
 include::LegacyUpgrades.adoc[]
 
-Defender APIs are not supported or exported. External stock-TRE compatibility
-evidence for the legacy API and pinned OpenZeppelin Contracts v4.9.6 packages
-remains pending.
+Defender APIs are not supported or exported. The legacy API is covered by an
+external stock-TRE lifecycle using genuine pinned OpenZeppelin Contracts v4.9.6
+packages.

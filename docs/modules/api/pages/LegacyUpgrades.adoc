@@ -35,7 +35,8 @@ absent, while validated `prepareUpgrade` does deploy an implementation as part
 of an upgrade workflow. New deployments use the modern API.
 
 Local tests cover v4-style UUPS `upgradeTo`, ProxyAdmin `upgrade` and
-`upgradeAndCall`, and strict v5 dispatch. External stock-TRE compatibility
-evidence with pinned `@openzeppelin/contracts@4.9.6` and
-`@openzeppelin/contracts-upgradeable@4.9.6` is pending. The API does not claim a
-TRON-branded OpenZeppelin Contracts v4 package.
+`upgradeAndCall`, and strict v5 dispatch. External stock-TRE compatibility is
+exercised with genuine pinned `@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6` UUPS, transparent, and beacon
+fixtures. The API does not claim a TRON-branded OpenZeppelin Contracts v4
+package.

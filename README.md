@@ -184,12 +184,12 @@ The shared dispatcher recognizes the v4 UUPS `upgradeTo` entrypoint and v4
 ProxyAdmin `upgrade`/`upgradeAndCall` paths while retaining strict v5
 `UPGRADE_INTERFACE_VERSION = "5.0.0"` dispatch.
 
-Local interface and lifecycle tests are green. External compatibility evidence
-is still pending for pinned `@openzeppelin/contracts@4.9.6` and
-`@openzeppelin/contracts-upgradeable@4.9.6` on stock TRE.
-Until that external evidence is recorded, treat this API as provisional rather
-than claiming completed v4.9.6 TVM compatibility. Those fixtures are upstream
-OpenZeppelin Contracts v4 sources; there is no TRON-branded v4 package.
+Compatibility is exercised against pinned `@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6` on stock TRE. The external consumer
+deploys genuine upstream v4 UUPS, transparent, and beacon fixtures, upgrades
+them through `LegacyUpgrades.sol`, and independently verifies state, ownership,
+and ERC-1967 slots. These are upstream OpenZeppelin Contracts v4 sources; there
+is no TRON-branded v4 package.
 
 ## Compiler provenance and FFI security
 
@@ -352,9 +352,9 @@ The following EVM features are intentionally outside the supported surface:
   adapter. Stock constant simulation also rejects ambiguous child creation.
 
 The upgrade-only `LegacyUpgrades.sol` entrypoint is exported for existing
-OpenZeppelin Contracts v4 deployments, but its external stock-TRE v4.9.6
-evidence remains pending. Local lookalikes prove dispatch behavior, not real v4
-compatibility.
+OpenZeppelin Contracts v4 deployments. Its external stock-TRE suite deploys and
+upgrades genuine pinned v4.9.6 UUPS, transparent, and beacon fixtures; local
+lookalikes are used only for focused dispatch tests.
 
 ## Development
 

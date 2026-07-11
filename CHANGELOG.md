@@ -19,5 +19,5 @@ project follows Semantic Versioning.
 - Document that Defender, Ethereum source verification, Foundry forking,
   generic CREATE2, and typed Ethereum transactions are unsupported.
 - Add the upgrade-only `LegacyUpgrades.sol` surface for existing OpenZeppelin
-  Contracts v4 deployments. Local v4/v5 dispatch tests pass; external stock-TRE
-  evidence with pinned v4.9.6 packages remains pending.
+  Contracts v4 deployments, with local v4/v5 dispatch tests and external
+  stock-TRE lifecycle evidence using genuine pinned v4.9.6 packages.

@@ -154,7 +154,7 @@ test('public documentation covers the supported modern TVM workflow and intentio
     /forking[^.]{0,80}(?:unsupported|not supported)/iu,
     /LegacyUpgrades\.sol/iu,
     /v4\.9\.6/u,
-    /external[^.]{0,100}evidence[^.]{0,100}pending/iu,
+    /external[^.]{0,120}(?:evidence|lifecycle)[^.]{0,120}(?:genuine|pinned)[^.]{0,80}v4\.9\.6/iu,
     /actual[^.]{0,80}(?:TVM|TRON)[^.]{0,80}address/iu,
     /ETH_RPC_TIMEOUT=300/u,
   ]) {
