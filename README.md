@@ -112,7 +112,7 @@ image do not provide this complete capability, so write requests fail closed
 before native broadcast on those nodes. Supplying public-network credentials
 does not by itself make write translation operational.
 
-Task 10's TRE integration readiness diagnostic must probe this exact simulation
+The TRE readiness diagnostic must probe this exact simulation
 contract before reporting the write adapter ready; ordinary node or `/jsonrpc`
 health is not sufficient. Until that gate passes against a capability-enabled
 node, the adapter's read path and offline mapping inspection remain usable, but

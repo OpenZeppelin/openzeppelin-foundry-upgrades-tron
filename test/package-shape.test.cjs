@@ -64,5 +64,6 @@ test('documents the nonstandard fail-closed simulation requirement without overs
   assert.match(readme, /ordered\s+`child_create_attempts`/);
   assert.match(readme, /stock[\s\S]{0,80}java-tron[\s\S]{0,160}do not provide/i);
   assert.match(readme, /write requests fail closed/i);
-  assert.match(readme, /Task 10[^\n]*readiness diagnostic/i);
+  assert.match(readme, /TRE readiness diagnostic/i);
+  assert.doesNotMatch(readme, /Task \d+/i);
 });
