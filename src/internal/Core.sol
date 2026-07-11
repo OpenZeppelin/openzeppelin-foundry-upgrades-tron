@@ -4,7 +4,7 @@ pragma solidity ^0.8.22;
 import {console} from "forge-std/console.sol";
 import {Vm} from "forge-std/Vm.sol";
 
-import {Options} from "../Options.sol";
+import {LinkedLibrary, Options} from "../Options.sol";
 import {ArtifactProvenance} from "./ArtifactProvenance.sol";
 import {Utils} from "./Utils.sol";
 import {Versions} from "./Versions.sol";
@@ -171,7 +171,7 @@ library Core {
 
     function deployImplementation(string memory contractName, Options memory opts) internal returns (address) {
         ArtifactProvenance.Result memory validated = validateImplementationWithProvenance(contractName, opts);
-        return deploy(contractName, opts.constructorData, validated);
+        return deploy(contractName, opts.constructorData, opts.linkedLibraries, validated);
     }
 
     /**
@@ -184,16 +184,18 @@ library Core {
 
     function prepareUpgrade(string memory contractName, Options memory opts) internal returns (address) {
         ArtifactProvenance.Result memory validated = _validate(contractName, opts, true);
-        return deploy(contractName, opts.constructorData, validated);
+        return deploy(contractName, opts.constructorData, opts.linkedLibraries, validated);
     }
 
     function deploy(
         string memory contractName,
         bytes memory constructorData,
+        LinkedLibrary[] memory linkedLibraries,
         ArtifactProvenance.Result memory validated
     ) internal returns (address) {
         string memory artifactPath;
         bytes32 expectedBytecodeHash;
+        bytes32 expectedArtifactSnapshotHash;
         if (validated.provenanceHash == bytes32(0)) {
             artifactPath = Utils.getContractInfo(contractName, Utils.getOutDir()).artifactPath;
         } else {
@@ -204,10 +206,17 @@ library Core {
             ArtifactProvenance.assertUnchanged(validated, current);
             artifactPath = current.artifactPath;
             expectedBytecodeHash = current.creationBytecodeHash;
+            expectedArtifactSnapshotHash = current.artifactSnapshotHash;
         }
 
-        string memory artifactSnapshot = Vm(Utils.CHEATCODE_ADDRESS).readFile(artifactPath);
-        bytes memory creationCode = ArtifactProvenance.creationCodeFromSnapshot(artifactSnapshot, expectedBytecodeHash);
+        Vm vm = Vm(Utils.CHEATCODE_ADDRESS);
+        string memory artifactSnapshot = vm.readFile(artifactPath);
+        bytes memory creationCode = ArtifactProvenance.creationCodeFromSnapshot(
+            artifactSnapshot,
+            expectedArtifactSnapshotHash,
+            expectedBytecodeHash,
+            linkedLibraries
+        );
         address deployedAddress = _deployFromBytecode(abi.encodePacked(creationCode, constructorData));
         if (deployedAddress == address(0)) {
             revert(string.concat("Failed to deploy contract ", contractName));
@@ -343,7 +352,9 @@ library Core {
         Options memory opts,
         bool requireReference
     ) private returns (ArtifactProvenance.Result memory) {
-        if (opts.unsafeSkipAllChecks) return ArtifactProvenance.Result(bytes32(0), bytes32(0), "");
+        if (opts.unsafeSkipAllChecks) {
+            return ArtifactProvenance.Result(bytes32(0), bytes32(0), bytes32(0), "", false);
+        }
 
         string memory outDir = Utils.getOutDir();
         ArtifactProvenance.Result memory beforeValidation = ArtifactProvenance.assertMatchDetailed(

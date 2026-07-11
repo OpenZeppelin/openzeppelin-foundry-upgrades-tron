@@ -1,6 +1,8 @@
 # Compiler files
 cache/
+cache-unlinked/
 out/
+out-unlinked/
 test_artifacts*/
 
 # Development broadcast logs

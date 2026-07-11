@@ -1,5 +1,5 @@
 {
   "solcVersion": "0.8.22", "solcLongVersion": "0.8.22+commit.4fc1097e",
   "input": {"sources": {"contracts/Linked.sol": {"content": "library Linked {}"}}},
-  "output": {"contracts": {"contracts/Linked.sol": {"Linked": {"metadata": "{\"compiler\":{\"version\":\"0.8.22+commit.4fc1097e\"}}", "evm": {"bytecode": {"object": "73__$1234567890abcdef1234567890abcdef12$__6000"}}}}}}
+  "output": {"contracts": {"contracts/Linked.sol": {"Linked": {"metadata": "{\"compiler\":{\"version\":\"0.8.22+commit.4fc1097e\"}}", "evm": {"bytecode": {"object": "73__$e1f6544c3e26610222126859ceeb977ca1$__6000", "linkReferences": {"contracts/External.sol": {"External": [{"start": 1, "length": 20}]}}}}}}}}
 }

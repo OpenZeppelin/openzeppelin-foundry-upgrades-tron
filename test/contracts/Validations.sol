@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
+import {LinkedLibrary, Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
 
 // These contracts are for testing only. They are not safe for production use.
 
@@ -9,6 +9,8 @@ contract OptionsApiShape {
     function allSupportedOptions() external pure returns (Options memory) {
         string[] memory excludes = new string[](1);
         excludes[0] = "test/contracts/helpers/**/*.sol";
+        LinkedLibrary[] memory linkedLibraries = new LinkedLibrary[](1);
+        linkedLibraries[0] = LinkedLibrary("contracts/Math.sol", "Math", address(0x1234));
         return
             Options({
                 referenceContract: "build-info-v1:LayoutV1",
@@ -19,7 +21,8 @@ contract OptionsApiShape {
                 unsafeAllowRenames: true,
                 unsafeSkipProxyAdminCheck: true,
                 unsafeSkipStorageCheck: true,
-                unsafeSkipAllChecks: true
+                unsafeSkipAllChecks: true,
+                linkedLibraries: linkedLibraries
             });
     }
 }

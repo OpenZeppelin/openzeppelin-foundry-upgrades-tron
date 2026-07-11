@@ -3,7 +3,7 @@ pragma solidity ^0.8.22;
 
 import {Test} from "forge-std/Test.sol";
 
-import {Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
+import {LinkedLibrary, Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
 import {Upgrades, UnsafeUpgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
 import {IBeacon} from "openzeppelin-tron-solidity/contracts/proxy/beacon/IBeacon.sol";
 import {ProxyAdmin} from "openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol";
@@ -14,12 +14,14 @@ import {GreeterProxiable} from "./contracts/GreeterProxiable.sol";
 import {GreeterV2Proxiable} from "./contracts/GreeterV2Proxiable.sol";
 import {HasOwner} from "./contracts/HasOwner.sol";
 import {WithConstructor} from "./contracts/WithConstructor.sol";
+import {WithExternalLibrary} from "./contracts/WithExternalLibrary.sol";
 
 // Import validation fixtures so their artifacts are available to upgrades-core.
 import "./contracts/Validations.sol";
 
 contract UpgradesTest is Test {
     address private constant OWNER = address(0xA11CE);
+    address private constant EXTERNAL_MATH = address(0x1001);
 
     function testValidatedUUPSDeployAndUpgradeWithCallData() public {
         address proxy = Upgrades.deployUUPSProxy(
@@ -133,6 +135,28 @@ contract UpgradesTest is Test {
 
         assertGt(implementation.code.length, 0);
         assertEq(WithConstructor(implementation).a(), 789);
+    }
+
+    function testValidatedDeploymentLinksBoundExternalLibraryArtifact() public {
+        deployCodeTo("WithExternalLibrary.sol:ExternalMath", EXTERNAL_MATH);
+        Options memory opts;
+        opts.unsafeAllow = "external-library-linking";
+        opts.linkedLibraries = new LinkedLibrary[](1);
+        opts.linkedLibraries[0] = LinkedLibrary({
+            sourceName: "test/contracts/WithExternalLibrary.sol",
+            libraryName: "ExternalMath",
+            libraryAddress: EXTERNAL_MATH
+        });
+
+        address implementation = Upgrades.deployImplementation("WithExternalLibrary.sol:WithExternalLibrary", opts);
+        opts.unsafeSkipAllChecks = true;
+        address unboundImplementation = Upgrades.deployImplementation(
+            "WithExternalLibrary.sol:WithExternalLibrary",
+            opts
+        );
+
+        assertEq(WithExternalLibrary(implementation).twice(21), 42);
+        assertEq(WithExternalLibrary(unboundImplementation).twice(22), 44);
     }
 
     function testPrepareUpgradeValidatesAgainstReferenceThenDeploys() public {

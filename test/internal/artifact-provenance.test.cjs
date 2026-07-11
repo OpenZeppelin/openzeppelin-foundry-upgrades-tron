@@ -2,12 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { AbiCoder, keccak256, toUtf8Bytes } = require('ethers');
 const {
   buildInfoDirectory,
   isAbsolutePath,
   resolvePath,
+  validateLinkReferences,
   verify,
 } = require('../../src/internal/artifact-provenance.cjs');
 
@@ -43,12 +45,27 @@ test('encodes deterministic normalized creation bytecode hash for Solidity parit
     'Widget',
     'contracts/Widget.sol:Widget',
   ]);
-  const [code, provenanceHash, creationBytecodeHash] = AbiCoder.defaultAbiCoder().decode(
-    ['uint8', 'bytes32', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'],
+  const [code, provenanceHash, creationBytecodeHash, artifactSnapshotHash] = AbiCoder.defaultAbiCoder().decode(
+    ['uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'string', 'string', 'bytes32', 'bytes32'],
     encoded,
   );
 
   assert.equal(code, 0n);
   assert.notEqual(provenanceHash, `0x${'00'.repeat(32)}`);
   assert.equal(creationBytecodeHash, keccak256(toUtf8Bytes('6001600055')));
+  assert.equal(
+    artifactSnapshotHash,
+    keccak256(toUtf8Bytes(fs.readFileSync(path.join(outputDirectory, 'Widget.sol/Widget.json'), 'utf8'))),
+  );
+});
+
+test('accepts only the exact lowercase link-placeholder identity', () => {
+  const references = {
+    'contracts/External.sol': { External: [{ start: 1, length: 20 }] },
+  };
+  const identity = keccak256(toUtf8Bytes('contracts/External.sol:External')).slice(2, 36);
+
+  assert.equal(validateLinkReferences(`73__$${identity}$__6000`, references, references), true);
+  assert.equal(validateLinkReferences(`73__$${'1'.repeat(34)}$__6000`, references, references), null);
+  assert.equal(validateLinkReferences(`73__$${identity.toUpperCase()}$__6000`, references, references), null);
 });

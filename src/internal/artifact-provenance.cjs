@@ -16,11 +16,12 @@ const CODE = Object.freeze({
   compilerBuildMismatch: 8,
   artifactOutsideOutput: 9,
   buildInfoIdentityMismatch: 10,
+  invalidLinkReferences: 11,
   toolFailure: 255,
 });
 
 const ZERO_HASH = `0x${'00'.repeat(32)}`;
-const resultTypes = ['uint8', 'bytes32', 'bytes32', 'string', 'string', 'bytes32', 'bytes32'];
+const resultTypes = ['uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'string', 'string', 'bytes32', 'bytes32'];
 const provenanceTypes = [
   'string',
   'string',
@@ -42,16 +43,79 @@ function response(
   expected = ZERO_HASH,
   actual = ZERO_HASH,
   creationBytecodeHash = ZERO_HASH,
+  requiresLinking = false,
+  artifactSnapshotHash = ZERO_HASH,
 ) {
   return AbiCoder.defaultAbiCoder().encode(resultTypes, [
     code,
     hash,
     creationBytecodeHash,
+    artifactSnapshotHash,
+    requiresLinking,
     detailA,
     detailB,
     expected,
     actual,
   ]);
+}
+
+function flattenLinkReferences(value) {
+  if (value === undefined) return [];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid link references');
+  const references = [];
+  for (const source of Object.keys(value).sort()) {
+    const libraries = value[source];
+    if (libraries === null || typeof libraries !== 'object' || Array.isArray(libraries)) {
+      throw new Error('invalid link references');
+    }
+    for (const library of Object.keys(libraries).sort()) {
+      const entries = libraries[library];
+      if (!Array.isArray(entries) || entries.length === 0) throw new Error('invalid link references');
+      for (const entry of entries) {
+        if (
+          !Number.isSafeInteger(entry?.start) ||
+          entry.start < 0 ||
+          !Number.isSafeInteger(entry?.length) ||
+          entry.length < 0
+        ) {
+          throw new Error('invalid link references');
+        }
+        references.push({ source, library, start: entry.start, length: entry.length });
+      }
+    }
+  }
+  return references.sort(
+    (a, b) => a.start - b.start || a.source.localeCompare(b.source) || a.library.localeCompare(b.library),
+  );
+}
+
+function validateLinkReferences(bytecode, artifactReferences, buildReferences) {
+  let artifact;
+  let build;
+  try {
+    artifact = flattenLinkReferences(artifactReferences);
+    build = flattenLinkReferences(buildReferences);
+  } catch {
+    return null;
+  }
+  if (JSON.stringify(artifact) !== JSON.stringify(build)) return null;
+  if (artifact.length === 0) return /^[0-9a-fA-F]*$/.test(bytecode) ? false : null;
+
+  const normalized = bytecode.split('');
+  let previousEnd = 0;
+  for (const reference of artifact) {
+    if (reference.start > Math.floor(Number.MAX_SAFE_INTEGER / 2)) return null;
+    const start = reference.start * 2;
+    const length = reference.length * 2;
+    const end = start + length;
+    if (reference.length !== 20 || start < previousEnd || end > bytecode.length) return null;
+    const placeholder = bytecode.slice(start, end);
+    const identity = keccak256(toUtf8Bytes(`${reference.source}:${reference.library}`)).slice(2, 36);
+    if (placeholder !== `__$${identity}$__`) return null;
+    normalized.fill('0', start, end);
+    previousEnd = end;
+  }
+  return /^[0-9a-fA-F]*$/.test(normalized.join('')) ? true : null;
 }
 
 function normalizeBytecode(value) {
@@ -210,7 +274,9 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
     return response(CODE.artifactOutsideOutput, ZERO_HASH, artifactPath, outputDirectory);
   }
 
-  const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+  const artifactSnapshot = fs.readFileSync(artifactPath, 'utf8');
+  const artifactSnapshotHash = keccak256(toUtf8Bytes(artifactSnapshot));
+  const artifact = JSON.parse(artifactSnapshot);
   if (artifact._format === 'hh3-artifact-1' && artifact.sourceName !== contractPath) {
     return response(CODE.buildInfoIdentityMismatch, ZERO_HASH, contractPath, artifact.sourceName ?? '');
   }
@@ -251,6 +317,14 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
   );
   const buildBytecode = normalizeBytecode(target?.evm?.bytecode?.object);
   if (artifactBytecode !== buildBytecode) return response(CODE.bytecodeMismatch, ZERO_HASH, fullyQualifiedName);
+  const artifactLinkReferences =
+    typeof artifact.bytecode === 'string' ? artifact.linkReferences : artifact.bytecode?.linkReferences;
+  const requiresLinking = validateLinkReferences(
+    artifactBytecode,
+    artifactLinkReferences,
+    target?.evm?.bytecode?.linkReferences,
+  );
+  if (requiresLinking === null) return response(CODE.invalidLinkReferences, ZERO_HASH, fullyQualifiedName);
 
   const metadataSources = artifact.metadata?.sources;
   if (metadataSources === null || typeof metadataSources !== 'object') {
@@ -284,7 +358,17 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
     ]),
   );
   const creationBytecodeHash = keccak256(toUtf8Bytes(artifactBytecode));
-  return response(CODE.success, hash, '', '', ZERO_HASH, ZERO_HASH, creationBytecodeHash);
+  return response(
+    CODE.success,
+    hash,
+    '',
+    '',
+    ZERO_HASH,
+    ZERO_HASH,
+    creationBytecodeHash,
+    requiresLinking,
+    artifactSnapshotHash,
+  );
 }
 
 function main(args) {
@@ -306,5 +390,6 @@ module.exports = {
   main,
   normalizeBytecode,
   resolvePath,
+  validateLinkReferences,
   verify,
 };

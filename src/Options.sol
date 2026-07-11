@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
+struct LinkedLibrary {
+    string sourceName;
+    string libraryName;
+    address libraryAddress;
+}
+
 /**
  * @dev Common options for validating and deploying upgradeable contracts.
  */
@@ -45,4 +51,9 @@ struct Options {
      * @dev Skips every upgrade-safety validation.
      */
     bool unsafeSkipAllChecks;
+    /**
+     * @dev Exact source/library/address mappings used to link validated
+     * creation bytecode in memory. Every mapping must be used.
+     */
+    LinkedLibrary[] linkedLibraries;
 }

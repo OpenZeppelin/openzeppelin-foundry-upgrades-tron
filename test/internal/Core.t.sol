@@ -140,6 +140,10 @@ contract CoreTest is Test {
         assertTrue(opts.unsafeSkipProxyAdminCheck);
         assertTrue(opts.unsafeSkipStorageCheck);
         assertTrue(opts.unsafeSkipAllChecks);
+        assertEq(opts.linkedLibraries.length, 1);
+        assertEq(opts.linkedLibraries[0].sourceName, "contracts/Math.sol");
+        assertEq(opts.linkedLibraries[0].libraryName, "Math");
+        assertEq(opts.linkedLibraries[0].libraryAddress, address(0x1234));
     }
 
     function testBuildValidateCommandUsesAbsoluteFoundryOutput() public {
@@ -283,6 +287,7 @@ contract CoreTest is Test {
 
         assertNotEq(result.provenanceHash, bytes32(0));
         assertNotEq(result.creationBytecodeHash, bytes32(0));
+        assertNotEq(result.artifactSnapshotHash, bytes32(0));
         assertEq(result.artifactPath, string.concat(vm.projectRoot(), "/out/Validations.sol/OptionsApiShape.json"));
     }
 
@@ -297,7 +302,9 @@ contract CoreTest is Test {
 
         assertEq(result.provenanceHash, bytes32(0));
         assertEq(result.creationBytecodeHash, bytes32(0));
+        assertEq(result.artifactSnapshotHash, bytes32(0));
         assertEq(result.artifactPath, "");
+        assertFalse(result.requiresLinking);
     }
 
     function _fixture(string memory suffix) private view returns (string memory) {

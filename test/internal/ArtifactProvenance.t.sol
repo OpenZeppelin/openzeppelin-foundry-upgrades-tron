@@ -2,8 +2,10 @@
 pragma solidity ^0.8.22;
 
 import {Test} from "forge-std/Test.sol";
+import {LinkedLibrary} from "openzeppelin-foundry-upgrades-tron/Options.sol";
 import {ArtifactProvenance} from "openzeppelin-foundry-upgrades-tron/internal/ArtifactProvenance.sol";
 import {MyContractName} from "../contracts/MyContractFile.sol";
+import {WithExternalLibrary} from "../contracts/WithExternalLibrary.sol";
 
 contract ArtifactProvenanceTest is Test {
     ProvenanceInvoker private invoker;
@@ -45,19 +47,28 @@ contract ArtifactProvenanceTest is Test {
 
         assertEq(result.provenanceHash, ArtifactProvenance.assertMatch("Widget.sol:Widget", outDir));
         assertEq(result.creationBytecodeHash, keccak256(bytes("6001600055")));
+        assertEq(
+            result.artifactSnapshotHash,
+            keccak256(bytes(vm.readFile(string.concat(outDir, "/Widget.sol/Widget.json"))))
+        );
         assertEq(result.artifactPath, string.concat(outDir, "/Widget.sol/Widget.json"));
+        assertFalse(result.requiresLinking);
     }
 
     function testRejectsChangedProvenanceBinding() public {
         ArtifactProvenance.Result memory beforeValidation = ArtifactProvenance.Result({
             provenanceHash: bytes32(uint256(1)),
             creationBytecodeHash: bytes32(uint256(2)),
-            artifactPath: "/tmp/out/Widget.json"
+            artifactSnapshotHash: bytes32(uint256(4)),
+            artifactPath: "/tmp/out/Widget.json",
+            requiresLinking: false
         });
         ArtifactProvenance.Result memory afterValidation = ArtifactProvenance.Result({
             provenanceHash: bytes32(uint256(3)),
             creationBytecodeHash: bytes32(uint256(2)),
-            artifactPath: "/tmp/out/Widget.json"
+            artifactSnapshotHash: bytes32(uint256(4)),
+            artifactPath: "/tmp/out/Widget.json",
+            requiresLinking: false
         });
 
         vm.expectPartialRevert(ArtifactProvenance.ProvenanceChanged.selector);
@@ -87,7 +98,142 @@ contract ArtifactProvenanceTest is Test {
     }
 
     function testIdenticalUnlinkedPlaceholdersMatchExactly() public {
-        assertNotEq(ArtifactProvenance.assertMatch("Linked.sol:Linked", _fixture("linked/out")), bytes32(0));
+        ArtifactProvenance.Result memory result = ArtifactProvenance.assertMatchDetailed(
+            "Linked.sol:Linked",
+            _fixture("linked/out")
+        );
+        assertNotEq(result.provenanceHash, bytes32(0));
+        assertTrue(result.requiresLinking);
+    }
+
+    function testRejectsMalformedNonHexWithoutValidLinkReferences() public {
+        vm.expectPartialRevert(ArtifactProvenance.InvalidLinkReferences.selector);
+        invoker.assertMatch("Linked.sol:Linked", _fixture("malformed-linked/out"));
+    }
+
+    function testRejectsArtifactSnapshotChangedWhileLinking() public {
+        vm.expectPartialRevert(ArtifactProvenance.ArtifactSnapshotChanged.selector);
+        invoker.assertArtifactSnapshotUnchanged('{"bytecode":"before"}', '{"bytecode":"after"}');
+    }
+
+    function testClassifiesHardhat3TopLevelLinkReferences() public view {
+        assertTrue(
+            ArtifactProvenance.requiresLinkingFromSnapshot(
+                '{"bytecode":"0x73__$e1f6544c3e26610222126859ceeb977ca1$__6000","linkReferences":{"contracts/External.sol":{"External":[{"start":1,"length":20}]}}}'
+            )
+        );
+    }
+
+    function testRejectsOverflowingLinkReferenceStartWithoutPanic() public {
+        string memory artifact = string.concat(
+            '{"bytecode":{"object":"0x73__$e1f6544c3e26610222126859ceeb977ca1$__6000","linkReferences":{"contracts/External.sol":{"External":[{"start":',
+            vm.toString(type(uint256).max),
+            ',"length":20}]}}}}'
+        );
+
+        vm.expectPartialRevert(ArtifactProvenance.InvalidLinkReferences.selector);
+        invoker.requiresLinkingFromSnapshot(artifact);
+    }
+
+    function testLinkedSnapshotRequiresExactLiveMapping() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](0);
+
+        vm.expectPartialRevert(ArtifactProvenance.MissingLinkedLibrary.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+    }
+
+    function testLinkedSnapshotMappingIdentityIsCaseSensitive() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        address libraryAddress = address(0x1001);
+        vm.etch(libraryAddress, hex"00");
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](1);
+        mappings[0] = LinkedLibrary("test/contracts/WithExternalLibrary.sol", "externalMath", libraryAddress);
+
+        vm.expectPartialRevert(ArtifactProvenance.MissingLinkedLibrary.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+    }
+
+    function testRepeatedReferencesReuseOneExactMapping() public {
+        string memory placeholder = "__$e1f6544c3e26610222126859ceeb977ca1$__";
+        string memory artifact = string.concat(
+            '{"bytecode":"0x73',
+            placeholder,
+            "6000",
+            placeholder,
+            '","linkReferences":{"contracts/External.sol":{"External":[{"start":1,"length":20},{"start":23,"length":20}]}}}'
+        );
+        address libraryAddress = address(0x1001);
+        vm.etch(libraryAddress, hex"00");
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](1);
+        mappings[0] = LinkedLibrary("contracts/External.sol", "External", libraryAddress);
+
+        bytes memory linked = invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+
+        assertEq(
+            linked,
+            vm.parseBytes("0x73000000000000000000000000000000000000100160000000000000000000000000000000000000001001")
+        );
+    }
+
+    function testLinkedSnapshotRejectsDuplicateMapping() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        address libraryAddress = address(0x1001);
+        vm.etch(libraryAddress, hex"00");
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](2);
+        mappings[0] = _externalMath(libraryAddress);
+        mappings[1] = _externalMath(libraryAddress);
+
+        vm.expectPartialRevert(ArtifactProvenance.DuplicateLinkedLibrary.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+    }
+
+    function testLinkedSnapshotRejectsUnusedMapping() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        address libraryAddress = address(0x1001);
+        address unusedAddress = address(0x1002);
+        vm.etch(libraryAddress, hex"00");
+        vm.etch(unusedAddress, hex"00");
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](2);
+        mappings[0] = _externalMath(libraryAddress);
+        mappings[1] = LinkedLibrary("test/contracts/Unused.sol", "Unused", unusedAddress);
+
+        vm.expectPartialRevert(ArtifactProvenance.UnusedLinkedLibrary.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+    }
+
+    function testLinkedSnapshotRejectsZeroAndCodelessAddresses() public {
+        string memory artifact = vm.readFile(
+            string.concat(vm.projectRoot(), "/out/WithExternalLibrary.sol/WithExternalLibrary.json")
+        );
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](1);
+        mappings[0] = _externalMath(address(0));
+
+        vm.expectPartialRevert(ArtifactProvenance.InvalidLinkedLibraryAddress.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+
+        mappings[0] = _externalMath(address(0xBEEF));
+        vm.expectPartialRevert(ArtifactProvenance.LinkedLibraryHasNoCode.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
+    }
+
+    function testPrelinkedSnapshotRejectsAnyMappingAsUnused() public {
+        string memory artifact = vm.readFile(_fixture("valid/out/Widget.sol/Widget.json"));
+        address libraryAddress = address(0x1001);
+        vm.etch(libraryAddress, hex"00");
+        LinkedLibrary[] memory mappings = new LinkedLibrary[](1);
+        mappings[0] = _externalMath(libraryAddress);
+
+        vm.expectPartialRevert(ArtifactProvenance.UnusedLinkedLibrary.selector);
+        invoker.creationCodeFromSnapshotWithLibraries(artifact, mappings);
     }
 
     function testRejectsCreationBytecodeMismatch() public {
@@ -276,6 +422,15 @@ contract ArtifactProvenanceTest is Test {
     function _helperFixture(string memory suffix) private view returns (string memory) {
         return string.concat(vm.projectRoot(), "/test/fixtures/helper-resolution/", suffix);
     }
+
+    function _externalMath(address libraryAddress) private pure returns (LinkedLibrary memory) {
+        return
+            LinkedLibrary({
+                sourceName: "test/contracts/WithExternalLibrary.sol",
+                libraryName: "ExternalMath",
+                libraryAddress: libraryAddress
+            });
+    }
 }
 
 contract ProvenanceInvoker {
@@ -295,6 +450,21 @@ contract ProvenanceInvoker {
         bytes32 expectedBytecodeHash
     ) external view returns (bytes memory) {
         return ArtifactProvenance.creationCodeFromSnapshot(artifact, expectedBytecodeHash);
+    }
+
+    function assertArtifactSnapshotUnchanged(string memory beforeLinking, string memory afterLinking) external pure {
+        ArtifactProvenance.assertArtifactSnapshotUnchanged(beforeLinking, afterLinking);
+    }
+
+    function requiresLinkingFromSnapshot(string memory artifact) external view returns (bool) {
+        return ArtifactProvenance.requiresLinkingFromSnapshot(artifact);
+    }
+
+    function creationCodeFromSnapshotWithLibraries(
+        string memory artifact,
+        LinkedLibrary[] memory mappings
+    ) external view returns (bytes memory) {
+        return ArtifactProvenance.creationCodeFromSnapshot(artifact, bytes32(0), mappings);
     }
 
     function resolveHelperPathFromRemappings(

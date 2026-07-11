@@ -20,3 +20,8 @@ test = "test-profiles/build-info-v2/test"
 [profile.build-info-v2-bad]
 src = "test-profiles/build-info-v2-bad/src"
 test = "test-profiles/build-info-v2-bad/test"
+
+[profile.unlinked]
+libraries = []
+out = "out-unlinked"
+cache_path = "cache-unlinked"
