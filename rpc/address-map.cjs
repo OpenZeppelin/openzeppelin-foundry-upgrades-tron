@@ -171,6 +171,7 @@ function requireContractMetadata(chain) {
   ) {
     throw new Error('Corrupt contract metadata index');
   }
+  const indexes = requireIndexes(chain);
   for (const [predicted, rawRecord] of Object.entries(metadata.byPredicted)) {
     let record;
     try {
@@ -178,7 +179,11 @@ function requireContractMetadata(chain) {
     } catch (error) {
       throw new Error('Corrupt contract metadata record', { cause: error });
     }
-    if (predicted !== record.predicted || JSON.stringify(rawRecord) !== JSON.stringify(record)) {
+    if (
+      predicted !== record.predicted ||
+      JSON.stringify(rawRecord) !== JSON.stringify(record) ||
+      indexes.byPredicted[predicted] === undefined
+    ) {
       throw new Error('Corrupt contract metadata index');
     }
   }
@@ -205,9 +210,10 @@ function setContractMetadataInChain(chain, value) {
 function resolveContractMetadataInChain(chain, address) {
   const normalized = normalizeNonzeroAddress(address, 'contract metadata');
   const indexes = requireIndexes(chain);
+  const metadata = requireContractMetadata(chain);
   const predicted = indexes.byPredicted[normalized] === undefined ? indexes.byActual[normalized] : normalized;
   if (predicted === undefined) return undefined;
-  return requireContractMetadata(chain).byPredicted[predicted];
+  return metadata.byPredicted[predicted];
 }
 
 class AddressMap {

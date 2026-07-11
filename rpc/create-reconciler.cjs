@@ -80,12 +80,16 @@ function contractMetadata(kind, identity) {
   return kind === null || identity === null ? undefined : { contractKind: kind, artifactIdentity: identity };
 }
 
-function proxyAdminMetadata(callerMetadata) {
+function proxyAdminMetadata(operationContext, actualCaller, predictedCaller, nonce) {
   if (
-    callerMetadata?.contractKind === 'transparent-proxy' ||
-    callerMetadata?.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX)
+    operationContext.kind === 'deployment' &&
+    operationContext.contractKind === 'transparent-proxy' &&
+    operationContext.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX) &&
+    actualCaller === operationContext.actualTarget &&
+    predictedCaller === operationContext.predictedContractAddress &&
+    nonce === 1n
   ) {
-    const callerIdentity = callerMetadata.artifactIdentity;
+    const callerIdentity = operationContext.artifactIdentity;
     if (!callerIdentity.sourceName.endsWith(TRANSPARENT_PROXY_FILE)) {
       throw new CreateReconciliationError(
         'INVALID_TRANSPARENT_PROXY_METADATA',
@@ -213,7 +217,9 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     const nonce = nextByCaller.get(caller.predicted);
     nextByCaller.set(caller.predicted, nonce + 1n);
     const predictedAddress = getCreateAddress({ from: caller.predicted, nonce }).toLowerCase();
-    const childMetadata = rawAttempt.success ? proxyAdminMetadata(caller.metadata) : undefined;
+    const childMetadata = rawAttempt.success
+      ? proxyAdminMetadata(operationContext, actualCaller, caller.predicted, nonce)
+      : undefined;
     if (rawAttempt.success) {
       assertChildMappingAvailable(chain, indexes, predictedAddress, simulatedActualAddress, childMetadata);
       addCaller(simulatedActualAddress, predictedAddress, childMetadata);

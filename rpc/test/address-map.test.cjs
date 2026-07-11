@@ -114,3 +114,25 @@ test('refuses noncanonical persisted provenance', t => {
 
   assert.throws(() => addressMap.resolvePredicted(PREDICTED), /corrupt.*address mapping/i);
 });
+
+test('refuses orphaned persisted contract metadata even when the queried address is unmapped', t => {
+  const { addressMap, statePath } = fixture(t);
+  addressMap.set(mapping());
+  addressMap.setContractMetadata({
+    predicted: PREDICTED,
+    contractKind: 'proxy-admin',
+    artifactIdentity: {
+      sourceName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol',
+      contractName: 'ProxyAdmin',
+      fullyQualifiedName: 'lib/openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin',
+    },
+    sourceTransaction: SOURCE_TRANSACTION,
+  });
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  delete state.chains['tre:728126428'].addressMappings.byPredicted[PREDICTED];
+  delete state.chains['tre:728126428'].addressMappings.byActual[ACTUAL];
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  const restarted = new AddressMap(new JsonStore(statePath), 'tre:728126428');
+  assert.throws(() => restarted.resolveContractMetadata(OTHER_PREDICTED), /corrupt.*contract metadata/i);
+});

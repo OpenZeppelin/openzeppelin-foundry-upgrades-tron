@@ -199,6 +199,31 @@ test('persists derivable ProxyAdmin kind and artifact identity for a transparent
   );
 });
 
+test('does not label a transparent proxy runtime child as its constructor-created ProxyAdmin', t => {
+  const { addressMap, journal, reconciler } = fixture(t);
+  const callContext = context({
+    kind: 'call',
+    to: ROOT_PREDICTED,
+    predictedContractAddress: null,
+  });
+  const prepared = reconciler.recordPreparedNative(
+    SOURCE_HASH,
+    nativeTransaction(),
+    simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
+    callContext,
+  );
+  assert.equal(prepared.childCreatePlan.attempts[0].childMetadata, undefined);
+  journal.recordBroadcast(SOURCE_HASH);
+  const callReceipt = receipt([CHILD_ACTUAL_1]);
+  callReceipt.to = ROOT_PREDICTED;
+  callReceipt.contractAddress = null;
+  callReceipt.tron.actualContractAddress = null;
+  reconciler.reconcile(SOURCE_HASH, callReceipt);
+
+  const predictedChild = getCreateAddress({ from: ROOT_PREDICTED, nonce: 1 });
+  assert.equal(addressMap.resolveContractMetadata(predictedChild), undefined);
+});
+
 test('refuses incomplete simulation before broadcast and persists a deterministic terminal failure', t => {
   const { journal, reconciler } = fixture(t);
 
