@@ -1,30 +1,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function containsFileWithExtension(directory, extension) {
-  if (!fs.existsSync(directory)) {
-    return false;
-  }
-
-  return fs.readdirSync(directory, { withFileTypes: true }).some(entry => {
-    const entryPath = path.join(directory, entry.name);
-    return entry.isDirectory()
-      ? containsFileWithExtension(entryPath, extension)
-      : entry.isFile() && path.extname(entry.name) === extension;
-  });
-}
+const REQUIRED_PACKAGE_FILES = Object.freeze([
+  'src/Options.sol',
+  'src/Upgrades.sol',
+  'src/internal/Core.sol',
+  'src/internal/artifact-provenance.cjs',
+  'rpc/SECURITY.md',
+  'rpc/cli.cjs',
+  'rpc/handlers.cjs',
+]);
 
 function assertPackageContents(root) {
-  const missing = [];
-  if (!containsFileWithExtension(path.join(root, 'src'), '.sol')) {
-    missing.push('src/ Solidity implementation');
-  }
-  if (!containsFileWithExtension(path.join(root, 'rpc'), '.cjs')) {
-    missing.push('rpc/ adapter implementation');
-  }
+  const missing = REQUIRED_PACKAGE_FILES.filter(
+    file => !fs.statSync(path.join(root, file), { throwIfNoEntry: false })?.isFile(),
+  );
 
   if (missing.length > 0) {
-    throw new Error(`Refusing to publish without ${missing.join(' and ')}`);
+    throw new Error(`Refusing to publish: missing required package files: ${missing.join(', ')}`);
   }
 }
 
@@ -37,4 +30,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { assertPackageContents };
+module.exports = { REQUIRED_PACKAGE_FILES, assertPackageContents };

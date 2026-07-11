@@ -5,7 +5,8 @@
   "license": "MIT",
   "files": [
     "src/**/*",
-    "rpc/**/*"
+    "rpc/*.cjs",
+    "rpc/SECURITY.md"
   ],
   "repository": {
     "type": "git",

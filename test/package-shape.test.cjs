@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 test('package exposes Solidity sources and the RPC adapter', () => {
   const pkg = require('../package.json');
@@ -10,7 +11,7 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   const remappings = fs.readFileSync('remappings.txt', 'utf8');
 
   assert.equal(pkg.name, '@openzeppelin/foundry-upgrades-tron');
-  assert.deepEqual(pkg.files, ['src/**/*', 'rpc/**/*']);
+  assert.deepEqual(pkg.files, ['src/**/*', 'rpc/*.cjs', 'rpc/SECURITY.md']);
   assert.equal(pkg.engines.node, '>=20');
   assert.equal(pkg.scripts.test, 'npm run test:package && npm run test:solidity && npm run test:rpc');
   assert.equal(pkg.scripts['test:package'], 'node scripts/test-package.cjs');
@@ -33,19 +34,44 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.match(remappings, /^openzeppelin-tron-solidity\/=lib\/openzeppelin-tron-solidity\/$/m);
 });
 
+test('published package contains runtime RPC files but no tests or fixture build output', () => {
+  const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf8',
+  });
+  assert.equal(packed.status, 0, packed.stderr || packed.stdout);
+  const files = JSON.parse(packed.stdout)[0].files.map(file => file.path);
+
+  for (const runtime of ['src/Upgrades.sol', 'rpc/cli.cjs', 'rpc/SECURITY.md']) {
+    assert.ok(files.includes(runtime), `missing ${runtime}`);
+  }
+  assert.equal(
+    files.some(file => file.startsWith('rpc/test/')),
+    false,
+  );
+  assert.equal(
+    files.some(file => /(?:^|\/)out\//u.test(file)),
+    false,
+  );
+});
+
 test('prepack guard requires both Solidity and RPC implementations', t => {
-  const { assertPackageContents } = require('../scripts/require-package-contents.cjs');
+  const { REQUIRED_PACKAGE_FILES, assertPackageContents } = require('../scripts/require-package-contents.cjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-upgrades-tron-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  assert.throws(() => assertPackageContents(root), /src\/.*rpc\//);
+  assert.throws(() => assertPackageContents(root), /missing required package files/i);
 
-  fs.mkdirSync(path.join(root, 'src'));
-  fs.mkdirSync(path.join(root, 'rpc'));
-  fs.writeFileSync(path.join(root, 'src', 'Upgrades.sol'), 'library Upgrades {}');
-  fs.writeFileSync(path.join(root, 'rpc', 'cli.cjs'), 'module.exports = {};');
+  for (const file of REQUIRED_PACKAGE_FILES) {
+    const absolute = path.join(root, file);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, 'required');
+  }
 
   assert.doesNotThrow(() => assertPackageContents(root));
+
+  fs.rmSync(path.join(root, 'src', 'internal', 'artifact-provenance.cjs'));
+  assert.throws(() => assertPackageContents(root), /artifact-provenance\.cjs/);
 });
 
 test('dotenv variants are ignored except for the example', () => {
