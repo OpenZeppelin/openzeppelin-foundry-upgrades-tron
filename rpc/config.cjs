@@ -4,6 +4,18 @@ const { computeAddress } = require('ethers');
 
 const DEFAULT_TRE_ENDPOINT = 'http://127.0.0.1:9090';
 const DEFAULT_TRE_PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
+const TRE_DEVELOPMENT_PRIVATE_KEYS = new Set([
+  DEFAULT_TRE_PRIVATE_KEY,
+  'f1aa5a7966c3863ccde3047f6a1e266cdc0c76b399e256b8fede92b1c69e4f4e',
+  '43f149de89d64bf9a9099be19e1b1f7a4db784af8fa07caf6f08dc86ba65636b',
+  'b0ff29f0f33edc39aaf8789ea9637c360f9e479b8755f4565652b2594f8835df',
+  '6789ede33b84cbd4e735e12924d07e48b15df0ded10de3c206eeac585852ab22',
+  'efba7c0fc77822d0e13b0c36249b129628abff7be84c6b86d8d3444f14618361',
+  'cbd4d57ea225a831c496b5305d542579222ebdef58a02ea61d55ec1ebecdeb3a',
+  'b08786f38934aac966d10f0bc79a72f15067896d3b3beba721b5c235ffc5cc5f',
+  '4a354f72d8069e05fa0a19218ef561dde1db5f78c3d46f2005f9706706171d94',
+  '16dd30d52297ff9973cbbd5f35c0fef37309fbbfd5b540615b255fbeb8c1283d',
+]);
 const DEFAULT_FEE_LIMIT = 1_000_000_000;
 const MAX_FEE_LIMIT = 1_000_000_000;
 const DEFAULT_CHAIN_ID = 3360022319n;
@@ -135,8 +147,8 @@ function parseConfig(environment = process.env) {
 
   const endpoint = normalizeEndpoint(environment.TRON_RPC_URL ?? DEFAULT_TRE_ENDPOINT);
   const privateKey = parsePrivateKey(environment.TRON_PRIVATE_KEY ?? DEFAULT_TRE_PRIVATE_KEY);
-  if (publicNetwork && privateKey === DEFAULT_TRE_PRIVATE_KEY) {
-    throw new Error('The TRE development key cannot be used on a public network');
+  if (publicNetwork && TRE_DEVELOPMENT_PRIVATE_KEYS.has(privateKey)) {
+    throw new Error('TRE development keys cannot be used on a public network');
   }
 
   const feeLimit = Object.prototype.hasOwnProperty.call(environment, 'TRON_FEE_LIMIT')

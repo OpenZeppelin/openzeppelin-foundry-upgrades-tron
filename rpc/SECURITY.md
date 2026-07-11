@@ -12,8 +12,9 @@ security appropriate for a signing service.
 
 Configure endpoints and keys through environment variables, not command-line
 arguments. Public networks require an explicit endpoint and private key, and
-reject the bundled TRE development key. Startup and HTTP errors are sanitized,
-but process owners can still inspect environment variables and memory.
+reject every deterministic account from the bundled ten-account TRE fixture.
+Startup and HTTP errors are sanitized, but process owners can still inspect
+environment variables and memory.
 
 The state file contains address provenance, transaction journals, exact signed
 native transaction bytes, and confirmed receipts. It does not contain the

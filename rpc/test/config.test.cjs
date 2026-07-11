@@ -15,6 +15,8 @@ const {
 } = require('../config.cjs');
 
 const PRIVATE_KEY = '11'.repeat(32);
+const SECOND_TRE_PRIVATE_KEY = 'f1aa5a7966c3863ccde3047f6a1e266cdc0c76b399e256b8fede92b1c69e4f4e';
+const TENTH_TRE_PRIVATE_KEY = '16dd30d52297ff9973cbbd5f35c0fef37309fbbfd5b540615b255fbeb8c1283d';
 
 test('uses safe TRE-only defaults', () => {
   const config = parseConfig({});
@@ -77,17 +79,20 @@ test('requires an explicit chain ID, endpoint, and private key for every public 
   }
 });
 
-test('does not use the TRE development key on public networks', () => {
-  assert.throws(
-    () =>
-      parseConfig({
-        TRON_NETWORK: 'nile',
-        TRON_CHAIN_ID: '3448148188',
-        TRON_RPC_URL: 'https://nile.example.test',
-        TRON_PRIVATE_KEY: DEFAULT_TRE_PRIVATE_KEY,
-      }),
-    /development key/i,
-  );
+test('does not use any deterministic TRE development account on public networks', () => {
+  for (const privateKey of [DEFAULT_TRE_PRIVATE_KEY, SECOND_TRE_PRIVATE_KEY, TENTH_TRE_PRIVATE_KEY]) {
+    assert.throws(
+      () =>
+        parseConfig({
+          TRON_NETWORK: 'nile',
+          TRON_CHAIN_ID: '3448148188',
+          TRON_RPC_URL: 'https://nile.example.test',
+          TRON_PRIVATE_KEY: privateKey,
+        }),
+      error =>
+        error instanceof Error && /development keys?/i.test(error.message) && !error.message.includes(privateKey),
+    );
+  }
 });
 
 test('normalizes base and jsonrpc endpoints without changing path prefixes', () => {
