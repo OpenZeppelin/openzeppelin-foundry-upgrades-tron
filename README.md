@@ -285,6 +285,16 @@ retries with `latest` only after the node returns TRE's exact unsupported-
 quantity error. This is head-state compatibility for Forge script hydration,
 not archival or fork support. Stock TRE reports an Ethereum block gas limit of
 zero, so Forge broadcasts must include `--disable-block-gas-limit`.
+The adapter waits for a solid native receipt before acknowledging a write, so
+Forge's HTTP timeout must outlive the adapter's bounded 120-second receipt
+window. For TRE integration runs, use `ETH_RPC_TIMEOUT=300` together with
+`--timeout 300`:
+
+```sh
+ETH_RPC_TIMEOUT=300 forge script script/Deploy.s.sol \
+  --rpc-url http://127.0.0.1:8545 --broadcast --legacy --slow \
+  --disable-block-gas-limit --timeout 300
+```
 
 ## TVM differences and unsupported surfaces
 

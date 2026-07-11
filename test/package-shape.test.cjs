@@ -126,6 +126,7 @@ test('public documentation covers the supported modern TVM workflow and intentio
     /forking[^.]{0,80}(?:unsupported|not supported)/iu,
     /legacy[^.]{0,120}(?:evidence-gated|not currently exported)/iu,
     /actual[^.]{0,80}(?:TVM|TRON)[^.]{0,80}address/iu,
+    /ETH_RPC_TIMEOUT=300/u,
   ]) {
     assert.match(documentation, required);
   }
