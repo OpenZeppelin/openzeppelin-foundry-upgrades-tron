@@ -341,7 +341,7 @@ class TronClient {
     });
     const energyUsed = response.energy_used;
     if (!Number.isSafeInteger(energyUsed) || energyUsed < 0) throw new Error('Invalid exact simulation energy usage');
-    return { nativeTransactionId, energyUsed, childCreateAttempts };
+    return { nativeTransactionId, energyUsed, traceComplete: true, childCreateAttempts };
   }
 
   async broadcastSigned(signedNativeTransaction, expectedNativeTransactionId) {

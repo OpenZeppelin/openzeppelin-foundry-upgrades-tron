@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { translateReceipt } = require('../receipts.cjs');
+const { internalCreateTransactions, translateReceipt } = require('../receipts.cjs');
 
 const SOURCE_HASH = `0x${'aa'.repeat(32)}`;
 const NATIVE_TXID = 'bb'.repeat(32);
@@ -218,4 +218,23 @@ test('refuses unconfirmed, mismatched, or malformed native receipt data', () => 
       ),
     /transaction index/i,
   );
+});
+
+test('extracts only successful internal CREATE transactions while preserving receipt order', () => {
+  const receipt = {
+    tron: {
+      internalTransactions: [
+        { hash: 'first', note: 'create', rejected: false },
+        { hash: 'call', note: 'call', rejected: false },
+        { hash: 'failed', note: 'create', rejected: true },
+        { hash: 'second', note: 'CREATE', rejected: false },
+      ],
+    },
+  };
+
+  assert.deepEqual(
+    internalCreateTransactions(receipt).map(transaction => transaction.hash),
+    ['first', 'second'],
+  );
+  assert.throws(() => internalCreateTransactions({}), /internal transaction/i);
 });

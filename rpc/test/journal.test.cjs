@@ -13,6 +13,8 @@ const SOURCE_BYTES = `0x${'01'.repeat(97)}`;
 const SOURCE_HASH = keccak256(SOURCE_BYTES);
 const NATIVE_BYTES = `0a02ABcd${'42'.repeat(40)}`;
 const NATIVE_TXID = `${'cd'.repeat(32)}`;
+const FROM = `0x${'11'.repeat(20)}`;
+const TO = `0x${'22'.repeat(20)}`;
 
 function fixture(t, chain = 'tre:728126428', ownerId = 'boot-a') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-journal-'));
@@ -32,6 +34,33 @@ function nativeTransaction(overrides = {}) {
   };
 }
 
+function preparation() {
+  return {
+    operationContext: {
+      kind: 'call',
+      from: FROM,
+      to: TO,
+      nonce: '0',
+      predictedContractAddress: null,
+      actualTarget: TO,
+      contractKind: null,
+      artifactIdentity: null,
+      provenanceHash: null,
+    },
+    childCreatePlan: {
+      version: 1,
+      sender: FROM,
+      attempts: [],
+      counterBases: {},
+      counterFinals: {},
+    },
+  };
+}
+
+function recordPrepared(journal, native = nativeTransaction()) {
+  return journal.recordNativeBuilt(SOURCE_HASH, native, preparation());
+}
+
 test('durably follows received -> native-built -> broadcast -> confirmed', t => {
   const { journal } = fixture(t);
 
@@ -44,11 +73,12 @@ test('durably follows received -> native-built -> broadcast -> confirmed', t => 
       buildClaimOwner: 'boot-a',
     },
   });
-  assert.deepEqual(journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), {
+  assert.deepEqual(recordPrepared(journal), {
     sourceTransactionHash: SOURCE_HASH,
     signedEthereumTransaction: SOURCE_BYTES,
     state: 'native-built',
     ...nativeTransaction(),
+    ...preparation(),
   });
   assert.equal(journal.recordBroadcast(SOURCE_HASH).state, 'broadcast');
 
@@ -58,6 +88,7 @@ test('durably follows received -> native-built -> broadcast -> confirmed', t => 
     signedEthereumTransaction: SOURCE_BYTES,
     state: 'confirmed',
     ...nativeTransaction(),
+    ...preparation(),
     receipt,
   });
   assert.deepEqual(journal.get(SOURCE_HASH), journal.recordConfirmed(SOURCE_HASH, receipt));
@@ -66,14 +97,25 @@ test('durably follows received -> native-built -> broadcast -> confirmed', t => 
 test('rejects missing records and illegal state transitions', t => {
   const { journal } = fixture(t);
 
-  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /unknown.*transaction/i);
+  assert.throws(() => recordPrepared(journal), /unknown.*transaction/i);
   journal.receive(SOURCE_BYTES);
   assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /received.*broadcast/i);
   assert.throws(() => journal.recordConfirmed(SOURCE_HASH, {}), /received.*confirmed/i);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   assert.throws(() => journal.recordConfirmed(SOURCE_HASH, {}), /native-built.*confirmed/i);
   journal.recordBroadcast(SOURCE_HASH);
-  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /broadcast.*native-built/i);
+  assert.throws(() => recordPrepared(journal), /broadcast.*native-built/i);
+});
+
+test('refuses native-built state until operation context and a complete child CREATE plan are attached', t => {
+  const { journal } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+
+  assert.throws(
+    () => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()),
+    /operation context|child CREATE plan/i,
+  );
+  assert.equal(journal.get(SOURCE_HASH).state, 'received');
 });
 
 test('records terminal failures idempotently and forbids later transitions', t => {
@@ -89,7 +131,7 @@ test('records terminal failures idempotently and forbids later transitions', t =
   });
   assert.deepEqual(journal.recordFailed(SOURCE_HASH, failure), journal.get(SOURCE_HASH));
   assert.throws(() => journal.recordFailed(SOURCE_HASH, { ...failure, message: 'different' }), /failure.*conflict/i);
-  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /failed.*native-built/i);
+  assert.throws(() => recordPrepared(journal), /failed.*native-built/i);
   assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /failed.*broadcast/i);
   assert.throws(() => journal.recordConfirmed(SOURCE_HASH, {}), /failed.*confirmed/i);
 });
@@ -99,13 +141,14 @@ test('retains built native bytes and txid when a later stage fails', t => {
   const failure = { code: 'SIMULATION_INCOMPLETE', message: 'child attempt trace is incomplete' };
 
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   journal.recordBroadcast(SOURCE_HASH);
   assert.deepEqual(journal.recordFailed(SOURCE_HASH, failure), {
     sourceTransactionHash: SOURCE_HASH,
     signedEthereumTransaction: SOURCE_BYTES,
     state: 'failed',
     ...nativeTransaction(),
+    ...preparation(),
     failure,
   });
 
@@ -116,7 +159,7 @@ test('retains built native bytes and txid when a later stage fails', t => {
 test('returns an existing record for an identical source retry', t => {
   const { journal } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
 
   assert.deepEqual(journal.receive(SOURCE_BYTES.toUpperCase().replace('0X', '0x')), {
     shouldBuild: false,
@@ -125,6 +168,7 @@ test('returns an existing record for an identical source retry', t => {
       signedEthereumTransaction: SOURCE_BYTES,
       state: 'native-built',
       ...nativeTransaction(),
+      ...preparation(),
     },
   });
   assert.equal(journal.list().length, 1);
@@ -144,6 +188,7 @@ test('grants only one native-build claim to concurrent receives in one boot', t 
       new TransactionJournal(journal.store, 'tre:728126428', { ownerId: 'boot-same' }).recordNativeBuilt(
         SOURCE_HASH,
         nativeTransaction(),
+        preparation(),
       ),
     /build claim/i,
   );
@@ -163,8 +208,11 @@ test('a second live boot cannot take over a received claim through ordinary rece
     () => secondLiveBoot.recordFailed(SOURCE_HASH, { code: 'LIVE_BOOT', message: 'must not commit' }),
     /build claim/i,
   );
-  assert.throws(() => secondLiveBoot.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
-  assert.equal(journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()).state, 'native-built');
+  assert.throws(
+    () => secondLiveBoot.recordNativeBuilt(SOURCE_HASH, nativeTransaction(), preparation()),
+    /build claim/i,
+  );
+  assert.equal(recordPrepared(journal).state, 'native-built');
 });
 
 test('explicit startup recovery requires capability and the exact previous owner', t => {
@@ -189,7 +237,7 @@ test('explicit startup recovery requires capability and the exact previous owner
     () => journal.recordFailed(SOURCE_HASH, { code: 'STALE_BOOT', message: 'must not commit' }),
     /build claim/i,
   );
-  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
+  assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction(), preparation()), /build claim/i);
 
   const failed = restarted.recordFailed(SOURCE_HASH, {
     code: 'UNSUPPORTED_TRANSACTION',
@@ -203,7 +251,7 @@ test('explicit startup recovery requires capability and the exact previous owner
 test('explicit recovery rejects a non-received transaction state', t => {
   const { journal, statePath } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
 
   const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
     ownerId: 'boot-b',
@@ -215,16 +263,25 @@ test('explicit recovery rejects a non-received transaction state', t => {
 test('never replaces a persisted native transaction during retry', t => {
   const { journal } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
 
-  assert.deepEqual(journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), journal.get(SOURCE_HASH));
+  assert.deepEqual(recordPrepared(journal), journal.get(SOURCE_HASH));
   assert.throws(
     () =>
-      journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ signedNativeTransaction: `0a02${'99'.repeat(42)}` })),
+      journal.recordNativeBuilt(
+        SOURCE_HASH,
+        nativeTransaction({ signedNativeTransaction: `0a02${'99'.repeat(42)}` }),
+        preparation(),
+      ),
     /native transaction.*conflict/i,
   );
   assert.throws(
-    () => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ nativeTransactionId: 'ef'.repeat(32) })),
+    () =>
+      journal.recordNativeBuilt(
+        SOURCE_HASH,
+        nativeTransaction({ nativeTransactionId: 'ef'.repeat(32) }),
+        preparation(),
+      ),
     /native transaction.*conflict/i,
   );
   assert.deepEqual(journal.get(SOURCE_HASH), {
@@ -232,13 +289,14 @@ test('never replaces a persisted native transaction during retry', t => {
     signedEthereumTransaction: SOURCE_BYTES,
     state: 'native-built',
     ...nativeTransaction(),
+    ...preparation(),
   });
 });
 
 test('resumes the exact signed native transaction after a crash at native-built', t => {
   const { journal, statePath } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
 
   const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
     ownerId: 'boot-b',
@@ -254,7 +312,7 @@ test('resumes the exact signed native transaction after a crash at native-built'
 test('resumes the exact native transaction after a crash at broadcast', t => {
   const { journal, statePath } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   journal.recordBroadcast(SOURCE_HASH);
 
   const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
@@ -275,7 +333,7 @@ test('replays a persisted receipt after restart without changing it', t => {
     logs: [{ address: `0x${'12'.repeat(20)}`, topics: [] }],
   };
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   journal.recordBroadcast(SOURCE_HASH);
   journal.recordConfirmed(SOURCE_HASH, receipt);
 
@@ -296,7 +354,7 @@ test('refuses corrupt persisted confirmed receipt shapes after restart', t => {
   for (const corruptReceipt of corruptReceipts) {
     const { journal, statePath } = fixture(t);
     journal.receive(SOURCE_BYTES);
-    journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+    recordPrepared(journal);
     journal.recordBroadcast(SOURCE_HASH);
     journal.recordConfirmed(SOURCE_HASH, { status: '0x1' });
 
@@ -314,7 +372,7 @@ test('refuses corrupt persisted confirmed receipt shapes after restart', t => {
 test('refuses a persisted confirmation whose non-JSON receipt was omitted', t => {
   const { journal, statePath } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   journal.recordBroadcast(SOURCE_HASH);
   journal.recordConfirmed(SOURCE_HASH, { status: '0x1' });
 
@@ -344,7 +402,7 @@ test('refuses a persisted journal envelope with unknown keys', t => {
 test('rejects a non-durable receipt before committing confirmation', t => {
   const { journal } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
   journal.recordBroadcast(SOURCE_HASH);
 
   assert.throws(() => journal.recordConfirmed(SOURCE_HASH, undefined), /receipt/i);
@@ -354,7 +412,7 @@ test('rejects a non-durable receipt before committing confirmation', t => {
 test('preserves signed native bytes and txid exactly', t => {
   const { journal, statePath } = fixture(t);
   journal.receive(SOURCE_BYTES);
-  journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction());
+  recordPrepared(journal);
 
   const stored = JSON.parse(fs.readFileSync(statePath, 'utf8')).chains['tre:728126428'].transactionJournal.records[
     SOURCE_HASH
@@ -373,11 +431,12 @@ test('separates journals by chain and validates transaction inputs', t => {
   assert.equal(second.get(SOURCE_HASH), undefined);
   assert.throws(() => first.receive('not-hex'), /signed Ethereum transaction/i);
   assert.throws(
-    () => first.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ nativeTransactionId: 'nope' })),
+    () => first.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ nativeTransactionId: 'nope' }), preparation()),
     /txid/i,
   );
   assert.throws(
-    () => first.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ signedNativeTransaction: 'not-hex' })),
+    () =>
+      first.recordNativeBuilt(SOURCE_HASH, nativeTransaction({ signedNativeTransaction: 'not-hex' }), preparation()),
     /signed native transaction/i,
   );
 });

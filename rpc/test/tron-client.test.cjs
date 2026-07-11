@@ -349,6 +349,7 @@ test('simulates the exact signed transaction and returns a complete ordered chil
   assert.deepEqual(await client.simulateSigned(signedBytes, txid), {
     nativeTransactionId: txid,
     energyUsed: 901,
+    traceComplete: true,
     childCreateAttempts: [
       {
         index: 0,

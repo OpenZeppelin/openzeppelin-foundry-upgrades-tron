@@ -84,6 +84,19 @@ function translateInternalTransaction(transaction, resolveAddress) {
   };
 }
 
+function internalCreateTransactions(receipt) {
+  if (!isObject(receipt?.tron) || !Array.isArray(receipt.tron.internalTransactions)) {
+    throw new Error('Confirmed receipt has no internal transaction list');
+  }
+  return receipt.tron.internalTransactions.filter(
+    transaction =>
+      isObject(transaction) &&
+      transaction.rejected !== true &&
+      typeof transaction.note === 'string' &&
+      transaction.note.toLowerCase() === 'create',
+  );
+}
+
 function translateReceipt(snapshot, context = {}) {
   if (!isObject(snapshot) || !isObject(snapshot.transaction) || !isObject(snapshot.info)) {
     throw new Error('A confirmed native receipt is required');
@@ -184,5 +197,6 @@ function translateReceipt(snapshot, context = {}) {
 }
 
 module.exports = {
+  internalCreateTransactions,
   translateReceipt,
 };

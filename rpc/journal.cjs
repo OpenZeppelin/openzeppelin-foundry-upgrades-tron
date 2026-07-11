@@ -1,8 +1,9 @@
 const { isDeepStrictEqual } = require('node:util');
 const { randomUUID } = require('node:crypto');
 
-const { keccak256 } = require('ethers');
+const { getCreateAddress, keccak256 } = require('ethers');
 
+const { toEvmAddress } = require('./address-codec.cjs');
 const { validateChainIdentity } = require('./store.cjs');
 
 const JOURNAL_VERSION = 1;
@@ -10,6 +11,8 @@ const TRANSACTION_HASH_PATTERN = /^0x[0-9a-f]{64}$/;
 const NATIVE_TRANSACTION_ID_PATTERN = /^(?:0x)?[0-9a-fA-F]{64}$/;
 const HEX_BYTES_PATTERN = /^(?:0x)?(?:[0-9a-fA-F]{2})+$/;
 const OWNER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CONTRACT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const STATES = new Set(['received', 'native-built', 'broadcast', 'confirmed', 'failed']);
 
 function isObject(value) {
@@ -106,6 +109,199 @@ function durableReceipt(receipt) {
   }
 }
 
+function normalizeAddress(value, label, nullable = false) {
+  if (nullable && value === null) return null;
+  try {
+    return toEvmAddress(value);
+  } catch (error) {
+    throw new Error(`Invalid ${label} address`, { cause: error });
+  }
+}
+
+function validateArtifactIdentity(identity, nullable = false) {
+  if (nullable && identity === null) return null;
+  if (
+    !isObject(identity) ||
+    !exactKeys(identity, ['contractName', 'fullyQualifiedName', 'sourceName']) ||
+    typeof identity.sourceName !== 'string' ||
+    identity.sourceName.length === 0 ||
+    typeof identity.contractName !== 'string' ||
+    identity.contractName.length === 0 ||
+    identity.fullyQualifiedName !== `${identity.sourceName}:${identity.contractName}`
+  ) {
+    throw new Error('Invalid artifact identity');
+  }
+  return structuredClone(identity);
+}
+
+function validateOperationContext(context) {
+  const keys = [
+    'actualTarget',
+    'artifactIdentity',
+    'contractKind',
+    'from',
+    'kind',
+    'nonce',
+    'predictedContractAddress',
+    'provenanceHash',
+    'to',
+  ];
+  if (!isObject(context) || !exactKeys(context, keys)) throw new Error('Invalid native operation context');
+  if (context.kind !== 'deployment' && context.kind !== 'call') throw new Error('Invalid native operation context');
+  if (typeof context.nonce !== 'string' || !DECIMAL_PATTERN.test(context.nonce)) {
+    throw new Error('Invalid native operation nonce');
+  }
+  const contractKind = context.contractKind;
+  if (contractKind !== null && (typeof contractKind !== 'string' || !CONTRACT_KIND_PATTERN.test(contractKind))) {
+    throw new Error('Invalid native operation contract kind');
+  }
+  const provenanceHash = context.provenanceHash;
+  if (
+    provenanceHash !== null &&
+    (typeof provenanceHash !== 'string' || !TRANSACTION_HASH_PATTERN.test(provenanceHash))
+  ) {
+    throw new Error('Invalid native operation provenance hash');
+  }
+  const normalized = {
+    kind: context.kind,
+    from: normalizeAddress(context.from, 'operation sender'),
+    to: normalizeAddress(context.to, 'operation target', true),
+    nonce: context.nonce,
+    predictedContractAddress: normalizeAddress(context.predictedContractAddress, 'predicted contract', true),
+    actualTarget: normalizeAddress(context.actualTarget, 'actual target'),
+    contractKind,
+    artifactIdentity: validateArtifactIdentity(context.artifactIdentity, true),
+    provenanceHash: provenanceHash?.toLowerCase() ?? null,
+  };
+  if (
+    (normalized.contractKind === null) !== (normalized.artifactIdentity === null) ||
+    (normalized.kind === 'deployment' && (normalized.to !== null || normalized.predictedContractAddress === null)) ||
+    (normalized.kind === 'call' && (normalized.to === null || normalized.predictedContractAddress !== null))
+  ) {
+    throw new Error('Invalid native operation context');
+  }
+  return normalized;
+}
+
+function validateChildMetadata(metadata) {
+  if (
+    !isObject(metadata) ||
+    !exactKeys(metadata, ['artifactIdentity', 'contractKind']) ||
+    typeof metadata.contractKind !== 'string' ||
+    !CONTRACT_KIND_PATTERN.test(metadata.contractKind)
+  ) {
+    throw new Error('Invalid child contract metadata');
+  }
+  return {
+    contractKind: metadata.contractKind,
+    artifactIdentity: validateArtifactIdentity(metadata.artifactIdentity),
+  };
+}
+
+function validateCounterMap(value, label) {
+  if (!isObject(value)) throw new Error(`Invalid child CREATE ${label}`);
+  const normalized = {};
+  for (const [caller, nonce] of Object.entries(value)) {
+    const address = normalizeAddress(caller, 'child CREATE caller');
+    if (address !== caller || typeof nonce !== 'string' || !/^[1-9][0-9]*$/.test(nonce)) {
+      throw new Error(`Invalid child CREATE ${label}`);
+    }
+    normalized[address] = nonce;
+  }
+  return normalized;
+}
+
+function validateChildCreatePlan(plan) {
+  if (
+    !isObject(plan) ||
+    !exactKeys(plan, ['attempts', 'counterBases', 'counterFinals', 'sender', 'version']) ||
+    plan.version !== 1 ||
+    !Array.isArray(plan.attempts)
+  ) {
+    throw new Error('Invalid child CREATE plan');
+  }
+  const counterBases = validateCounterMap(plan.counterBases, 'counter bases');
+  const counterFinals = validateCounterMap(plan.counterFinals, 'counter finals');
+  if (Object.keys(counterBases).sort().join(',') !== Object.keys(counterFinals).sort().join(',')) {
+    throw new Error('Invalid child CREATE counter plan');
+  }
+  for (const caller of Object.keys(counterBases)) {
+    if (BigInt(counterFinals[caller]) < BigInt(counterBases[caller])) {
+      throw new Error('Invalid child CREATE counter plan');
+    }
+  }
+  const expectedNext = Object.fromEntries(
+    Object.entries(counterBases).map(([caller, nonce]) => [caller, BigInt(nonce)]),
+  );
+  const attempts = plan.attempts.map((attempt, index) => {
+    const hasMetadata = own(attempt, 'childMetadata');
+    const keys = [
+      'actualCaller',
+      ...(hasMetadata ? ['childMetadata'] : []),
+      'index',
+      'nonce',
+      'predictedAddress',
+      'predictedCaller',
+      'simulatedActualAddress',
+      'success',
+    ].sort();
+    if (
+      !isObject(attempt) ||
+      !exactKeys(attempt, keys) ||
+      attempt.index !== index ||
+      typeof attempt.nonce !== 'string' ||
+      !/^[1-9][0-9]*$/.test(attempt.nonce) ||
+      typeof attempt.success !== 'boolean'
+    ) {
+      throw new Error('Invalid child CREATE attempt plan');
+    }
+    const predictedCaller = normalizeAddress(attempt.predictedCaller, 'predicted child CREATE caller');
+    if (expectedNext[predictedCaller] === undefined || BigInt(attempt.nonce) !== expectedNext[predictedCaller]) {
+      throw new Error('Invalid child CREATE attempt counter');
+    }
+    const predictedAddress = normalizeAddress(attempt.predictedAddress, 'predicted child');
+    if (
+      predictedAddress !==
+      getCreateAddress({ from: predictedCaller, nonce: expectedNext[predictedCaller] }).toLowerCase()
+    ) {
+      throw new Error('Invalid child CREATE predicted address');
+    }
+    expectedNext[predictedCaller] += 1n;
+    return {
+      index,
+      actualCaller: normalizeAddress(attempt.actualCaller, 'actual child CREATE caller'),
+      predictedCaller,
+      nonce: attempt.nonce,
+      predictedAddress,
+      simulatedActualAddress: normalizeAddress(attempt.simulatedActualAddress, 'simulated child'),
+      success: attempt.success,
+      ...(hasMetadata ? { childMetadata: validateChildMetadata(attempt.childMetadata) } : {}),
+    };
+  });
+  for (const [caller, next] of Object.entries(expectedNext)) {
+    if (next !== BigInt(counterFinals[caller])) throw new Error('Invalid child CREATE final counter');
+  }
+  return {
+    version: 1,
+    sender: normalizeAddress(plan.sender, 'child CREATE sender'),
+    attempts,
+    counterBases,
+    counterFinals,
+  };
+}
+
+function validatePreparation(preparation) {
+  if (!isObject(preparation) || !exactKeys(preparation, ['childCreatePlan', 'operationContext'])) {
+    throw new Error('Native operation context and child CREATE plan are required');
+  }
+  const operationContext = validateOperationContext(preparation.operationContext);
+  const childCreatePlan = validateChildCreatePlan(preparation.childCreatePlan);
+  if (operationContext.from !== childCreatePlan.sender) {
+    throw new Error('Native operation and child CREATE sender mismatch');
+  }
+  return { operationContext, childCreatePlan };
+}
+
 function validateRecord(record, expectedHash) {
   if (!isObject(record) || !STATES.has(record.state)) {
     throw new Error('Corrupt transaction journal record');
@@ -148,19 +344,38 @@ function validateRecord(record, expectedHash) {
       throw new Error('Corrupt transaction journal record', { cause: error });
     }
     const failedBeforeBuild = exactKeys(record, [...baseKeys, 'failure'].sort());
-    const failedAfterBuild = exactKeys(
-      record,
-      [...baseKeys, 'failure', 'nativeTransactionId', 'signedNativeTransaction'].sort(),
-    );
-    if (!failedBeforeBuild && !failedAfterBuild) {
+    const preparedFailureKeys = [
+      ...baseKeys,
+      'childCreatePlan',
+      'failure',
+      'nativeTransactionId',
+      'operationContext',
+      'signedNativeTransaction',
+    ];
+    const failedAfterBuild = exactKeys(record, preparedFailureKeys.sort());
+    const failedAfterReceipt = exactKeys(record, [...preparedFailureKeys, 'receipt'].sort());
+    if (!failedBeforeBuild && !failedAfterBuild && !failedAfterReceipt) {
       throw new Error('Corrupt transaction journal record');
     }
-    if (failedAfterBuild) {
+    if (failedAfterBuild || failedAfterReceipt) {
       try {
         validateNativeTransaction({
           signedNativeTransaction: record.signedNativeTransaction,
           nativeTransactionId: record.nativeTransactionId,
         });
+        const normalizedPreparation = validatePreparation({
+          operationContext: record.operationContext,
+          childCreatePlan: record.childCreatePlan,
+        });
+        if (
+          !isDeepStrictEqual(record.operationContext, normalizedPreparation.operationContext) ||
+          !isDeepStrictEqual(record.childCreatePlan, normalizedPreparation.childCreatePlan)
+        ) {
+          throw new Error('noncanonical prepared operation');
+        }
+        if (failedAfterReceipt && !isDeepStrictEqual(record.receipt, durableReceipt(record.receipt))) {
+          throw new Error('noncanonical retained receipt');
+        }
       } catch (error) {
         throw new Error('Corrupt transaction journal record', { cause: error });
       }
@@ -176,7 +391,28 @@ function validateRecord(record, expectedHash) {
   } catch (error) {
     throw new Error('Corrupt transaction journal record', { cause: error });
   }
-  const nativeKeys = [...baseKeys, 'nativeTransactionId', 'signedNativeTransaction'];
+  let normalizedPreparation;
+  try {
+    normalizedPreparation = validatePreparation({
+      operationContext: record.operationContext,
+      childCreatePlan: record.childCreatePlan,
+    });
+  } catch (error) {
+    throw new Error('Corrupt transaction journal record', { cause: error });
+  }
+  if (
+    !isDeepStrictEqual(record.operationContext, normalizedPreparation.operationContext) ||
+    !isDeepStrictEqual(record.childCreatePlan, normalizedPreparation.childCreatePlan)
+  ) {
+    throw new Error('Corrupt transaction journal record');
+  }
+  const nativeKeys = [
+    ...baseKeys,
+    'childCreatePlan',
+    'nativeTransactionId',
+    'operationContext',
+    'signedNativeTransaction',
+  ];
   if (record.state === 'native-built' || record.state === 'broadcast') {
     if (!exactKeys(record, nativeKeys.sort())) {
       throw new Error('Corrupt transaction journal record');
@@ -223,6 +459,74 @@ function requireJournal(chain) {
     validateRecord(record, sourceTransactionHash);
   }
   return journal;
+}
+
+function requireRecord(journal, sourceTransactionHash) {
+  const record = journal.records[sourceTransactionHash];
+  if (record === undefined) throw new Error(`Unknown source transaction ${sourceTransactionHash}`);
+  return record;
+}
+
+function recordNativeBuiltInChain(chain, sourceTransactionHash, nativeTransaction, preparation, ownerId) {
+  const hash = normalizeSourceHash(sourceTransactionHash);
+  const native = validateNativeTransaction(nativeTransaction);
+  const prepared = validatePreparation(preparation);
+  const journal = requireJournal(chain);
+  const record = requireRecord(journal, hash);
+  if (record.state === 'native-built') {
+    if (
+      record.signedNativeTransaction !== native.signedNativeTransaction ||
+      record.nativeTransactionId !== native.nativeTransactionId ||
+      !isDeepStrictEqual(record.operationContext, prepared.operationContext) ||
+      !isDeepStrictEqual(record.childCreatePlan, prepared.childCreatePlan)
+    ) {
+      throw new Error('Native transaction retry conflict');
+    }
+    return record;
+  }
+  if (record.state !== 'received') transitionError(record, 'native-built');
+  if (record.buildClaimOwner !== validateOwnerId(ownerId)) {
+    throw new Error('Native build claim is owned by another journal instance');
+  }
+  const next = {
+    sourceTransactionHash: record.sourceTransactionHash,
+    signedEthereumTransaction: record.signedEthereumTransaction,
+    state: 'native-built',
+    ...native,
+    ...prepared,
+  };
+  journal.records[hash] = next;
+  chain.transactionJournal = journal;
+  return next;
+}
+
+function recordConfirmedInChain(chain, sourceTransactionHash, receipt) {
+  const hash = normalizeSourceHash(sourceTransactionHash);
+  const persistedReceipt = durableReceipt(receipt);
+  const journal = requireJournal(chain);
+  const record = requireRecord(journal, hash);
+  if (record.state === 'confirmed') {
+    if (!isDeepStrictEqual(record.receipt, persistedReceipt)) throw new Error('Confirmed receipt retry conflict');
+    return record;
+  }
+  if (record.state !== 'broadcast') transitionError(record, 'confirmed');
+  const next = { ...record, state: 'confirmed', receipt: persistedReceipt };
+  journal.records[hash] = next;
+  chain.transactionJournal = journal;
+  return next;
+}
+
+function recordRetainedFailureInChain(chain, sourceTransactionHash, failure, receipt) {
+  const hash = normalizeSourceHash(sourceTransactionHash);
+  const durableFailure = validateFailure(failure);
+  const persistedReceipt = durableReceipt(receipt);
+  const journal = requireJournal(chain);
+  const record = requireRecord(journal, hash);
+  if (record.state !== 'broadcast') transitionError(record, 'failed');
+  const next = { ...record, state: 'failed', failure: durableFailure, receipt: persistedReceipt };
+  journal.records[hash] = next;
+  chain.transactionJournal = journal;
+  return next;
 }
 
 function transitionError(record, targetState) {
@@ -308,38 +612,10 @@ class TransactionJournal {
     });
   }
 
-  recordNativeBuilt(sourceTransactionHash, nativeTransaction) {
-    const hash = normalizeSourceHash(sourceTransactionHash);
-    const native = validateNativeTransaction(nativeTransaction);
-    return this.store.transaction(this.chainIdentity, chain => {
-      const journal = requireJournal(chain);
-      const record = this._requireRecord(journal, hash);
-      if (record.state === 'native-built') {
-        if (
-          record.signedNativeTransaction !== native.signedNativeTransaction ||
-          record.nativeTransactionId !== native.nativeTransactionId
-        ) {
-          throw new Error('Native transaction retry conflict');
-        }
-        return record;
-      }
-      if (record.state !== 'received') {
-        transitionError(record, 'native-built');
-      }
-      if (record.buildClaimOwner !== this.ownerId) {
-        throw new Error('Native build claim is owned by another journal instance');
-      }
-
-      const next = {
-        sourceTransactionHash: record.sourceTransactionHash,
-        signedEthereumTransaction: record.signedEthereumTransaction,
-        state: 'native-built',
-        ...native,
-      };
-      journal.records[hash] = next;
-      chain.transactionJournal = journal;
-      return next;
-    });
+  recordNativeBuilt(sourceTransactionHash, nativeTransaction, preparation) {
+    return this.store.transaction(this.chainIdentity, chain =>
+      recordNativeBuiltInChain(chain, sourceTransactionHash, nativeTransaction, preparation, this.ownerId),
+    );
   }
 
   recordBroadcast(sourceTransactionHash) {
@@ -347,26 +623,9 @@ class TransactionJournal {
   }
 
   recordConfirmed(sourceTransactionHash, receipt) {
-    const hash = normalizeSourceHash(sourceTransactionHash);
-    const persistedReceipt = durableReceipt(receipt);
-    return this.store.transaction(this.chainIdentity, chain => {
-      const journal = requireJournal(chain);
-      const record = this._requireRecord(journal, hash);
-      if (record.state === 'confirmed') {
-        if (!isDeepStrictEqual(record.receipt, persistedReceipt)) {
-          throw new Error('Confirmed receipt retry conflict');
-        }
-        return record;
-      }
-      if (record.state !== 'broadcast') {
-        transitionError(record, 'confirmed');
-      }
-
-      const next = { ...record, state: 'confirmed', receipt: persistedReceipt };
-      journal.records[hash] = next;
-      chain.transactionJournal = journal;
-      return next;
-    });
+    return this.store.transaction(this.chainIdentity, chain =>
+      recordConfirmedInChain(chain, sourceTransactionHash, receipt),
+    );
   }
 
   recordFailed(sourceTransactionHash, failure) {
@@ -396,6 +655,8 @@ class TransactionJournal {
           ? {
               signedNativeTransaction: record.signedNativeTransaction,
               nativeTransactionId: record.nativeTransactionId,
+              operationContext: record.operationContext,
+              childCreatePlan: record.childCreatePlan,
             }
           : {}),
         failure: durableFailure,
@@ -446,15 +707,17 @@ class TransactionJournal {
   }
 
   _requireRecord(journal, sourceTransactionHash) {
-    const record = journal.records[sourceTransactionHash];
-    if (record === undefined) {
-      throw new Error(`Unknown source transaction ${sourceTransactionHash}`);
-    }
-    return record;
+    return requireRecord(journal, sourceTransactionHash);
   }
 }
 
 module.exports = {
   JOURNAL_VERSION,
   TransactionJournal,
+  recordConfirmedInChain,
+  recordNativeBuiltInChain,
+  recordRetainedFailureInChain,
+  requireJournal,
+  validateChildCreatePlan,
+  validateOperationContext,
 };
