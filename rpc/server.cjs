@@ -1,4 +1,5 @@
 const http = require('node:http');
+const { TextDecoder } = require('node:util');
 
 const { acquireStateLock } = require('./state-lock.cjs');
 
@@ -8,6 +9,7 @@ const DEFAULT_MAX_REQUEST_BYTES = 1_048_576;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 const PARSE_ERROR = Object.freeze({
   jsonrpc: '2.0',
@@ -207,6 +209,45 @@ function internalError(payload) {
   };
 }
 
+function isNotification(payload) {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return false;
+  }
+  if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string') {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'id')) {
+    return false;
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'params')) {
+    return true;
+  }
+  return payload.params !== null && typeof payload.params === 'object';
+}
+
+function internalFailure(payload) {
+  if (isNotification(payload)) {
+    return undefined;
+  }
+  if (!Array.isArray(payload)) {
+    return internalError(payload);
+  }
+  if (payload.length === 0) {
+    return internalError(null);
+  }
+  const responses = payload.filter(item => !isNotification(item)).map(item => internalError(item));
+  return responses.length === 0 ? undefined : responses;
+}
+
+function sendInternalFailure(response, payload) {
+  const failure = internalFailure(payload);
+  if (failure === undefined) {
+    sendEmpty(response, 204);
+  } else {
+    sendJson(response, 200, failure);
+  }
+}
+
 function closeServer(server) {
   if (!server.listening) {
     return Promise.resolve();
@@ -293,7 +334,7 @@ function createRpcServer(rawOptions) {
 
     let payload;
     try {
-      payload = JSON.parse(body.toString('utf8'));
+      payload = JSON.parse(UTF8_DECODER.decode(body));
     } catch {
       sendJson(response, 200, PARSE_ERROR);
       return;
@@ -305,7 +346,7 @@ function createRpcServer(rawOptions) {
     try {
       result = await operation;
     } catch {
-      sendJson(response, 200, internalError(payload));
+      sendInternalFailure(response, payload);
       return;
     } finally {
       inFlight.delete(operation);
@@ -322,7 +363,7 @@ function createRpcServer(rawOptions) {
       sendJson(response, 200, result);
     } catch {
       if (!response.headersSent) {
-        sendJson(response, 200, internalError(payload));
+        sendInternalFailure(response, payload);
       } else {
         response.destroy();
       }

@@ -242,6 +242,100 @@ test('returns a JSON-RPC parse error without invoking handlers', async t => {
   assert.equal(calls, 0);
 });
 
+test('rejects malformed UTF-8 as a parse error without dispatching', async t => {
+  let calls = 0;
+  const server = await startedServer(t, {
+    handlers: fakeHandlers({
+      async handle() {
+        calls += 1;
+      },
+    }),
+  });
+  const body = Buffer.concat([
+    Buffer.from('{"jsonrpc":"2.0","method":"invalid-', 'utf8'),
+    Buffer.from([0xff]),
+    Buffer.from('"}', 'utf8'),
+  ]);
+
+  const response = await request(server.address(), {
+    body,
+    headers: { 'content-type': 'application/json' },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), {
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: -32_700, message: 'Parse error' },
+  });
+  assert.equal(calls, 0);
+});
+
+test('suppresses handler and serialization failures for notification-only payloads', async t => {
+  const payloads = [
+    { jsonrpc: '2.0', method: 'notify' },
+    [
+      { jsonrpc: '2.0', method: 'first' },
+      { jsonrpc: '2.0', method: 'second', params: [] },
+    ],
+  ];
+  const headers = { 'content-type': 'application/json' };
+
+  for (const failure of ['handler', 'serialization']) {
+    const server = await startedServer(t, {
+      handlers: fakeHandlers({
+        async handle() {
+          if (failure === 'handler') {
+            throw new Error('private failure');
+          }
+          const circular = {};
+          circular.result = circular;
+          return circular;
+        },
+      }),
+    });
+    for (const payload of payloads) {
+      const response = await request(server.address(), { body: JSON.stringify(payload), headers });
+      assert.equal(response.statusCode, 204, `${failure}: ${JSON.stringify(payload)}`);
+      assert.equal(response.body, '');
+    }
+  }
+});
+
+test('returns fallback errors only for response-bearing items in a mixed batch', async t => {
+  const payload = [
+    { jsonrpc: '2.0', method: 'notify' },
+    { jsonrpc: '2.0', id: 9, method: 'query' },
+  ];
+  const expected = [
+    {
+      jsonrpc: '2.0',
+      id: 9,
+      error: { code: -32_603, message: 'Internal error' },
+    },
+  ];
+  const headers = { 'content-type': 'application/json' };
+
+  for (const failure of ['handler', 'serialization']) {
+    const server = await startedServer(t, {
+      handlers: fakeHandlers({
+        async handle() {
+          if (failure === 'handler') {
+            throw new Error('private failure');
+          }
+          const circular = {};
+          circular.result = circular;
+          return circular;
+        },
+      }),
+    });
+    const response = await request(server.address(), { body: JSON.stringify(payload), headers });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.body), expected);
+  }
+});
+
 test('releases the lock when recovery fails and combines a release failure', async t => {
   const recoveryError = new Error('recovery failed');
   const releaseError = new Error('release failed');
