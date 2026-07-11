@@ -315,6 +315,35 @@ test('distinguishes v5 child-creating and upstream v4 zero-child transparent pro
   }
 });
 
+test('recognizes every supported TRON Contracts layout and preserves its ProxyAdmin source root', t => {
+  for (const root of [
+    'openzeppelin-tron-solidity/',
+    'lib/openzeppelin-tron-solidity/',
+    'lib/tron-contracts/',
+    'lib/openzeppelin-foundry-upgrades-tron/lib/openzeppelin-tron-solidity/',
+  ]) {
+    const { journal, reconciler } = fixture(t);
+    const sourceName = `${root}contracts/proxy/transparent/TransparentUpgradeableProxy.sol`;
+    const identity = {
+      sourceName,
+      contractName: 'TransparentUpgradeableProxy',
+      fullyQualifiedName: `${sourceName}:TransparentUpgradeableProxy`,
+    };
+    const prepared = reconciler.recordPreparedNative(
+      SOURCE_HASH,
+      nativeTransaction(),
+      payloadSimulation([attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`)]),
+      context({ artifactIdentity: identity }),
+    );
+    assert.equal(journal.get(SOURCE_HASH).state, 'native-built');
+    assert.deepEqual(prepared.childCreatePlan.attempts[0].childMetadata?.artifactIdentity, {
+      sourceName: `${root}contracts/proxy/transparent/ProxyAdmin.sol`,
+      contractName: 'ProxyAdmin',
+      fullyQualifiedName: `${root}contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin`,
+    });
+  }
+});
+
 test('compares every exact CREATE attempt status and requires a successful top-level receipt', t => {
   const { journal, reconciler } = fixture(t);
   prepareAndBroadcast(journal, reconciler, [

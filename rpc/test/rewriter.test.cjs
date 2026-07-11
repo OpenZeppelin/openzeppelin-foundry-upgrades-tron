@@ -204,20 +204,26 @@ for (const proxy of [
   });
 }
 
-test('recognizes the canonical Forge lib-prefixed TRC1967 artifact identity', async () => {
-  const match = constructorMatch({
-    fullyQualifiedName: 'lib/openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol:TRC1967Proxy',
-    inputs: [
-      { name: 'implementation', type: 'address' },
-      { name: '_data', type: 'bytes' },
-    ],
-    values: [PREDICTED_IMPLEMENTATION, initializerData()],
+for (const root of [
+  'lib/openzeppelin-tron-solidity/',
+  'lib/tron-contracts/',
+  'lib/openzeppelin-foundry-upgrades-tron/lib/openzeppelin-tron-solidity/',
+]) {
+  test(`recognizes the supported ${root} TRC1967 artifact identity`, async () => {
+    const match = constructorMatch({
+      fullyQualifiedName: `${root}contracts/proxy/TRC1967/TRC1967Proxy.sol:TRC1967Proxy`,
+      inputs: [
+        { name: 'implementation', type: 'address' },
+        { name: '_data', type: 'bytes' },
+      ],
+      values: [PREDICTED_IMPLEMENTATION, initializerData()],
+    });
+    const rewritten = await rewriteDeployment(match, dependencies());
+    const decoded = AbiCoder.defaultAbiCoder().decode(['address', 'bytes'], rewritten.constructorData);
+    assert.equal(decoded[0], ACTUAL_IMPLEMENTATION);
+    assertInitializerRewritten(decoded[1]);
   });
-  const rewritten = await rewriteDeployment(match, dependencies());
-  const decoded = AbiCoder.defaultAbiCoder().decode(['address', 'bytes'], rewritten.constructorData);
-  assert.equal(decoded[0], ACTUAL_IMPLEMENTATION);
-  assertInitializerRewritten(decoded[1]);
-});
+}
 
 test('rewrites the canonical beacon constructor and BeaconProxy initializer', async () => {
   const beacon = constructorMatch({

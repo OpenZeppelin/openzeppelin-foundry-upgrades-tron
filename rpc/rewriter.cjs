@@ -2,6 +2,8 @@
 
 const { AbiCoder, Interface, ParamType, getAddress } = require('ethers');
 
+const { canonicalTronFullyQualifiedName } = require('./artifact-identities.cjs');
+
 const HEX_BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
 const ABI_ADDRESS_WORD_PREFIX = '0'.repeat(24);
 
@@ -266,10 +268,7 @@ function requireCanonicalShape(metadata, inputs) {
 }
 
 async function rewriteConstructorValues(match, inputs, values, deps) {
-  const canonicalName =
-    typeof match.fullyQualifiedName === 'string' && match.fullyQualifiedName.startsWith('lib/')
-      ? match.fullyQualifiedName.slice(4)
-      : match.fullyQualifiedName;
+  const canonicalName = canonicalTronFullyQualifiedName(match.fullyQualifiedName) ?? match.fullyQualifiedName;
   const metadata = PROXY_CONSTRUCTORS[canonicalName];
   if (metadata === undefined) return rewriteAbiValues(inputs, values, deps);
   requireCanonicalShape(metadata, inputs);

@@ -4,6 +4,11 @@ const { getCreateAddress } = require('ethers');
 
 const { toEvmAddress } = require('./address-codec.cjs');
 const {
+  TRANSPARENT_PROXY_IDENTITY,
+  canonicalTronFullyQualifiedName,
+  derivedTronProxyAdminIdentity,
+} = require('./artifact-identities.cjs');
+const {
   requireIndexes,
   resolveContractMetadataInChain,
   setContractMetadataInChain,
@@ -20,9 +25,6 @@ const { internalCreateAttempts } = require('./receipts.cjs');
 
 const RECONCILIATION_VERSION = 1;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
-const TRANSPARENT_PROXY_SUFFIX =
-  'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy';
-const TRANSPARENT_PROXY_FILE = 'TransparentUpgradeableProxy.sol';
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -84,25 +86,21 @@ function proxyAdminMetadata(operationContext, predictedCaller, nonce) {
   if (
     operationContext.kind === 'deployment' &&
     operationContext.contractKind === 'transparent-proxy' &&
-    operationContext.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX) &&
+    canonicalTronFullyQualifiedName(operationContext.artifactIdentity?.fullyQualifiedName) ===
+      TRANSPARENT_PROXY_IDENTITY &&
     predictedCaller === operationContext.predictedContractAddress &&
     nonce === 1n
   ) {
-    const callerIdentity = operationContext.artifactIdentity;
-    if (!callerIdentity.sourceName.endsWith(TRANSPARENT_PROXY_FILE)) {
+    const artifactIdentity = derivedTronProxyAdminIdentity(operationContext.artifactIdentity);
+    if (artifactIdentity === undefined) {
       throw new CreateReconciliationError(
         'INVALID_TRANSPARENT_PROXY_METADATA',
         'Transparent proxy artifact identity cannot derive its ProxyAdmin child',
       );
     }
-    const sourceName = `${callerIdentity.sourceName.slice(0, -TRANSPARENT_PROXY_FILE.length)}ProxyAdmin.sol`;
     return {
       contractKind: 'proxy-admin',
-      artifactIdentity: {
-        sourceName,
-        contractName: 'ProxyAdmin',
-        fullyQualifiedName: `${sourceName}:ProxyAdmin`,
-      },
+      artifactIdentity,
     };
   }
   return undefined;
@@ -208,7 +206,8 @@ function assertConstantProfile(mode, simulationRootAddress, attempts, operationC
   const canonicalTransparent =
     operationContext.kind === 'deployment' &&
     operationContext.contractKind === 'transparent-proxy' &&
-    operationContext.artifactIdentity?.fullyQualifiedName?.endsWith(TRANSPARENT_PROXY_SUFFIX);
+    canonicalTronFullyQualifiedName(operationContext.artifactIdentity?.fullyQualifiedName) ===
+      TRANSPARENT_PROXY_IDENTITY;
   if (canonicalTransparent) {
     if (
       attempts.length !== 1 ||

@@ -1158,8 +1158,12 @@ test('classifies privileged contract kinds only for exact canonical TRON and ups
     ['openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol', 'BeaconProxy', 'beacon-proxy'],
   ];
   for (const [sourceName, contractName, expected] of canonical) {
-    for (const prefix of ['', 'lib/']) {
-      const source = `${prefix}${sourceName}`;
+    for (const source of [
+      sourceName,
+      `lib/${sourceName}`,
+      sourceName.replace('openzeppelin-tron-solidity/', 'lib/tron-contracts/'),
+      `lib/openzeppelin-foundry-upgrades-tron/lib/${sourceName}`,
+    ]) {
       assert.equal(
         contractKindForArtifact({ sourceName: source, contractName, fullyQualifiedName: `${source}:${contractName}` }),
         expected,

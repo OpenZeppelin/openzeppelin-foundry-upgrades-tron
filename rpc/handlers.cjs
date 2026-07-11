@@ -5,6 +5,7 @@ const path = require('node:path');
 const { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256 } = require('ethers');
 
 const { normalizeAddress, toEvmAddress } = require('./address-codec.cjs');
+const { canonicalTronFullyQualifiedName } = require('./artifact-identities.cjs');
 const { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } = require('./artifacts.cjs');
 const { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } = require('./rewriter.cjs');
 const { assertStateLockHeld } = require('./state-lock.cjs');
@@ -114,8 +115,8 @@ function contractKindForArtifact(identity) {
   ) {
     return 'contract';
   }
-  const sourceName = identity.sourceName.startsWith('lib/') ? identity.sourceName.slice(4) : identity.sourceName;
-  return CANONICAL_CONTRACT_KINDS.get(`${sourceName}:${identity.contractName}`) ?? 'contract';
+  const canonicalTron = canonicalTronFullyQualifiedName(identity.fullyQualifiedName);
+  return CANONICAL_CONTRACT_KINDS.get(canonicalTron ?? identity.fullyQualifiedName) ?? 'contract';
 }
 
 function validateDependencies(options) {
