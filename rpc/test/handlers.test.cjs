@@ -215,6 +215,11 @@ test('reports chain ID and serves a virtual source nonce while forwarding gas qu
     id: 1,
     result: `0x${CHAIN_ID.toString(16)}`,
   });
+  assert.deepEqual(await handlers.handle({ jsonrpc: '2.0', id: 6, method: 'net_version', params: [] }), {
+    jsonrpc: '2.0',
+    id: 6,
+    result: CHAIN_ID.toString(10),
+  });
   assert.deepEqual(
     await handlers.handle({
       jsonrpc: '2.0',
@@ -244,6 +249,8 @@ test('derives latest and pending source nonces from durable journal state withou
   const raw = await signedTransaction({ nonce: 3 });
   const result = fixture(t, { sourceHash: keccak256(raw) });
   result.journal.receive(raw);
+  const wrongChain = await signedTransaction({ chainId: 1, nonce: 99 });
+  result.journal.receive(wrongChain);
 
   const count = block =>
     result.handlers.handle({
@@ -296,6 +303,74 @@ test('derives latest and pending source nonces from durable journal state withou
     params: [WALLET.address, '0x1'],
   });
   assert.equal(unsupported.error.code, -32602);
+});
+
+test('normalizes the stock TRE empty state root before Forge deserializes a block', async t => {
+  const hash = `0x${'12'.repeat(32)}`;
+  const block = {
+    hash,
+    mixHash: `0x${'00'.repeat(32)}`,
+    parentHash: `0x${'34'.repeat(32)}`,
+    receiptsRoot: `0x${'00'.repeat(32)}`,
+    sha3Uncles: `0x${'00'.repeat(32)}`,
+    stateRoot: '0x',
+    transactionsRoot: `0x${'56'.repeat(32)}`,
+    logsBloom: `0x${'00'.repeat(256)}`,
+    number: '0xa',
+    transactions: [],
+  };
+  const result = fixture(t, {
+    upstream: {
+      async request(method, params) {
+        result.calls.push({ type: 'upstream', method, params });
+        return structuredClone(block);
+      },
+    },
+  });
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getBlockByNumber',
+    params: ['latest', false],
+  });
+  assert.equal(response.result.stateRoot, `0x${'00'.repeat(32)}`);
+  assert.equal(response.result.hash, hash);
+  assert.equal(block.stateRoot, '0x');
+  assert.deepEqual(result.calls, [{ type: 'upstream', method: 'eth_getBlockByNumber', params: ['latest', false] }]);
+
+  block.stateRoot = '0x1234';
+  const malformed = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'eth_getBlockByHash',
+    params: [hash, false],
+  });
+  assert.equal(malformed.error.code, -32000);
+
+  block.stateRoot = `0x${'78'.repeat(32)}`;
+  const valid = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'eth_getBlockByHash',
+    params: [hash, true],
+  });
+  assert.equal(valid.result.stateRoot, block.stateRoot);
+
+  const missing = fixture(t, {
+    upstream: {
+      async request() {
+        return null;
+      },
+    },
+  });
+  const nullResponse = await missing.handlers.handle({
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'eth_getBlockByNumber',
+    params: ['0xffff', false],
+  });
+  assert.equal(nullResponse.result, null);
 });
 
 test('provenance-matches and address-rewrites deployment gas estimates without building or journaling', async t => {
@@ -649,6 +724,15 @@ test('replays durable receipts and Ethereum transactions after restart', async t
   assert.equal(transaction.result.from, WALLET.address);
   assert.equal(transaction.result.to, null);
   assert.equal(transaction.result.v, toBeHex(Transaction.from(raw).signature.networkV));
+  for (const block of ['latest', 'pending']) {
+    const count = await restarted.handlers.handle({
+      jsonrpc: '2.0',
+      id: block === 'latest' ? 3 : 4,
+      method: 'eth_getTransactionCount',
+      params: [WALLET.address, block],
+    });
+    assert.equal(count.result, '0x4');
+  }
 });
 
 test('replays receipts only from confirmed journal records and hides retained success-shaped failure receipts', async t => {

@@ -5,8 +5,9 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { execFile, spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { promisify } = require('node:util');
 
 const { ContractFactory, Interface, Wallet, getCreateAddress, keccak256 } = require('ethers');
 const { TronWeb } = require('tronweb');
@@ -18,6 +19,7 @@ const { startTre, TRE_ENVIRONMENT } = require('../../scripts/start-tre.cjs');
 const { waitForTre } = require('../../scripts/wait-for-tre.cjs');
 
 const RUN_TRE = process.env.RUN_TRE_E2E === '1';
+const execFileAsync = promisify(execFile);
 const COUNTER_SOURCE = `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 contract Counter {
@@ -116,6 +118,7 @@ test(
     });
     const wallet = new Wallet(DEFAULT_TRE_PRIVATE_KEY);
     assert.equal(wallet.address.toLowerCase(), config.expectedSender);
+    assert.equal(await rpc(`${tre.endpoint}/jsonrpc`, 'eth_chainId'), `0x${DEFAULT_CHAIN_ID.toString(16)}`);
     const factory = new ContractFactory(artifact.abi, artifact.bytecode.object, wallet);
     const firstDeploy = await factory.getDeployTransaction(11n);
     const secondDeploy = await factory.getDeployTransaction(22n);
@@ -136,6 +139,12 @@ test(
 
     let adapter = await startAdapter(config);
     t.after(async () => adapter.runtime.server.stop());
+    assert.equal(await rpc(adapter.url, 'net_version'), DEFAULT_CHAIN_ID.toString(10));
+    const castBlock = await execFileAsync('cast', ['block', 'latest', '--rpc-url', adapter.url, '--json'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(JSON.parse(castBlock.stdout).stateRoot, `0x${'00'.repeat(32)}`);
     assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'latest']), '0x0');
     assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'pending']), '0x0');
     assert.equal(await rpc(adapter.url, 'eth_sendRawTransaction', [firstRaw]), firstHash);
@@ -174,6 +183,8 @@ test(
 
     await adapter.runtime.server.stop();
     adapter = await startAdapter(config);
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'latest']), '0x3');
+    assert.equal(await rpc(adapter.url, 'eth_getTransactionCount', [wallet.address, 'pending']), '0x3');
     assert.equal(await rpc(adapter.url, 'eth_sendRawTransaction', [firstRaw]), firstHash);
     assert.deepEqual(await rpc(adapter.url, 'eth_getTransactionReceipt', [firstHash]), firstReceipt);
     assert.deepEqual(await rpc(adapter.url, 'eth_getTransactionReceipt', [secondHash]), secondReceipt);

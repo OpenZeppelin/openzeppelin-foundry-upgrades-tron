@@ -56,7 +56,7 @@ history or process arguments:
 | `TRON_NETWORK` | `tre` | `tre`, `mainnet`, `nile`, or `shasta` |
 | `TRON_RPC_URL` | `http://127.0.0.1:9090` | TRON full-node base URL; `/jsonrpc` is derived automatically |
 | `TRON_PRIVATE_KEY` | TRE development key | Native transaction signer; mandatory and explicit on public networks |
-| `TRON_CHAIN_ID` | `728126428` | Durable state namespace and Forge chain ID |
+| `TRON_CHAIN_ID` | `3360022319` | Durable state namespace and Forge chain ID; explicit on public networks |
 | `TRON_FEE_LIMIT` | `1000000000` | Native transaction fee limit |
 | `TRON_STATE_FILE` | `<cwd>/.openzeppelin-upgrades/tron-rpc-state.json` | Absolute path required when explicitly set |
 | `FOUNDRY_OUT` | `<cwd>/out` | Absolute Foundry artifact directory required when explicitly set |

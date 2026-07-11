@@ -43,6 +43,17 @@ function output() {
   };
 }
 
+function matchingUpstream(chainId, events) {
+  return {
+    async request(method, params) {
+      assert.equal(method, 'eth_chainId');
+      assert.deepEqual(params, []);
+      events?.push('chain');
+      return `0x${chainId.toString(16)}`;
+    },
+  };
+}
+
 function readOnlyEnvironment(stateFile) {
   return {
     TRON_NETWORK: 'nile',
@@ -117,6 +128,7 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
   const stdout = output();
   const stderr = output();
   const config = {
+    chainId: 728126428n,
     chainIdentity: 'tre:728126428',
     foundryOut: '/absolute/out',
     stateFile: '/absolute/state.json',
@@ -155,12 +167,12 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
       assert.equal(options.host, '127.0.0.1');
       assert.equal(options.port, 8545);
       events.push('compose');
-      return { server, nativeClient };
+      return { server, nativeClient, upstream: matchingUpstream(config.chainId, events) };
     },
   });
 
   assert.equal(exitCode, 0);
-  assert.deepEqual(events, ['compose', 'probe', 'start', 'stop']);
+  assert.deepEqual(events, ['compose', 'chain', 'probe', 'start', 'stop']);
   assert.equal(stderr.read(), '');
   assert.deepEqual(JSON.parse(stdout.read()), {
     chainIdentity: 'tre:728126428',
@@ -201,8 +213,12 @@ test('keeps both signal handlers installed throughout draining and still stops o
     stdout: stdout.stream,
     stderr: output().stream,
     signalTarget: signals,
-    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
-    runtimeFactory: () => ({ server, nativeClient: { assertSimulationReady: async () => 'exact-signed' } }),
+    parseConfig: () => ({ chainId: 1n, chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    runtimeFactory: () => ({
+      server,
+      nativeClient: { assertSimulationReady: async () => 'exact-signed' },
+      upstream: matchingUpstream(1n),
+    }),
   });
   await new Promise(resolve => setImmediate(resolve));
 
@@ -228,7 +244,7 @@ test('requires explicit opt-in before binding to a non-loopback host', async () 
     environment: {},
     stdout: output().stream,
     stderr: stderr.stream,
-    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    parseConfig: () => ({ chainId: 1n, chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
     runtimeFactory: () => {
       starts += 1;
       return { server: {} };
@@ -259,10 +275,14 @@ test('accepts explicit non-loopback opt-in and strict canonical ports', async ()
     stdout: stdout.stream,
     stderr: output().stream,
     signalTarget: signals,
-    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    parseConfig: () => ({ chainId: 1n, chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
     runtimeFactory: (_config, options) => {
       assert.deepEqual({ host: options.host, port: options.port }, { host: '0.0.0.0', port: 9545 });
-      return { server, nativeClient: { assertSimulationReady: async () => 'constant-create' } };
+      return {
+        server,
+        nativeClient: { assertSimulationReady: async () => 'constant-create' },
+        upstream: matchingUpstream(1n),
+      };
     },
   });
 
@@ -278,13 +298,14 @@ test('does not open the listener when the bounded simulation readiness probe fai
     environment: {},
     stdout: output().stream,
     stderr: stderr.stream,
-    parseConfig: () => ({ chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    parseConfig: () => ({ chainId: 1n, chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
     runtimeFactory: () => ({
       nativeClient: {
         async assertSimulationReady() {
           throw new Error('ordered successful and rejected CREATE attempts unavailable');
         },
       },
+      upstream: matchingUpstream(1n),
       server: {
         async start() {
           starts += 1;
@@ -300,6 +321,41 @@ test('does not open the listener when the bounded simulation readiness probe fai
   assert.equal(starts, 0);
   assert.equal(stops, 1);
   assert.match(stderr.read(), /ordered successful and rejected CREATE/i);
+});
+
+test('does not probe simulation or open the listener when the upstream chain ID differs', async () => {
+  const stderr = output();
+  let probes = 0;
+  let starts = 0;
+  let stops = 0;
+  const exitCode = await run(['start'], {
+    environment: {},
+    stdout: output().stream,
+    stderr: stderr.stream,
+    parseConfig: () => ({ chainId: 1n, chainIdentity: 'tre:1', foundryOut: '/out', stateFile: '/state' }),
+    runtimeFactory: () => ({
+      nativeClient: {
+        async assertSimulationReady() {
+          probes += 1;
+        },
+      },
+      upstream: matchingUpstream(2n),
+      server: {
+        async start() {
+          starts += 1;
+        },
+        async stop() {
+          stops += 1;
+        },
+      },
+    }),
+  });
+
+  assert.equal(exitCode, 1);
+  assert.equal(probes, 0);
+  assert.equal(starts, 0);
+  assert.equal(stops, 1);
+  assert.match(stderr.read(), /chain ID does not match/i);
 });
 
 test('rejects unknown commands, flags, duplicate flags, operands, and CLI secrets', async () => {

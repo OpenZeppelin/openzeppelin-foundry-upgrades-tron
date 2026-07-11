@@ -18,14 +18,11 @@ const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b3
 const IMPLEMENTATION_SELECTOR = '0x5c60da1b';
 const FORWARDED_METHODS = new Set([
   'eth_blockNumber',
-  'eth_getBlockByHash',
-  'eth_getBlockByNumber',
   'eth_getBlockTransactionCountByHash',
   'eth_getBlockTransactionCountByNumber',
   'eth_getLogs',
   'eth_getTransactionByBlockHashAndIndex',
   'eth_getTransactionByBlockNumberAndIndex',
-  'net_version',
   'web3_clientVersion',
 ]);
 const CANONICAL_CONTRACT_KINDS = new Map([
@@ -270,7 +267,14 @@ function ethereumTransaction(record) {
   };
 }
 
-function virtualTransactionCount(journal, expectedSender, address, blockTag = 'latest') {
+function virtualTransactionCount(
+  journal,
+  expectedSender,
+  address,
+  blockTag = 'latest',
+  decode = decodeLegacyTransaction,
+  chainId,
+) {
   const sender = normalizeEvmAddress(address, 'transaction-count address');
   const expected = normalizeEvmAddress(expectedSender, 'configured sender');
   if (!['earliest', 'latest', 'pending'].includes(blockTag)) {
@@ -286,9 +290,16 @@ function virtualTransactionCount(journal, expectedSender, address, blockTag = 'l
       nonce = BigInt(record.operationContext.nonce);
       from = record.operationContext.from;
     } else if (blockTag === 'pending' && record.state === 'received') {
-      const source = Transaction.from(record.signedEthereumTransaction);
-      nonce = BigInt(source.nonce);
-      from = source.from.toLowerCase();
+      try {
+        const source = decode(record.signedEthereumTransaction, {
+          expectedSender: expected,
+          expectedChainId: chainId,
+        });
+        nonce = BigInt(source.nonce);
+        from = normalizeEvmAddress(source.from, 'pending source sender');
+      } catch {
+        continue;
+      }
     } else {
       continue;
     }
@@ -299,6 +310,17 @@ function virtualTransactionCount(journal, expectedSender, address, blockTag = 'l
     if (included && from === expected && nonce >= next) next = nonce + 1n;
   }
   return quantity(next);
+}
+
+function normalizeUpstreamBlock(block) {
+  if (block === null) return null;
+  if (!isObject(block)) throw new Error('Invalid upstream block response');
+  const normalized = structuredClone(block);
+  if (normalized.stateRoot === '0x') normalized.stateRoot = `0x${'00'.repeat(32)}`;
+  if (typeof normalized.stateRoot !== 'string' || !/^0x[0-9a-f]{64}$/i.test(normalized.stateRoot)) {
+    throw new Error('Invalid upstream block stateRoot');
+  }
+  return normalized;
 }
 
 function createRpcHandlers(rawOptions) {
@@ -601,6 +623,9 @@ function createRpcHandlers(rawOptions) {
       case 'eth_chainId':
         requirePositional(params, 0);
         return quantity(config.chainId);
+      case 'net_version':
+        requirePositional(params, 0);
+        return config.chainId.toString(10);
       case 'eth_accounts':
         requirePositional(params, 0);
         return [getAddress(config.expectedSender)];
@@ -639,7 +664,7 @@ function createRpcHandlers(rawOptions) {
       }
       case 'eth_getTransactionCount': {
         const [address, block] = requirePositional(params, 1, 2);
-        return virtualTransactionCount(journal, config.expectedSender, address, block);
+        return virtualTransactionCount(journal, config.expectedSender, address, block, decode, config.chainId);
       }
       case 'eth_call':
       case 'eth_estimateGas': {
@@ -650,6 +675,11 @@ function createRpcHandlers(rawOptions) {
       case 'eth_gasPrice':
         requirePositional(params, 0);
         return upstream.request(method, []);
+      case 'eth_getBlockByHash':
+      case 'eth_getBlockByNumber': {
+        requirePositional(params, 2);
+        return normalizeUpstreamBlock(await upstream.request(method, params));
+      }
       case 'tron_resolveAddress': {
         const [address] = requirePositional(params, 1);
         return resolveAddress(address);

@@ -25,8 +25,8 @@ test('uses safe TRE-only defaults', () => {
   assert.equal(config.jsonRpcEndpoint, `${DEFAULT_TRE_ENDPOINT}/jsonrpc`);
   assert.equal(config.privateKey, DEFAULT_TRE_PRIVATE_KEY);
   assert.equal(config.feeLimit, DEFAULT_FEE_LIMIT);
-  assert.equal(config.chainId, 728126428n);
-  assert.equal(config.chainIdentity, 'tre:728126428');
+  assert.equal(config.chainId, 3360022319n);
+  assert.equal(config.chainIdentity, 'tre:3360022319');
   assert.equal(config.expectedSender, computeAddress(`0x${DEFAULT_TRE_PRIVATE_KEY}`).toLowerCase());
   assert.equal(config.foundryOut, path.resolve('out'));
   assert.equal(config.stateFile, path.resolve('.openzeppelin-upgrades/tron-rpc-state.json'));
@@ -53,16 +53,22 @@ test('validates absolute state and Foundry output paths plus explicit chain iden
   }
 });
 
-test('requires an explicit endpoint and private key for every public network', () => {
+test('requires an explicit chain ID, endpoint, and private key for every public network', () => {
   for (const network of ['mainnet', 'nile', 'shasta']) {
-    assert.throws(() => parseConfig({ TRON_NETWORK: network }), /explicit TRON_RPC_URL/i);
+    assert.throws(() => parseConfig({ TRON_NETWORK: network }), /explicit TRON_CHAIN_ID/i);
     assert.throws(
-      () => parseConfig({ TRON_NETWORK: network, TRON_RPC_URL: 'https://api.example.test' }),
+      () =>
+        parseConfig({
+          TRON_NETWORK: network,
+          TRON_CHAIN_ID: '3448148188',
+          TRON_RPC_URL: 'https://api.example.test',
+        }),
       /explicit TRON_PRIVATE_KEY/i,
     );
 
     const config = parseConfig({
       TRON_NETWORK: network,
+      TRON_CHAIN_ID: '3448148188',
       TRON_RPC_URL: 'https://api.example.test/jsonrpc',
       TRON_PRIVATE_KEY: `0x${PRIVATE_KEY}`,
     });
@@ -76,6 +82,7 @@ test('does not use the TRE development key on public networks', () => {
     () =>
       parseConfig({
         TRON_NETWORK: 'nile',
+        TRON_CHAIN_ID: '3448148188',
         TRON_RPC_URL: 'https://nile.example.test',
         TRON_PRIVATE_KEY: DEFAULT_TRE_PRIVATE_KEY,
       }),

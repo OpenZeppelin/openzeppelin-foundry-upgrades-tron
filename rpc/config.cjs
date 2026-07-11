@@ -6,7 +6,7 @@ const DEFAULT_TRE_ENDPOINT = 'http://127.0.0.1:9090';
 const DEFAULT_TRE_PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
 const DEFAULT_FEE_LIMIT = 1_000_000_000;
 const MAX_FEE_LIMIT = 1_000_000_000;
-const DEFAULT_CHAIN_ID = 728126428n;
+const DEFAULT_CHAIN_ID = 3360022319n;
 const DEFAULT_STATE_FILE = '.openzeppelin-upgrades/tron-rpc-state.json';
 
 const PUBLIC_NETWORKS = new Set(['mainnet', 'nile', 'shasta']);
@@ -109,6 +109,9 @@ function parseStateConfig(environment = process.env) {
     throw new Error('Invalid TRON_NETWORK; expected tre, mainnet, nile, or shasta');
   }
 
+  if (PUBLIC_NETWORKS.has(network) && !hasNonemptyString(environment, 'TRON_CHAIN_ID')) {
+    throw new Error(`The ${network} network requires an explicit TRON_CHAIN_ID`);
+  }
   const chainId = parseChainId(environment.TRON_CHAIN_ID ?? DEFAULT_CHAIN_ID.toString());
   return Object.freeze({
     network,

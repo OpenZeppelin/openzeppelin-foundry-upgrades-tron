@@ -153,6 +153,19 @@ function removeSignalListener(target, signal, listener) {
   else if (typeof target.removeListener === 'function') target.removeListener(signal, listener);
 }
 
+async function assertUpstreamChainId(upstream, expectedChainId) {
+  if (!isObject(upstream) || typeof upstream.request !== 'function') {
+    throw new Error('Adapter runtime cannot verify the upstream chain ID');
+  }
+  const value = await upstream.request('eth_chainId', []);
+  if (typeof value !== 'string' || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/i.test(value)) {
+    throw new Error('TRON node returned an invalid chain ID');
+  }
+  if (BigInt(value) !== expectedChainId) {
+    throw new Error(`TRON node chain ID does not match configured TRON_CHAIN_ID ${expectedChainId}`);
+  }
+}
+
 async function startCommand(parsed, context) {
   const config = context.parseConfig(context.environment);
   const runtime = context.runtimeFactory(config, {
@@ -188,6 +201,7 @@ async function startCommand(parsed, context) {
   context.signalTarget.on('SIGINT', requestShutdown);
   context.signalTarget.on('SIGTERM', requestShutdown);
   try {
+    await assertUpstreamChainId(runtime.upstream, config.chainId);
     const simulationMode = await nativeClient.assertSimulationReady();
     const address = await server.start();
     if (!shutdownRequested) {
