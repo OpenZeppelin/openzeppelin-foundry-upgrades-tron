@@ -53,17 +53,29 @@ test('dotenv variants are ignored except for the example', () => {
 
   assert.match(gitignore, /^\.env\.\*$/m);
   assert.match(gitignore, /^!\.env\.example$/m);
+  assert.match(gitignore, /^\.openzeppelin-upgrades\/$/m);
+});
+
+test('documents adapter security boundaries and fail-closed unsupported writes', () => {
+  const security = fs.readFileSync('rpc/SECURITY.md', 'utf8');
+
+  assert.match(security, /loopback/i);
+  assert.match(security, /private key/i);
+  assert.match(security, /signed native transaction/i);
+  assert.match(security, /CREATE2/);
+  assert.match(security, /typed transaction/i);
+  assert.match(security, /constant payload simulation/i);
+  assert.match(security, /0600/);
 });
 
 test('documents the nonstandard fail-closed simulation requirement without overstating public support', () => {
   const readme = fs.readFileSync('README.md', 'utf8');
 
   assert.match(readme, /POST\s+`wallet\/simulatesignedtransaction`/);
-  assert.match(readme, /matching native transaction ID/);
-  assert.match(readme, /`trace_complete: true`/);
-  assert.match(readme, /ordered\s+`child_create_attempts`/);
-  assert.match(readme, /stock[\s\S]{0,80}java-tron[\s\S]{0,160}do not provide/i);
-  assert.match(readme, /write requests fail closed/i);
-  assert.match(readme, /TRE readiness diagnostic/i);
+  assert.match(readme, /matching native[\s\S]{0,20}transaction ID/i);
+  assert.match(readme, /complete ordered child-`CREATE` trace/);
+  assert.match(readme, /stock TRE and java-tron/);
+  assert.match(readme, /constant, non-broadcasting[\s\S]{0,80}capability probe/i);
+  assert.match(readme, /ambiguous child creations fail before broadcast/i);
   assert.doesNotMatch(readme, /Task \d+/i);
 });

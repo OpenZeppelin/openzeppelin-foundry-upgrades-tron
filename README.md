@@ -70,6 +70,8 @@ npm run rpc:start -- --host 0.0.0.0 --port 8545 --allow-non-loopback
 
 Only expose the adapter behind controls appropriate for a signing service. It
 accepts signed Forge transactions but holds the native TRON key in memory.
+See [the RPC security boundaries](rpc/SECURITY.md) before using a public
+network or a non-loopback listener.
 
 ## Resolve TVM addresses
 

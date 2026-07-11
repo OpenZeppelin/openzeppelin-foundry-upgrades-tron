@@ -10,6 +10,9 @@ test_artifacts*/
 # Development broadcast logs
 broadcast/
 
+# Local RPC adapter state
+.openzeppelin-upgrades/
+
 # Environment files
 .env
 .env.*
