@@ -34,6 +34,11 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.match(remappings, /^openzeppelin-tron-solidity\/=lib\/openzeppelin-tron-solidity\/$/m);
 });
 
+test('modern Solidity surface does not export deployment implementation helpers', () => {
+  const source = fs.readFileSync('src/Upgrades.sol', 'utf8');
+  assert.doesNotMatch(source, /function\s+requireTRC1967Initialization\s*\(/u);
+});
+
 test('published package contains runtime RPC files but no tests or fixture build output', () => {
   const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: path.resolve(__dirname, '..'),
