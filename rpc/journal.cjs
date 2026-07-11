@@ -353,6 +353,9 @@ class TransactionJournal {
       if (record.state === 'confirmed') {
         transitionError(record, 'failed');
       }
+      if (record.state === 'received' && record.buildClaimOwner !== this.ownerId) {
+        throw new Error('Native build claim is owned by another journal instance');
+      }
 
       const next = {
         sourceTransactionHash: record.sourceTransactionHash,

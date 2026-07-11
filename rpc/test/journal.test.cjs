@@ -160,9 +160,30 @@ test('a restarted boot atomically takes over a stranded received build claim', t
   assert.equal(takeover.shouldBuild, true);
   assert.equal(takeover.record.buildClaimOwner, 'boot-b');
   assert.equal(restarted.receive(SOURCE_BYTES).shouldBuild, false);
+  assert.throws(
+    () => journal.recordFailed(SOURCE_HASH, { code: 'STALE_BOOT', message: 'must not commit' }),
+    /build claim/i,
+  );
   assert.throws(() => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()), /build claim/i);
   assert.equal(restarted.recordNativeBuilt(SOURCE_HASH, nativeTransaction()).state, 'native-built');
   assert.equal(restarted.get(SOURCE_HASH).buildClaimOwner, undefined);
+});
+
+test('the current takeover owner can terminally fail a stranded received claim', t => {
+  const { journal, statePath } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+
+  const restarted = new TransactionJournal(new JsonStore(statePath), 'tre:728126428', {
+    ownerId: 'boot-b',
+  });
+  assert.equal(restarted.receive(SOURCE_BYTES).shouldBuild, true);
+  const failed = restarted.recordFailed(SOURCE_HASH, {
+    code: 'UNSUPPORTED_TRANSACTION',
+    message: 'source cannot be translated',
+  });
+
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.buildClaimOwner, undefined);
 });
 
 test('never replaces a persisted native transaction during retry', t => {
