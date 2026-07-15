@@ -465,6 +465,30 @@ test('simulates the exact signed transaction and returns a complete ordered chil
   ]);
 });
 
+test('preserves an attempt kind reported by the exact simulation trace', async () => {
+  const built = signedFixture();
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const { client } = fixture({
+    transport: {
+      async request() {
+        return {
+          result: { result: true },
+          txid,
+          trace_complete: true,
+          energy_used: 5,
+          child_create_attempts: [
+            { caller_address: OWNER, created_address: CONTRACT, success: true, kind: 'create2' },
+          ],
+        };
+      },
+    },
+  });
+
+  const simulation = await client.simulateSigned(signedBytes, txid, built);
+  assert.equal(simulation.childCreateAttempts[0].kind, 'CREATE2');
+});
+
 test('falls back only after explicit exact-endpoint absence and validates the signed JSON payload echo', async () => {
   const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
   const signedBytes = serializeSignedTransaction(built);

@@ -277,6 +277,20 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     if (!isObject(rawAttempt) || typeof rawAttempt.success !== 'boolean') {
       throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', `Invalid child CREATE attempt ${index}`);
     }
+    // TC1: reject CREATE2 before journal-prep/broadcast. The simulation trace preserves the child
+    // opcode kind verbatim; native CREATE address prediction (getCreateAddress) is only valid for
+    // nonce-based CREATE, so any CREATE2 (or otherwise non-CREATE kind) fails closed pre-broadcast.
+    if (rawAttempt.kind !== undefined) {
+      if (typeof rawAttempt.kind !== 'string' || rawAttempt.kind.length === 0) {
+        throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', `Invalid child CREATE attempt kind ${index}`);
+      }
+      if (rawAttempt.kind.toUpperCase() !== 'CREATE') {
+        throw new CreateReconciliationError(
+          'CHILD_CREATE2_REJECTED',
+          `Child CREATE attempt ${index} uses unsupported opcode ${rawAttempt.kind}`,
+        );
+      }
+    }
     if (rawAttempt.index !== undefined && rawAttempt.index !== index) {
       throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', 'Child CREATE attempt order is invalid');
     }

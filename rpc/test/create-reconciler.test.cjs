@@ -445,6 +445,21 @@ test('does not label a transparent proxy runtime child as its constructor-create
   assert.equal(addressMap.resolveContractMetadata(predictedChild), undefined);
 });
 
+test('rejects a CREATE2 child attempt before journal-prep and broadcast', t => {
+  const { journal, reconciler } = fixture(t);
+  const create2Attempt = { ...attempt(ROOT_ACTUAL, CHILD_ACTUAL_1), kind: 'CREATE2' };
+
+  assert.throws(
+    () =>
+      reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), simulation([create2Attempt]), context()),
+    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE2_REJECTED',
+  );
+  // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.
+  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /failed.*broadcast/i);
+});
+
 test('refuses incomplete simulation before broadcast and persists a deterministic terminal failure', t => {
   const { journal, reconciler } = fixture(t);
 

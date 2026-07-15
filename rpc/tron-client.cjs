@@ -213,6 +213,15 @@ function decodeInternalNote(value) {
   return value;
 }
 
+// Preserve the child-CREATE opcode kind reported by the trace verbatim (upper-cased) so the
+// create-reconciler can reject CREATE2 pre-broadcast. Absent kind is left undefined; a
+// present-but-malformed kind fails closed.
+function normalizeCreateKind(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || value.length === 0) throw new Error('Invalid child CREATE attempt kind');
+  return value.toUpperCase();
+}
+
 function constantCreateAttempts(response, allowOmitted = false) {
   if (response.internal_transactions === undefined && allowOmitted) return [];
   if (!Array.isArray(response.internal_transactions)) {
@@ -361,11 +370,13 @@ class TronClient {
     const childCreateAttempts = response.child_create_attempts.map((attempt, index) => {
       try {
         if (!isObject(attempt) || typeof attempt.success !== 'boolean') throw new Error('invalid attempt');
+        const kind = normalizeCreateKind(attempt.kind);
         return {
           index,
           callerAddress: toEvmAddress(attempt.caller_address),
           createdAddress: toEvmAddress(attempt.created_address),
           success: attempt.success,
+          ...(kind === undefined ? {} : { kind }),
         };
       } catch (error) {
         throw new Error(`Invalid child CREATE trace attempt ${index}`, { cause: error });
