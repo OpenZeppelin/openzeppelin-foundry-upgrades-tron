@@ -411,6 +411,10 @@ async function rewriteDeployment(match, deps) {
     rewrittenValues,
   );
   const creationBytecode = await rewriteLinkedLibraries(match, deps);
+  // R1: opaque-scan the final creation/runtime bytecode for known predicted addresses. Linked
+  // libraries were already resolved to their actual addresses above; a predicted address baked
+  // into the contract code itself would never be rewritten, so it fails closed here.
+  await assertOpaqueBytesSafe(creationBytecode, deps);
   return {
     ...match,
     creationBytecode,

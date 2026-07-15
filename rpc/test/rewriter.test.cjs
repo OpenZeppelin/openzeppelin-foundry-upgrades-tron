@@ -600,6 +600,30 @@ test('rejects canonical proxy nested payloads when implementation metadata is un
   );
 });
 
+test('rejects deployment creation bytecode embedding a known predicted address', async () => {
+  const match = constructorMatch({
+    fullyQualifiedName: 'contracts/Evil.sol:Evil',
+    inputs: [],
+    values: [],
+    // PUSH20 <predicted> PUSH1 0x00 MSTORE — a predicted address baked into the contract code.
+    creationBytecode: `0x73${PREDICTED_IMPLEMENTATION.slice(2).toLowerCase()}600052`,
+  });
+
+  await assert.rejects(rewriteDeployment(match, dependencies()), /opaque|predicted/i);
+});
+
+test('allows deployment creation bytecode with no embedded predicted address', async () => {
+  const match = constructorMatch({
+    fullyQualifiedName: 'contracts/Ok.sol:Ok',
+    inputs: [],
+    values: [],
+    creationBytecode: '0x73aabbccddeeff00112233445566778899aabbcc600052',
+  });
+
+  const rewritten = await rewriteDeployment(match, dependencies());
+  assert.equal(rewritten.creationBytecode, '0x73aabbccddeeff00112233445566778899aabbcc600052');
+});
+
 test('reconciles one and repeated Forge linked-library ranges', async () => {
   const prefix = '6000';
   const middle = '6001';
