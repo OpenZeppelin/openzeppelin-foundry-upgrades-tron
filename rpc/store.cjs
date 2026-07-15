@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
+const { canonicalStatePath } = require('./state-lock.cjs');
+
 const STORE_VERSION = 1;
 const CHAIN_IDENTITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -55,6 +57,11 @@ class JsonStore {
     }
 
     this.filePath = path.resolve(filePath);
+    // Read and write the same canonicalized (realpath) target that the state lock hashes, so a
+    // symlinked or otherwise-aliased state path cannot resolve to a different file than the lock
+    // protects (which would let a second adapter believe it holds an exclusive lock while writing a
+    // separate file, or replace the symlink with a fresh regular file on atomic rename).
+    this.canonicalPath = canonicalStatePath(filePath);
     this.fs = options.fileSystem ?? fs;
     this._readState();
   }
@@ -95,13 +102,13 @@ class JsonStore {
   }
 
   _readState() {
-    if (!this.fs.existsSync(this.filePath)) {
+    if (!this.fs.existsSync(this.canonicalPath)) {
       return { version: STORE_VERSION, chains: {} };
     }
 
     let state;
     try {
-      state = JSON.parse(this.fs.readFileSync(this.filePath, 'utf8'));
+      state = JSON.parse(this.fs.readFileSync(this.canonicalPath, 'utf8'));
     } catch (error) {
       throw new Error(`Unable to parse state file: ${error.message}`, { cause: error });
     }
@@ -109,10 +116,10 @@ class JsonStore {
   }
 
   _writeState(state) {
-    const directory = path.dirname(this.filePath);
+    const directory = path.dirname(this.canonicalPath);
     const temporaryPath = path.join(
       directory,
-      `.${path.basename(this.filePath)}.${process.pid}.${crypto.randomBytes(12).toString('hex')}.tmp`,
+      `.${path.basename(this.canonicalPath)}.${process.pid}.${crypto.randomBytes(12).toString('hex')}.tmp`,
     );
     const contents = `${JSON.stringify(state, null, 2)}\n`;
     let descriptor;
@@ -124,7 +131,7 @@ class JsonStore {
       this.fs.fsyncSync(descriptor);
       this.fs.closeSync(descriptor);
       descriptor = undefined;
-      this.fs.renameSync(temporaryPath, this.filePath);
+      this.fs.renameSync(temporaryPath, this.canonicalPath);
       this._syncDirectory(directory);
     } catch (error) {
       if (descriptor !== undefined) {

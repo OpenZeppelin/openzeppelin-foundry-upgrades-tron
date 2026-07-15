@@ -311,4 +311,5 @@ async function acquireStateLock(statePath, options = {}) {
 module.exports = {
   acquireStateLock,
   assertStateLockHeld,
+  canonicalStatePath,
 };

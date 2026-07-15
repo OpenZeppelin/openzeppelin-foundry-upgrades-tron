@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const { acquireStateLock } = require('../state-lock.cjs');
 const { JsonStore, STORE_VERSION } = require('../store.cjs');
 
 function temporaryState(t) {
@@ -28,10 +29,12 @@ test('commits state through a same-directory atomic rename', t => {
     chain.value = 17;
   });
 
+  // Writes target the canonicalized (realpath) state path the state lock also hashes.
+  const canonicalPath = path.join(fs.realpathSync(path.dirname(statePath)), 'state.json');
   assert.equal(renames.length, 1);
-  assert.equal(path.dirname(renames[0][0]), path.dirname(statePath));
+  assert.equal(path.dirname(renames[0][0]), path.dirname(canonicalPath));
   assert.match(path.basename(renames[0][0]), /^\.state\.json\..+\.tmp$/);
-  assert.equal(renames[0][1], statePath);
+  assert.equal(renames[0][1], canonicalPath);
   assert.deepEqual(JSON.parse(fs.readFileSync(statePath, 'utf8')), {
     version: STORE_VERSION,
     chains: { 'chain-a': { value: 17 } },
@@ -135,6 +138,34 @@ test('rejects asynchronous transaction callbacks without committing their draft'
     /synchronous/i,
   );
   assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { stable: true });
+});
+
+test('writes through a symlinked state path to the canonical target the lock hashes', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-store-symlink-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const realPath = path.join(directory, 'real-state.json');
+  const aliasPath = path.join(directory, 'alias-state.json');
+
+  const real = new JsonStore(realPath);
+  real.transaction('chain-a', chain => {
+    chain.value = 1;
+  });
+  fs.symlinkSync(realPath, aliasPath);
+
+  // A store opened through the symlink reads and writes the same canonical file, and the write
+  // does not replace the symlink with a fresh regular file.
+  const alias = new JsonStore(aliasPath);
+  assert.deepEqual(alias.readChain('chain-a'), { value: 1 });
+  alias.transaction('chain-a', chain => {
+    chain.value = 2;
+  });
+  assert.deepEqual(new JsonStore(realPath).readChain('chain-a'), { value: 2 });
+  assert.equal(fs.lstatSync(aliasPath).isSymbolicLink(), true);
+
+  // The lock hashes the same canonical path, so a second adapter via the alias is refused.
+  const lock = await acquireStateLock(realPath);
+  t.after(() => lock.release());
+  await assert.rejects(acquireStateLock(aliasPath), /state is already locked/i);
 });
 
 test('rejects unsafe chain identities', t => {
