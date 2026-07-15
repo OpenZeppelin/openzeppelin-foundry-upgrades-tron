@@ -97,6 +97,14 @@ function internalCreateAttempts(receipt) {
     if (typeof transaction.note !== 'string') {
       throw new Error(`Confirmed receipt internal transaction ${index} has a missing or malformed note`);
     }
+    // Fail closed on a hex-like but MALFORMED (odd-length) note. java-tron emits even-length hex,
+    // which the wrapper decodes to text before this point; a note that still reads as raw hex here
+    // and is odd-length (e.g. "6372656174650" or "0x6372656174650") is a truncated/corrupt marker
+    // and must not be silently classified as a non-CREATE — a "create" could be hiding behind it.
+    const hexBody = transaction.note.replace(/^0x/i, '');
+    if (/^[0-9a-f]+$/i.test(hexBody) && hexBody.length % 2 === 1) {
+      throw new Error(`Confirmed receipt internal transaction ${index} has a malformed (odd-length hex) note`);
+    }
     // Normalize surrounding whitespace and trailing NUL padding before the `create` comparison so a
     // real child creation reported with padding noise (e.g. "create ", " create ", or the hex
     // 63726561746500 which decodes to "create\0") is not silently classified as a non-CREATE and

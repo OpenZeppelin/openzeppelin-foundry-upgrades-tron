@@ -294,6 +294,19 @@ test('fails closed on an internal transaction whose note is missing or malformed
   assert.throws(() => internalCreateTransactions(translated), /note/i);
 });
 
+test('fails closed on a malformed (odd-length hex) note', () => {
+  // java-tron emits even-length hex (decoded to text upstream); a note that still reads as raw hex
+  // here and is odd-length (with or without a 0x prefix) is a truncated/corrupt marker and must be
+  // rejected — never silently classified as a non-CREATE (a "create" could be hiding behind it).
+  for (const note of ['6372656174650', '0x6372656174650']) {
+    assert.throws(
+      () => internalCreateAttempts({ tron: { internalTransactions: [{ hash: 'odd', note, rejected: false }] } }),
+      /malformed \(odd-length hex\)/i,
+      `note ${JSON.stringify(note)} should fail closed`,
+    );
+  }
+});
+
 test('classifies whitespace-padded and NUL-padded "create" notes as CREATE', () => {
   // A runtime-decoded note can carry trailing NUL padding or surrounding whitespace. These must be
   // normalized before the `create` comparison so a real child creation is not hidden behind padding
