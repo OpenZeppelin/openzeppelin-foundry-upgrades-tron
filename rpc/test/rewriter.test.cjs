@@ -367,11 +367,15 @@ test('rewrites UUPS upgrade calls only for a verified UUPS target kind', async (
     'function upgradeTo(address newImplementation)',
     'function upgradeToAndCall(address newImplementation,bytes data)',
   ]);
+  const uupsAbi = [
+    'function upgradeTo(address newImplementation)',
+    'function upgradeToAndCall(address newImplementation,bytes data)',
+  ];
   const base = { to: PREDICTED_PROXY, kind: 'call', value: 0n };
 
   const upgrade = await rewriteCall(
     { ...base, data: iface.encodeFunctionData('upgradeTo', [PREDICTED_IMPLEMENTATION]) },
-    { targetKind: 'uups-proxy' },
+    { targetKind: 'uups-proxy', abi: uupsAbi },
     dependencies(),
   );
   assert.equal(upgrade.to, ACTUAL_PROXY.toLowerCase());
@@ -382,7 +386,7 @@ test('rewrites UUPS upgrade calls only for a verified UUPS target kind', async (
       ...base,
       data: iface.encodeFunctionData('upgradeToAndCall', [PREDICTED_IMPLEMENTATION, initializerData()]),
     },
-    { targetKind: 'uups-proxy' },
+    { targetKind: 'uups-proxy', abi: uupsAbi },
     dependencies(),
   );
   const decoded = iface.decodeFunctionData('upgradeToAndCall', upgradeAndCall.data);
@@ -396,7 +400,7 @@ test('rejects noncanonical trailing bytes on a metadata-selected upgrade call', 
   await assert.rejects(
     rewriteCall(
       { to: PREDICTED_PROXY, kind: 'call', data: `${canonical}00` },
-      { targetKind: 'uups-proxy' },
+      { targetKind: 'uups-proxy', abi: ['function upgradeTo(address newImplementation)'] },
       dependencies(),
     ),
     /calldata|canonical|decode/i,
@@ -408,11 +412,15 @@ test('rewrites ProxyAdmin upgrade calls and nested upgradeAndCall payloads', asy
     'function upgrade(address proxy,address implementation)',
     'function upgradeAndCall(address proxy,address implementation,bytes data)',
   ]);
+  const proxyAdminAbi = [
+    'function upgrade(address proxy,address implementation)',
+    'function upgradeAndCall(address proxy,address implementation,bytes data)',
+  ];
   const base = { to: PREDICTED_OWNER, kind: 'call', value: 0n };
 
   const upgrade = await rewriteCall(
     { ...base, data: iface.encodeFunctionData('upgrade', [PREDICTED_PROXY, PREDICTED_IMPLEMENTATION]) },
-    { targetKind: 'proxy-admin' },
+    { targetKind: 'proxy-admin', abi: proxyAdminAbi },
     dependencies(),
   );
   assert.deepEqual(iface.decodeFunctionData('upgrade', upgrade.data).toArray(), [ACTUAL_PROXY, ACTUAL_IMPLEMENTATION]);
@@ -422,7 +430,7 @@ test('rewrites ProxyAdmin upgrade calls and nested upgradeAndCall payloads', asy
       ...base,
       data: iface.encodeFunctionData('upgradeAndCall', [PREDICTED_PROXY, PREDICTED_IMPLEMENTATION, initializerData()]),
     },
-    { targetKind: 'proxy-admin' },
+    { targetKind: 'proxy-admin', abi: proxyAdminAbi },
     dependencies(),
   );
   const decoded = iface.decodeFunctionData('upgradeAndCall', withCall.data);
@@ -439,12 +447,37 @@ test('rewrites UpgradeableBeacon upgradeTo with verified target metadata', async
       kind: 'call',
       data: iface.encodeFunctionData('upgradeTo', [PREDICTED_IMPLEMENTATION]),
     },
-    { targetKind: 'upgradeable-beacon' },
+    { targetKind: 'upgradeable-beacon', abi: ['function upgradeTo(address newImplementation)'] },
     dependencies(),
   );
 
   assert.equal(rewritten.to, ACTUAL_BEACON.toLowerCase());
   assert.equal(iface.decodeFunctionData('upgradeTo', rewritten.data).newImplementation, ACTUAL_IMPLEMENTATION);
+});
+
+test('applies the hardcoded UUPS interface only when the bound implementation ABI declares it', async () => {
+  const uups = new Interface(['function upgradeTo(address newImplementation)']);
+  const data = uups.encodeFunctionData('upgradeTo', [PREDICTED_IMPLEMENTATION]);
+
+  // Fallback-only implementation: upgradeTo is not declared, so the call is treated opaquely.
+  // The opaque scan then catches the embedded predicted implementation address and fails closed
+  // instead of silently rewriting it through the assumed UUPS interface.
+  await assert.rejects(
+    rewriteCall(
+      { to: PREDICTED_PROXY, kind: 'call', data },
+      { targetKind: 'uups-proxy', abi: [{ type: 'fallback', stateMutability: 'payable' }] },
+      dependencies(),
+    ),
+    /opaque|predicted/i,
+  );
+
+  // When the bound implementation ABI declares upgradeTo, the hardcoded interface applies as before.
+  const rewritten = await rewriteCall(
+    { to: PREDICTED_PROXY, kind: 'call', data },
+    { targetKind: 'uups-proxy', abi: ['function upgradeTo(address newImplementation)'] },
+    dependencies(),
+  );
+  assert.equal(uups.decodeFunctionData('upgradeTo', rewritten.data).newImplementation, ACTUAL_IMPLEMENTATION);
 });
 
 test('does not infer proxy semantics from a matching selector alone', async () => {

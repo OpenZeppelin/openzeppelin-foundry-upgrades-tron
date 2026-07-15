@@ -446,9 +446,31 @@ function decodeCanonicalFunction(iface, functionFragment, data) {
   return decoded;
 }
 
-async function rewriteUupsCall(data, deps) {
+// The hardcoded UUPS/ProxyAdmin/Beacon selectors only carry upgrade semantics when the
+// provenance-bound implementation ABI actually declares that exact function. Otherwise the
+// selector could collide with an unrelated function (or be routed to a fallback), so we must not
+// rewrite its address arguments — the caller falls back to opaque handling.
+function implementationDeclares(abi, functionFragment) {
+  if (!Array.isArray(abi)) return false;
+  let iface;
+  try {
+    iface = new Interface(abi);
+  } catch {
+    return false;
+  }
+  let declared;
+  try {
+    declared = iface.getFunction(functionFragment.selector);
+  } catch {
+    return false;
+  }
+  return declared !== null && declared !== undefined && declared.format('sighash') === functionFragment.format('sighash');
+}
+
+async function rewriteUupsCall(data, abi, deps) {
   const functionFragment = selectedFunction(UUPS_INTERFACE, data);
   if (functionFragment === undefined) return undefined;
+  if (!implementationDeclares(abi, functionFragment)) return undefined;
   const decoded = decodeCanonicalFunction(UUPS_INTERFACE, functionFragment, data);
   const implementation = decoded.newImplementation;
   if (functionFragment.name === 'upgradeTo') {
@@ -460,9 +482,10 @@ async function rewriteUupsCall(data, deps) {
   ]);
 }
 
-async function rewriteProxyAdminCall(data, deps) {
+async function rewriteProxyAdminCall(data, abi, deps) {
   const functionFragment = selectedFunction(PROXY_ADMIN_INTERFACE, data);
   if (functionFragment === undefined) return undefined;
+  if (!implementationDeclares(abi, functionFragment)) return undefined;
   const decoded = decodeCanonicalFunction(PROXY_ADMIN_INTERFACE, functionFragment, data);
   if (functionFragment.name === 'upgrade') {
     return PROXY_ADMIN_INTERFACE.encodeFunctionData(functionFragment, [
@@ -477,9 +500,10 @@ async function rewriteProxyAdminCall(data, deps) {
   ]);
 }
 
-async function rewriteBeaconCall(data, deps) {
+async function rewriteBeaconCall(data, abi, deps) {
   const functionFragment = selectedFunction(BEACON_INTERFACE, data);
   if (functionFragment === undefined) return undefined;
+  if (!implementationDeclares(abi, functionFragment)) return undefined;
   const decoded = decodeCanonicalFunction(BEACON_INTERFACE, functionFragment, data);
   return BEACON_INTERFACE.encodeFunctionData(functionFragment, [await mapAddress(decoded.newImplementation, deps)]);
 }
@@ -534,13 +558,13 @@ async function rewriteCall(decoded, context, deps) {
   let data;
   switch (context.targetKind) {
     case 'uups-proxy':
-      data = await rewriteUupsCall(decoded.data, deps);
+      data = await rewriteUupsCall(decoded.data, context.abi, deps);
       break;
     case 'proxy-admin':
-      data = await rewriteProxyAdminCall(decoded.data, deps);
+      data = await rewriteProxyAdminCall(decoded.data, context.abi, deps);
       break;
     case 'upgradeable-beacon':
-      data = await rewriteBeaconCall(decoded.data, deps);
+      data = await rewriteBeaconCall(decoded.data, context.abi, deps);
       break;
     case 'transparent-proxy':
     case 'beacon-proxy':
