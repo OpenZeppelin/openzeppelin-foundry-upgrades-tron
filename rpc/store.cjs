@@ -63,7 +63,17 @@ class JsonStore {
     // separate file, or replace the symlink with a fresh regular file on atomic rename).
     this.canonicalPath = canonicalStatePath(filePath);
     this.fs = options.fileSystem ?? fs;
+    this.assertWritable = undefined;
     this._readState();
+  }
+
+  // Bind an assertion (typically the state-lock ownership check) that is re-evaluated before
+  // every durable mutation, so a write cannot commit after the exclusive lock has been lost.
+  bindLockAssertion(assertWritable) {
+    if (typeof assertWritable !== 'function') {
+      throw new Error('State lock assertion must be a function');
+    }
+    this.assertWritable = assertWritable;
   }
 
   read() {
@@ -97,6 +107,11 @@ class JsonStore {
     }
     const clonedResult = clone(result);
     validateState(state);
+    // Re-assert lock ownership immediately before committing, so a mutation cannot land after the
+    // exclusive state lock has been released, lost, or taken over by another adapter process.
+    if (this.assertWritable !== undefined) {
+      this.assertWritable();
+    }
     this._writeState(state);
     return clonedResult;
   }

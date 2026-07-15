@@ -797,6 +797,11 @@ function createRpcHandlers(rawOptions) {
 
   async function recoverStartup(capability) {
     assertStateLockHeld(capability, config.stateFile);
+    // From here on, every durable state mutation re-asserts that this exclusive lock is still
+    // held before it writes, so no write can land after the lock is lost or taken over.
+    if (typeof journal.store?.bindLockAssertion === 'function') {
+      journal.store.bindLockAssertion(() => assertStateLockHeld(capability, config.stateFile));
+    }
     const recovered = [];
     for (const persisted of journal.list()) {
       if (persisted.state === 'confirmed' || persisted.state === 'failed') continue;

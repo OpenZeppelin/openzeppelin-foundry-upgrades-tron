@@ -23,10 +23,15 @@ directory and backups with equivalent permissions. The default
 `.openzeppelin-upgrades/` directory and all `.env` variants except the example
 are ignored by Git. Never commit either one.
 
-One kernel-backed lock protects each canonical state path. Corrupt or
-unsupported state fails closed instead of being reset. Restart recovery queries
-or rebroadcasts the already persisted signed native transaction; it never
-silently builds a replacement transaction.
+A single advisory lock protects each canonical (realpath) state path. It is a
+loopback TCP reservation, local to the host's network namespace — not a
+filesystem or cross-host lock — keyed on a hash of the canonical state path, so
+relative or symlinked aliases resolve to the same lock. The durable store reads
+and writes that same canonical state path, and every state mutation re-asserts
+that the lock is still held before it commits, so no write lands after the lock
+is released or taken over. Corrupt or unsupported state fails closed instead of
+being reset. Restart recovery queries or rebroadcasts the already persisted
+signed native transaction; it never silently builds a replacement transaction.
 
 ## Supported transaction and simulation surface
 

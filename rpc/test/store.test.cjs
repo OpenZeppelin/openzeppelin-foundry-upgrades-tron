@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { acquireStateLock } = require('../state-lock.cjs');
+const { acquireStateLock, assertStateLockHeld } = require('../state-lock.cjs');
 const { JsonStore, STORE_VERSION } = require('../store.cjs');
 
 function temporaryState(t) {
@@ -166,6 +166,33 @@ test('writes through a symlinked state path to the canonical target the lock has
   const lock = await acquireStateLock(realPath);
   t.after(() => lock.release());
   await assert.rejects(acquireStateLock(aliasPath), /state is already locked/i);
+});
+
+test('re-asserts the state lock on every mutation and refuses to write once it is lost', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-store-lock-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const statePath = path.join(directory, 'state.json');
+
+  const lock = await acquireStateLock(statePath);
+  const store = new JsonStore(statePath);
+  store.bindLockAssertion(() => assertStateLockHeld(lock, statePath));
+
+  // A mutation while the lock is held commits normally.
+  store.transaction('chain-a', chain => {
+    chain.value = 1;
+  });
+  assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { value: 1 });
+
+  // After the lock is released, every subsequent mutation is refused before it can write.
+  await lock.release();
+  assert.throws(
+    () =>
+      store.transaction('chain-a', chain => {
+        chain.value = 2;
+      }),
+    /no longer held/i,
+  );
+  assert.deepEqual(new JsonStore(statePath).readChain('chain-a'), { value: 1 });
 });
 
 test('rejects unsafe chain identities', t => {
