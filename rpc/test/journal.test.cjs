@@ -11,6 +11,8 @@ const { JsonStore } = require('../store.cjs');
 
 const SOURCE_BYTES = `0x${'01'.repeat(97)}`;
 const SOURCE_HASH = keccak256(SOURCE_BYTES);
+const SECOND_BYTES = `0x${'02'.repeat(97)}`;
+const SECOND_HASH = keccak256(SECOND_BYTES);
 const NATIVE_BYTES = `0a02ABcd${'42'.repeat(40)}`;
 const NATIVE_TXID = `${'cd'.repeat(32)}`;
 const FROM = `0x${'11'.repeat(20)}`;
@@ -94,6 +96,35 @@ test('durably follows received -> native-built -> broadcast -> confirmed', t => 
     receipt,
   });
   assert.deepEqual(journal.get(SOURCE_HASH), journal.recordConfirmed(SOURCE_HASH, receipt));
+});
+
+test('refuses a second native transaction that reuses an in-flight (from, nonce)', t => {
+  const { journal } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+  journal.receive(SECOND_BYTES);
+
+  // The first canonical transaction reserves (FROM, nonce 0).
+  assert.equal(recordPrepared(journal).state, 'native-built');
+
+  // A distinct canonical transaction from the same sender at the same nonce is refused before it
+  // can build, so the same Ethereum nonce cannot be broadcast as two different native transactions.
+  assert.throws(
+    () => journal.recordNativeBuilt(SECOND_HASH, nativeTransaction(), preparation()),
+    /nonce is already in flight/i,
+  );
+  assert.equal(journal.get(SECOND_HASH).state, 'received');
+  assert.throws(() => journal.recordBroadcast(SECOND_HASH), /received.*broadcast/i);
+});
+
+test('allows a same-nonce retry only after the prior native transaction failed before broadcast', t => {
+  const { journal } = fixture(t);
+  journal.receive(SOURCE_BYTES);
+  journal.receive(SECOND_BYTES);
+  journal.recordFailed(SOURCE_HASH, { code: 'UNSUPPORTED_TRANSACTION', message: 'rejected before build' });
+
+  // The first attempt failed before producing a broadcastable native transaction, so a distinct
+  // transaction reusing the same nonce is admitted.
+  assert.equal(journal.recordNativeBuilt(SECOND_HASH, nativeTransaction(), preparation()).state, 'native-built');
 });
 
 test('rejects missing records and illegal state transitions', t => {

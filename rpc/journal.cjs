@@ -500,6 +500,22 @@ function recordNativeBuiltInChain(chain, sourceTransactionHash, nativeTransactio
   if (record.buildClaimOwner !== validateOwnerId(ownerId)) {
     throw new Error('Native build claim is owned by another journal instance');
   }
+  // Admit at most one broadcastable native transaction per (sender, nonce). A distinct source
+  // transaction reusing an Ethereum nonce that is already in flight (native-built/broadcast),
+  // confirmed, or was broadcast then retained on failure is refused, so the same nonce cannot be
+  // double-executed as two different native transactions.
+  const { from, nonce } = prepared.operationContext;
+  for (const [otherHash, other] of Object.entries(journal.records)) {
+    if (otherHash === hash || other.operationContext === undefined) continue;
+    const occupiesNonce =
+      other.state === 'native-built' ||
+      other.state === 'broadcast' ||
+      other.state === 'confirmed' ||
+      (other.state === 'failed' && own(other, 'receipt'));
+    if (occupiesNonce && other.operationContext.from === from && other.operationContext.nonce === nonce) {
+      throw new Error('Native operation nonce is already in flight for this sender');
+    }
+  }
   const next = {
     sourceTransactionHash: record.sourceTransactionHash,
     signedEthereumTransaction: record.signedEthereumTransaction,
