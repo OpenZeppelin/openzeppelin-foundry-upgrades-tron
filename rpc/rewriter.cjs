@@ -473,7 +473,9 @@ function implementationDeclares(abi, functionFragment) {
   } catch {
     return false;
   }
-  return declared !== null && declared !== undefined && declared.format('sighash') === functionFragment.format('sighash');
+  return (
+    declared !== null && declared !== undefined && declared.format('sighash') === functionFragment.format('sighash')
+  );
 }
 
 async function rewriteUupsCall(data, abi, deps) {

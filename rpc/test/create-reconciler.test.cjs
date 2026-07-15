@@ -220,8 +220,14 @@ test('concurrent factory transactions reserve distinct predicted children at pre
   // and a distinct predicted child address rather than colliding on the same one.
   assert.equal(planA.attempts[0].nonce, '1');
   assert.equal(planB.attempts[0].nonce, '2');
-  assert.equal(planA.attempts[0].predictedAddress, getCreateAddress({ from: factoryPredicted, nonce: 1 }).toLowerCase());
-  assert.equal(planB.attempts[0].predictedAddress, getCreateAddress({ from: factoryPredicted, nonce: 2 }).toLowerCase());
+  assert.equal(
+    planA.attempts[0].predictedAddress,
+    getCreateAddress({ from: factoryPredicted, nonce: 1 }).toLowerCase(),
+  );
+  assert.equal(
+    planB.attempts[0].predictedAddress,
+    getCreateAddress({ from: factoryPredicted, nonce: 2 }).toLowerCase(),
+  );
   assert.notEqual(planA.attempts[0].predictedAddress, planB.attempts[0].predictedAddress);
   assert.equal(reconciler.nextNonce(factoryPredicted), 3n);
 });
@@ -503,8 +509,7 @@ test('rejects a CREATE2 child attempt before journal-prep and broadcast', t => {
   const create2Attempt = { ...attempt(ROOT_ACTUAL, CHILD_ACTUAL_1), kind: 'CREATE2' };
 
   assert.throws(
-    () =>
-      reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), simulation([create2Attempt]), context()),
+    () => reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), simulation([create2Attempt]), context()),
     error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE2_REJECTED',
   );
   // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.

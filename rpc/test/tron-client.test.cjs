@@ -477,9 +477,7 @@ test('preserves an attempt kind reported by the exact simulation trace', async (
           txid,
           trace_complete: true,
           energy_used: 5,
-          child_create_attempts: [
-            { caller_address: OWNER, created_address: CONTRACT, success: true, kind: 'create2' },
-          ],
+          child_create_attempts: [{ caller_address: OWNER, created_address: CONTRACT, success: true, kind: 'create2' }],
         };
       },
     },
