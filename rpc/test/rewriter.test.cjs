@@ -657,6 +657,39 @@ test('allows deployment creation bytecode with no embedded predicted address', a
   assert.equal(rewritten.creationBytecode, '0x73aabbccddeeff00112233445566778899aabbcc600052');
 });
 
+test('rejects a predicted address smuggled through a numeric constructor field', async () => {
+  // A uint256 constructor argument is opaque to the address rewriter, so a predicted address
+  // supplied as a uint256 reaches the final initcode verbatim. The full-initcode opaque scan must
+  // reject it (neither rewritten to its actual address nor left to slip through).
+  const match = constructorMatch({
+    fullyQualifiedName: 'contracts/Sneaky.sol:Sneaky',
+    inputs: [{ name: 'slot', type: 'uint256' }],
+    values: [BigInt(PREDICTED_OWNER)],
+  });
+
+  await assert.rejects(rewriteDeployment(match, dependencies()), error => error.code === 'OPAQUE_PREDICTED_ADDRESS');
+});
+
+test('allows a genuine numeric constructor field that is not a known predicted address', async () => {
+  const match = constructorMatch({
+    fullyQualifiedName: 'contracts/Ok.sol:Ok',
+    inputs: [{ name: 'slot', type: 'uint256' }],
+    values: [123_456n],
+  });
+
+  const rewritten = await rewriteDeployment(match, dependencies());
+  assert.equal(AbiCoder.defaultAbiCoder().decode(['uint256'], rewritten.constructorData)[0], 123_456n);
+});
+
+test('rejects a predicted address smuggled through a numeric ABI calldata field', async () => {
+  const abi = ['function stash(uint256 slot)'];
+  const calldata = new Interface(abi).encodeFunctionData('stash', [BigInt(PREDICTED_OWNER)]);
+  await assert.rejects(
+    rewriteCalldata(calldata, abi, dependencies()),
+    error => error.code === 'OPAQUE_PREDICTED_ADDRESS',
+  );
+});
+
 test('reconciles one and repeated Forge linked-library ranges', async () => {
   const prefix = '6000';
   const middle = '6001';

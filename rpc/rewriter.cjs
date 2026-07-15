@@ -196,7 +196,13 @@ function decodeCalldata(data, abi) {
 async function rewriteCalldata(data, abi, deps) {
   const { iface, parsed } = decodeCalldata(data, abi);
   const values = await rewriteAbiValues(parsed.fragment.inputs, parsed.args.toArray(), deps);
-  return iface.encodeFunctionData(parsed.fragment, values);
+  const encoded = iface.encodeFunctionData(parsed.fragment, values);
+  // A predicted address supplied through a numeric ABI field (uint*/int*) is opaque to
+  // rewriteParam and would reach the final calldata verbatim, neither rewritten to its actual
+  // address nor scanned. Fail-closed opaque-scan the re-encoded calldata so a known predicted
+  // address hidden in a numeric field is rejected (OPAQUE_PREDICTED_ADDRESS).
+  await assertOpaqueBytesSafe(encoded, deps);
+  return encoded;
 }
 
 function artifactAbi(artifactResult) {
@@ -411,15 +417,18 @@ async function rewriteDeployment(match, deps) {
     rewrittenValues,
   );
   const creationBytecode = await rewriteLinkedLibraries(match, deps);
-  // R1: opaque-scan the final creation/runtime bytecode for known predicted addresses. Linked
-  // libraries were already resolved to their actual addresses above; a predicted address baked
-  // into the contract code itself would never be rewritten, so it fails closed here.
-  await assertOpaqueBytesSafe(creationBytecode, deps);
+  const initcode = `${creationBytecode}${constructorData.slice(2)}`;
+  // Opaque-scan the FULL final initcode (creation bytecode + encoded constructor args) for
+  // known predicted addresses. Linked libraries and address-typed constructor args were already
+  // resolved to their actual addresses above; a predicted address baked into the contract code, or
+  // smuggled through a numeric constructor field (uint*/int*, which rewriteParam leaves untouched),
+  // would never be rewritten, so it fails closed here.
+  await assertOpaqueBytesSafe(initcode, deps);
   return {
     ...match,
     creationBytecode,
     constructorData,
-    initcode: `${creationBytecode}${constructorData.slice(2)}`,
+    initcode,
   };
 }
 
