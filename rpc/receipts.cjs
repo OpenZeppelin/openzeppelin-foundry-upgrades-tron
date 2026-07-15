@@ -97,7 +97,16 @@ function internalCreateAttempts(receipt) {
     if (typeof transaction.note !== 'string') {
       throw new Error(`Confirmed receipt internal transaction ${index} has a missing or malformed note`);
     }
-    return transaction.note.toLowerCase() === 'create';
+    // Normalize surrounding whitespace and trailing NUL padding before the `create` comparison so a
+    // real child creation reported with padding noise (e.g. "create ", " create ", or the hex
+    // 63726561746500 which decodes to "create\0") is not silently classified as a non-CREATE and
+    // hidden. Interior content is untouched, so a present-but-different note stays non-create.
+    return (
+      transaction.note
+        .replace(/^[\s\0]+/, '')
+        .replace(/[\s\0]+$/, '')
+        .toLowerCase() === 'create'
+    );
   });
 }
 

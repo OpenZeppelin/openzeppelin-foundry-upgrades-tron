@@ -294,6 +294,39 @@ test('fails closed on an internal transaction whose note is missing or malformed
   assert.throws(() => internalCreateTransactions(translated), /note/i);
 });
 
+test('classifies whitespace-padded and NUL-padded "create" notes as CREATE', () => {
+  // A runtime-decoded note can carry trailing NUL padding or surrounding whitespace. These must be
+  // normalized before the `create` comparison so a real child creation is not hidden behind padding
+  // noise, while a genuinely different note stays non-create and null/non-string still fails closed.
+  for (const note of ['create ', ' create ', 'create ']) {
+    const receipt = { tron: { internalTransactions: [{ hash: 'padded', note, rejected: false }] } };
+    assert.deepEqual(
+      internalCreateAttempts(receipt).map(transaction => transaction.hash),
+      ['padded'],
+      `note ${JSON.stringify(note)} should classify as CREATE`,
+    );
+  }
+
+  // A present-but-unrecognized note remains non-create (legitimate).
+  assert.deepEqual(
+    internalCreateAttempts({ tron: { internalTransactions: [{ hash: 'x', note: 'createx', rejected: false }] } }),
+    [],
+  );
+
+  // End-to-end: a raw hex note that decodes to "create\0" is still classified as a CREATE.
+  const info = confirmedInfo();
+  info.internal_transactions[0].note = '63726561746500'; // decodes to "create "
+  const translated = translateReceipt(
+    { transaction: nativeTransaction(), info },
+    { sourceTransactionHash: SOURCE_HASH, predictedContractAddress: PREDICTED_CONTRACT },
+  );
+  assert.equal(translated.tron.internalTransactions[0].note, 'create ');
+  assert.deepEqual(
+    internalCreateTransactions(translated).map(transaction => transaction.hash),
+    [`0x${'ee'.repeat(32)}`],
+  );
+});
+
 test('adopts the runtime note decoder, tolerating an optional 0x prefix on hex markers', () => {
   const prefixed = confirmedInfo();
   prefixed.internal_transactions[0].note = `0x${Buffer.from('create').toString('hex')}`;
