@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { internalCreateTransactions, translateReceipt } = require('../receipts.cjs');
+const { internalCreateAttempts, internalCreateTransactions, translateReceipt } = require('../receipts.cjs');
 
 const SOURCE_HASH = `0x${'aa'.repeat(32)}`;
 const NATIVE_TXID = 'bb'.repeat(32);
@@ -268,4 +268,42 @@ test('extracts only successful internal CREATE transactions while preserving rec
     ['first', 'second'],
   );
   assert.throws(() => internalCreateTransactions({}), /internal transaction/i);
+});
+
+test('fails closed on an internal transaction whose note is missing or malformed', () => {
+  // A missing/malformed note must be rejected, never silently classified as a non-CREATE.
+  for (const note of [undefined, null, 123, {}, ['create']]) {
+    assert.throws(
+      () => internalCreateAttempts({ tron: { internalTransactions: [{ hash: 'x', note, rejected: false }] } }),
+      /note/i,
+    );
+    assert.throws(
+      () => internalCreateTransactions({ tron: { internalTransactions: [{ hash: 'x', note, rejected: false }] } }),
+      /note/i,
+    );
+  }
+
+  // End-to-end: a non-string raw note decodes to null and the classifier rejects it.
+  const info = confirmedInfo();
+  info.internal_transactions[0].note = 42;
+  const translated = translateReceipt(
+    { transaction: nativeTransaction(), info },
+    { sourceTransactionHash: SOURCE_HASH, predictedContractAddress: PREDICTED_CONTRACT },
+  );
+  assert.equal(translated.tron.internalTransactions[0].note, null);
+  assert.throws(() => internalCreateTransactions(translated), /note/i);
+});
+
+test('adopts the runtime note decoder, tolerating an optional 0x prefix on hex markers', () => {
+  const prefixed = confirmedInfo();
+  prefixed.internal_transactions[0].note = `0x${Buffer.from('create').toString('hex')}`;
+  const translated = translateReceipt(
+    { transaction: nativeTransaction(), info: prefixed },
+    { sourceTransactionHash: SOURCE_HASH, predictedContractAddress: PREDICTED_CONTRACT },
+  );
+  assert.equal(translated.tron.internalTransactions[0].note, 'create');
+  assert.deepEqual(
+    internalCreateTransactions(translated).map(transaction => transaction.hash),
+    [`0x${'ee'.repeat(32)}`],
+  );
 });

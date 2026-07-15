@@ -1,3 +1,5 @@
+const { decodeInternalTransactionNote } = require('@openzeppelin/tron-runtime');
+
 const { toEvmAddress } = require('./address-codec.cjs');
 
 const HASH_PATTERN = /^(?:0x)?[0-9a-f]{64}$/i;
@@ -58,12 +60,6 @@ function decodeResultMessage(value) {
   return Buffer.from(value, 'hex').toString('utf8');
 }
 
-function decodeInternalNote(value) {
-  if (typeof value !== 'string') return '';
-  if (/^(?:[0-9a-f]{2})+$/i.test(value)) return Buffer.from(value, 'hex').toString('utf8');
-  return value;
-}
-
 function contractData(transaction) {
   const contract = transaction?.raw_data?.contract?.[0];
   if (!isObject(contract) || !isObject(contract.parameter) || !isObject(contract.parameter.value)) {
@@ -81,7 +77,7 @@ function translateInternalTransaction(transaction, resolveAddress) {
     hash: normalizeHash(transaction.hash, 'internal transaction hash'),
     callerAddress: resolvedAddress(transaction.caller_address, resolveAddress),
     transferToAddress: resolvedAddress(transaction.transferTo_address, resolveAddress),
-    note: decodeInternalNote(transaction.note),
+    note: decodeInternalTransactionNote(transaction.note),
     rejected: transaction.rejected === true,
     callValueInfo: Array.isArray(transaction.callValueInfo) ? structuredClone(transaction.callValueInfo) : [],
   };
@@ -91,10 +87,18 @@ function internalCreateAttempts(receipt) {
   if (!isObject(receipt?.tron) || !Array.isArray(receipt.tron.internalTransactions)) {
     throw new Error('Confirmed receipt has no internal transaction list');
   }
-  return receipt.tron.internalTransactions.filter(
-    transaction =>
-      isObject(transaction) && typeof transaction.note === 'string' && transaction.note.toLowerCase() === 'create',
-  );
+  // Classify fail-closed: the wrapper stores the runtime-decoded note (a string, or
+  // null when the raw note was absent/malformed). A missing or malformed note is rejected
+  // instead of being silently treated as a non-CREATE, which would hide an unaccounted child.
+  return receipt.tron.internalTransactions.filter((transaction, index) => {
+    if (!isObject(transaction)) {
+      throw new Error(`Confirmed receipt internal transaction ${index} is malformed`);
+    }
+    if (typeof transaction.note !== 'string') {
+      throw new Error(`Confirmed receipt internal transaction ${index} has a missing or malformed note`);
+    }
+    return transaction.note.toLowerCase() === 'create';
+  });
 }
 
 function internalCreateTransactions(receipt) {
