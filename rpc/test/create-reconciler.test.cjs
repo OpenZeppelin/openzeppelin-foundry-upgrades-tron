@@ -173,6 +173,56 @@ test('advances caller nonces for failed attempts and maps successful children in
   assert.equal(confirmed.state, 'confirmed');
 });
 
+test('concurrent factory transactions reserve distinct predicted children at prepare', t => {
+  const { journal, reconciler } = fixture(t);
+  const secondBytes = `0x${'02'.repeat(97)}`;
+  const secondHash = keccak256(secondBytes);
+  journal.receive(secondBytes);
+
+  const factoryPredicted = EXISTING_PREDICTED;
+  const factoryActual = EXISTING_ACTUAL;
+  const callContext = nonce =>
+    context({
+      kind: 'call',
+      to: factoryPredicted,
+      predictedContractAddress: null,
+      actualTarget: factoryActual,
+      contractKind: null,
+      artifactIdentity: null,
+      provenanceHash: null,
+      nonce,
+    });
+  const factorySimulation = child => ({
+    mode: 'exact-signed',
+    nativeTransactionId: NATIVE_TXID,
+    simulationRootAddress: factoryActual,
+    traceComplete: true,
+    childCreateAttempts: [attempt(factoryActual, child)],
+  });
+
+  const planA = reconciler.recordPreparedNative(
+    SOURCE_HASH,
+    nativeTransaction(),
+    factorySimulation(CHILD_ACTUAL_1),
+    callContext('0'),
+  ).childCreatePlan;
+  const planB = reconciler.recordPreparedNative(
+    secondHash,
+    nativeTransaction(),
+    factorySimulation(CHILD_ACTUAL_2),
+    callContext('1'),
+  ).childCreatePlan;
+
+  // The first factory transaction reserved child nonce 1 at prepare, so the second derives nonce 2
+  // and a distinct predicted child address rather than colliding on the same one.
+  assert.equal(planA.attempts[0].nonce, '1');
+  assert.equal(planB.attempts[0].nonce, '2');
+  assert.equal(planA.attempts[0].predictedAddress, getCreateAddress({ from: factoryPredicted, nonce: 1 }).toLowerCase());
+  assert.equal(planB.attempts[0].predictedAddress, getCreateAddress({ from: factoryPredicted, nonce: 2 }).toLowerCase());
+  assert.notEqual(planA.attempts[0].predictedAddress, planB.attempts[0].predictedAddress);
+  assert.equal(reconciler.nextNonce(factoryPredicted), 3n);
+});
+
 test('persists payload-relative mode, normalizes its synthetic root, and binds only confirmed actual children', t => {
   const { addressMap, journal, reconciler } = fixture(t);
   const syntheticRoot = `0x${'77'.repeat(20)}`;
@@ -557,7 +607,9 @@ for (const mismatch of ['count', 'order']) {
     assert.deepEqual(retained.receipt, mismatchedReceipt);
     assert.deepEqual(retained.childCreatePlan, plan);
     assert.equal(addressMap.list().length, 0);
-    assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
+    // The two child nonces were reserved at prepare and stay reserved: the on-chain transaction
+    // was broadcast, so its nonces are consumed even though reconciliation failed.
+    assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 3n);
   });
 }
 
@@ -663,7 +715,8 @@ test('retains a conflict that appears only after successful simulation preflight
   assert.equal(journal.get(SOURCE_HASH).state, 'failed');
   assert.equal(journal.get(SOURCE_HASH).receipt.tron.internalTransactions.length, 1);
   assert.equal(addressMap.toActual(predicted), CHILD_ACTUAL_3);
-  assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
+  // The child nonce was reserved at prepare and remains reserved after the post-broadcast conflict.
+  assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 2n);
 });
 
 test('binds every top-level deployment receipt field before publishing mappings', async t => {
@@ -782,13 +835,15 @@ test('normalizes equivalent hash and address encodings while binding a deploymen
   assert.equal(addressMap.toActual(ROOT_PREDICTED), ROOT_ACTUAL);
 });
 
-test('refuses a stale pending plan after another confirmation advances its caller counter', t => {
+test('refuses a reconcile whose reserved caller counter has regressed', t => {
   const { journal, reconciler, store } = fixture(t);
   prepareAndBroadcast(journal, reconciler, [attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]);
+  // Preparation reserved the caller counter to nonce 2. Corrupt it back below the reservation to
+  // simulate a lost/rolled-back reservation; reconciliation must refuse rather than double-map.
   store.transaction(CHAIN, chain => {
     chain.childCreateReconciliation = {
       version: 1,
-      nextNonceByCaller: { [ROOT_PREDICTED]: '2' },
+      nextNonceByCaller: { [ROOT_PREDICTED]: '1' },
     };
   });
 
@@ -797,5 +852,5 @@ test('refuses a stale pending plan after another confirmation advances its calle
     error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_COUNTER_CONFLICT',
   );
   assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 2n);
+  assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
 });

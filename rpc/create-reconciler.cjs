@@ -348,6 +348,17 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
   };
 }
 
+// Advance the per-caller child-CREATE nonce counters at prepare time so a concurrent
+// preparation for the same caller reads the already-reserved counter and derives a distinct
+// predicted child, instead of both reading a stale base and reserving the same predicted address.
+function reserveChildCreateCounters(chain, childCreatePlan) {
+  const reconciliation = requireReconciliation(chain);
+  for (const [caller, final] of Object.entries(childCreatePlan.counterFinals)) {
+    reconciliation.nextNonceByCaller[caller] = final;
+  }
+  chain.childCreateReconciliation = reconciliation;
+}
+
 function receiptCreations(receipt, nativeTransactionId) {
   if (!isObject(receipt) || !isObject(receipt.tron)) {
     throw new CreateReconciliationError('CHILD_CREATE_MISMATCH', 'Confirmed receipt has no internal transaction list');
@@ -496,14 +507,22 @@ class CreateReconciler {
     let preparation;
     try {
       return this.store.transaction(this.chainIdentity, chain => {
+        const priorState = requireJournal(chain).records[sourceTransactionHash.toLowerCase()]?.state;
         preparation = derivePlan(chain, simulation, operationContext, nativeTransaction.nativeTransactionId);
-        return recordNativeBuiltInChain(
+        const record = recordNativeBuiltInChain(
           chain,
           sourceTransactionHash,
           nativeTransaction,
           preparation,
           this.journal.ownerId,
         );
+        // Reserve the child-CREATE nonces only on the fresh received -> native-built transition,
+        // atomically with recording the native transaction, so concurrent factory transactions can
+        // never reserve the same predicted child.
+        if (priorState === 'received') {
+          reserveChildCreateCounters(chain, preparation.childCreatePlan);
+        }
+        return record;
       });
     } catch (error) {
       const failure =
@@ -582,11 +601,14 @@ class CreateReconciler {
         const successfulCreations = creations.filter(creation => creation.success);
 
         const reconciliation = requireReconciliation(chain);
-        for (const [caller, base] of Object.entries(record.childCreatePlan.counterBases)) {
-          if ((reconciliation.nextNonceByCaller[caller] ?? '1') !== base) {
+        // The counters were reserved at recordPreparedNative. Reconciliation only verifies the
+        // reservation is still intact — the counter must not have regressed below the reserved
+        // final — and never advances it a second time.
+        for (const [caller, final] of Object.entries(record.childCreatePlan.counterFinals)) {
+          if (BigInt(reconciliation.nextNonceByCaller[caller] ?? '1') < BigInt(final)) {
             throw new CreateReconciliationError(
               'CHILD_CREATE_COUNTER_CONFLICT',
-              `Child CREATE counter changed for ${caller}`,
+              `Child CREATE counter regressed for ${caller}`,
             );
           }
         }
@@ -628,9 +650,6 @@ class CreateReconciler {
               sourceTransaction: record.sourceTransactionHash,
             });
           }
-        }
-        for (const [caller, next] of Object.entries(record.childCreatePlan.counterFinals)) {
-          reconciliation.nextNonceByCaller[caller] = next;
         }
         chain.childCreateReconciliation = reconciliation;
         const persistedReceipt = rewriteInternalCreations(receipt, actualToPredicted);
