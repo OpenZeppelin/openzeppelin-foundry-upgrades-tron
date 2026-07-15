@@ -12,7 +12,7 @@ test('package exposes Solidity sources and the RPC adapter', () => {
 
   assert.equal(pkg.name, '@openzeppelin/foundry-upgrades-tron');
   assert.deepEqual(pkg.files, ['src/**/*', 'rpc/*.cjs', 'rpc/SECURITY.md']);
-  assert.equal(pkg.engines.node, '>=20');
+  assert.equal(pkg.engines.node, '>=22');
   assert.equal(pkg.scripts.test, 'npm run test:package && npm run test:solidity && npm run test:rpc');
   assert.equal(pkg.scripts['test:package'], 'node scripts/test-package.cjs');
   assert.equal(pkg.scripts['test:solidity'], 'node scripts/test-solidity.cjs');
