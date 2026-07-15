@@ -65,7 +65,10 @@ function simulation(attempts) {
     nativeTransactionId: NATIVE_TXID,
     simulationRootAddress: ROOT_ACTUAL,
     traceComplete: true,
-    childCreateAttempts: attempts,
+    // A node that supports exact-signed simulation labels every child CREATE with its opcode kind;
+    // default unlabelled attempts to plain CREATE so fixtures reflect that contract, while attempts
+    // that set an explicit kind (e.g. CREATE2) are preserved verbatim.
+    childCreateAttempts: attempts.map(entry => (entry.kind === undefined ? { ...entry, kind: 'CREATE' } : entry)),
   };
 }
 
@@ -197,7 +200,7 @@ test('concurrent factory transactions reserve distinct predicted children at pre
     nativeTransactionId: NATIVE_TXID,
     simulationRootAddress: factoryActual,
     traceComplete: true,
-    childCreateAttempts: [attempt(factoryActual, child)],
+    childCreateAttempts: [{ ...attempt(factoryActual, child), kind: 'CREATE' }],
   });
 
   const planA = reconciler.recordPreparedNative(
@@ -503,6 +506,30 @@ test('rejects a CREATE2 child attempt before journal-prep and broadcast', t => {
     () =>
       reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), simulation([create2Attempt]), context()),
     error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE2_REJECTED',
+  );
+  // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.
+  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /failed.*broadcast/i);
+});
+
+test('fails closed on an exact-signed child create whose opcode kind is absent', t => {
+  const { journal, reconciler } = fixture(t);
+  // A node that supports exact-signed simulation but omits the child-CREATE opcode kind leaves us
+  // unable to positively confirm the child is a nonce-based CREATE (getCreateAddress is only valid
+  // for CREATE). An unmarked child could be CREATE2, so it must fail closed before any broadcast
+  // rather than being assumed away.
+  const kindlessSimulation = {
+    mode: 'exact-signed',
+    nativeTransactionId: NATIVE_TXID,
+    simulationRootAddress: ROOT_ACTUAL,
+    traceComplete: true,
+    childCreateAttempts: [attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)], // deliberately carries no kind
+  };
+
+  assert.throws(
+    () => reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), kindlessSimulation, context()),
+    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_KIND_UNKNOWN',
   );
   // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.
   assert.equal(journal.get(SOURCE_HASH).state, 'failed');

@@ -277,9 +277,9 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
     if (!isObject(rawAttempt) || typeof rawAttempt.success !== 'boolean') {
       throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', `Invalid child CREATE attempt ${index}`);
     }
-    // TC1: reject CREATE2 before journal-prep/broadcast. The simulation trace preserves the child
-    // opcode kind verbatim; native CREATE address prediction (getCreateAddress) is only valid for
-    // nonce-based CREATE, so any CREATE2 (or otherwise non-CREATE kind) fails closed pre-broadcast.
+    // Reject CREATE2 before journal-prep/broadcast. The exact simulation trace preserves the
+    // child opcode kind verbatim; native CREATE address prediction (getCreateAddress) is only valid
+    // for nonce-based CREATE, so any CREATE2 (or otherwise non-CREATE kind) fails closed pre-broadcast.
     if (rawAttempt.kind !== undefined) {
       if (typeof rawAttempt.kind !== 'string' || rawAttempt.kind.length === 0) {
         throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', `Invalid child CREATE attempt kind ${index}`);
@@ -290,6 +290,17 @@ function derivePlan(chain, simulation, rawOperationContext, nativeTransactionId)
           `Child CREATE attempt ${index} uses unsupported opcode ${rawAttempt.kind}`,
         );
       }
+    } else if (mode === 'exact-signed') {
+      // Fail-closed: the exact signed-transaction trace is expected to label every child CREATE
+      // with its opcode kind. When the kind is absent we cannot positively confirm the attempt is a
+      // nonce-based CREATE (getCreateAddress is only valid for CREATE), so a possibly-CREATE2 child
+      // must not be assumed away — reject pre-broadcast. The constant-simulation fallback never
+      // carries a kind and is bounded separately by assertConstantProfile (0 attempts, or exactly one
+      // canonical transparent-proxy ProxyAdmin CREATE), so it is intentionally excluded here.
+      throw new CreateReconciliationError(
+        'CHILD_CREATE_KIND_UNKNOWN',
+        `Child CREATE attempt ${index} is missing its opcode kind and cannot be confirmed as plain CREATE`,
+      );
     }
     if (rawAttempt.index !== undefined && rawAttempt.index !== index) {
       throw new CreateReconciliationError('INVALID_CHILD_CREATE_TRACE', 'Child CREATE attempt order is invalid');
