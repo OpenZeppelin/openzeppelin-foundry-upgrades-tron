@@ -13,7 +13,7 @@
     "url": "https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades-tron.git"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "openzeppelin-foundry-upgrades-tron": "rpc/cli.cjs"
@@ -36,6 +36,7 @@
     "prepack": "node scripts/require-package-contents.cjs"
   },
   "dependencies": {
+    "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
     "ethers": "6.17.0",
     "tronweb": "6.4.0"
   },

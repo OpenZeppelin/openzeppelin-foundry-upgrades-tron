@@ -1,9 +1,15 @@
-const { createHash } = require('node:crypto');
+const { TronWeb } = require('tronweb');
 
-const { concat, dataSlice, keccak256 } = require('ethers');
-const { TronWeb, utils } = require('tronweb');
+const {
+  buildCall: runtimeBuildCall,
+  buildCreate: runtimeBuildCreate,
+  nativeTxIdFromSignedBytes,
+  retryableTransportError,
+  serializeSignedTransaction,
+  signBuiltTransaction: runtimeSignBuiltTransaction,
+} = require('@openzeppelin/tron-runtime');
 
-const { toEvmAddress, toTronHexAddress } = require('./address-codec.cjs');
+const { nativeContractAddress, toEvmAddress, toTronHexAddress } = require('./address-codec.cjs');
 const { translateReceipt } = require('./receipts.cjs');
 
 const TXID_PATTERN = /^(?:0x)?[0-9a-f]{64}$/i;
@@ -37,101 +43,6 @@ function stripHex(value, label, allowEmpty = true) {
   const normalized = value.replace(/^0x/i, '').toLowerCase();
   if (!allowEmpty && normalized.length === 0) throw new Error(`Invalid ${label}`);
   return normalized;
-}
-
-function encodeVarint(value) {
-  let remaining = BigInt(value);
-  const encoded = [];
-  do {
-    let byte = Number(remaining & 0x7fn);
-    remaining >>= 7n;
-    if (remaining !== 0n) byte |= 0x80;
-    encoded.push(byte);
-  } while (remaining !== 0n);
-  return Buffer.from(encoded);
-}
-
-function readCanonicalVarint(bytes, offset, label) {
-  let value = 0n;
-  let shift = 0n;
-  for (let index = offset; index < bytes.length && index < offset + 10; index += 1) {
-    const byte = bytes[index];
-    value |= BigInt(byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) {
-      if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-        throw new Error(`Malformed signed native transaction protobuf ${label}`);
-      }
-      const encoded = encodeVarint(value);
-      const consumed = bytes.subarray(offset, index + 1);
-      if (!consumed.equals(encoded)) {
-        throw new Error(`Noncanonical signed native transaction protobuf ${label}`);
-      }
-      return { value: Number(value), offset: index + 1 };
-    }
-    shift += 7n;
-  }
-  throw new Error(`Overlong signed native transaction protobuf ${label}`);
-}
-
-function parseCanonicalSignedTransaction(signedNativeTransaction) {
-  const bytes = Buffer.from(normalizeSignedBytes(signedNativeTransaction), 'hex');
-  let offset = 0;
-  let rawData;
-  let signatureCount = 0;
-  const canonicalFields = [];
-  while (offset < bytes.length) {
-    const tag = readCanonicalVarint(bytes, offset, 'tag');
-    offset = tag.offset;
-    if (tag.value !== 0x0a && tag.value !== 0x12) {
-      throw new Error('Unsupported signed native transaction protobuf field');
-    }
-    if (tag.value === 0x0a && (rawData !== undefined || signatureCount !== 0)) {
-      throw new Error('Duplicate or out-of-order signed native transaction raw_data');
-    }
-    if (tag.value === 0x12 && rawData === undefined) {
-      throw new Error('Signed native transaction signature precedes raw_data');
-    }
-    const length = readCanonicalVarint(bytes, offset, 'length');
-    offset = length.offset;
-    const end = offset + length.value;
-    if (end > bytes.length) throw new Error('Malformed signed native transaction protobuf');
-    const payload = bytes.subarray(offset, end);
-    if (tag.value === 0x0a) {
-      if (payload.length === 0) throw new Error('Signed native transaction has empty raw_data');
-      rawData = bytes.subarray(offset, end);
-    } else {
-      if (payload.length !== 65) throw new Error('Signed native transaction signature must be 65 bytes');
-      signatureCount += 1;
-    }
-    canonicalFields.push(Buffer.from([tag.value]), encodeVarint(payload.length), payload);
-    offset = end;
-  }
-  if (rawData === undefined || rawData.length === 0) throw new Error('Signed native transaction is missing raw_data');
-  if (signatureCount === 0) throw new Error('Signed native transaction is missing a signature');
-  if (!Buffer.concat(canonicalFields).equals(bytes)) {
-    throw new Error('Noncanonical signed native transaction protobuf wrapper');
-  }
-  return { rawData, signatureCount };
-}
-
-function nativeTxIdFromSignedBytes(signedNativeTransaction) {
-  const { rawData } = parseCanonicalSignedTransaction(signedNativeTransaction);
-  return createHash('sha256').update(rawData).digest('hex');
-}
-
-function serializeSignedTransaction(transaction) {
-  if (!isObject(transaction) || !Array.isArray(transaction.signature) || transaction.signature.length === 0) {
-    throw new Error('Native transaction is not signed');
-  }
-  const protobuf = utils.transaction.txJsonToPb(transaction);
-  for (const signature of transaction.signature) {
-    const normalized = stripHex(signature, 'native transaction signature', false);
-    protobuf.addSignature(Uint8Array.from(utils.code.hexStr2byteArray(normalized)));
-  }
-  const serialized = utils.bytes.byteArray2hexStr(protobuf.serializeBinary()).toLowerCase();
-  const computedTxId = nativeTxIdFromSignedBytes(serialized);
-  if (normalizeTxId(transaction.txID) !== computedTxId) throw new Error('Native transaction ID mismatch');
-  return serialized;
 }
 
 function positiveInteger(value, label, fallback) {
@@ -207,11 +118,6 @@ function sameTronAddress(left, right, allowEmpty = false) {
   } catch {
     return false;
   }
-}
-
-function nativeContractAddress(nativeTransactionId, ownerAddress) {
-  const owner = toEvmAddress(ownerAddress).slice(2);
-  return dataSlice(keccak256(concat([`0x${normalizeTxId(nativeTransactionId)}`, `0x41${owner}`])), 12).toLowerCase();
 }
 
 function payloadFromSignedJson(signed, transaction) {
@@ -333,19 +239,6 @@ function constantCreateAttempts(response, allowOmitted = false) {
   });
 }
 
-const RETRYABLE_NETWORK_CODES = new Set([
-  'EAI_AGAIN',
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ENETDOWN',
-  'ENETUNREACH',
-  'EPIPE',
-  'ETIMEDOUT',
-  'UND_ERR_CONNECT_TIMEOUT',
-  'UND_ERR_HEADERS_TIMEOUT',
-  'UND_ERR_SOCKET',
-]);
-
 function numericHttpStatus(error) {
   const candidates = [error?.status, error?.statusCode, error?.response?.status, error?.code];
   for (const candidate of candidates) {
@@ -353,22 +246,6 @@ function numericHttpStatus(error) {
     if (typeof candidate === 'string' && /^[0-9]{3}$/.test(candidate)) return Number(candidate);
   }
   return undefined;
-}
-
-function retryableTransportError(error) {
-  const seen = new Set();
-  let current = error;
-  while ((typeof current === 'object' && current !== null) || typeof current === 'function') {
-    if (seen.has(current)) return false;
-    seen.add(current);
-    const status = numericHttpStatus(current);
-    if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status <= 599);
-    if (typeof current.code === 'string' && RETRYABLE_NETWORK_CODES.has(current.code.toUpperCase())) return true;
-    const message = typeof current.message === 'string' ? current.message : '';
-    if (/network|socket|reset|timed?\s*out|timeout|offline|outage|fetch failed/i.test(message)) return true;
-    current = current.cause;
-  }
-  return false;
 }
 
 class RetryableNativeQueryError extends Error {
@@ -427,52 +304,15 @@ class TronClient {
   }
 
   async signBuiltTransaction(transaction) {
-    if (!isObject(transaction)) throw new Error('Native transaction builder returned no transaction');
-    const signed = await this.tronWeb.trx.sign(transaction, this.config.privateKey);
-    const signedNativeTransaction = serializeSignedTransaction(signed);
-    return {
-      signedNativeTransaction,
-      nativeTransactionId: nativeTxIdFromSignedBytes(signedNativeTransaction),
-      transaction: signed,
-    };
+    return runtimeSignBuiltTransaction(this.tronWeb, transaction, this.config.privateKey);
   }
 
-  async buildCreate({ abi, bytecode, constructorData = '', ownerAddress, name = '', callValue = 0 } = {}) {
-    if (!Array.isArray(abi)) throw new Error('Invalid contract ABI');
-    const exactCallValue = normalizeCallValue(callValue);
-    const options = {
-      abi,
-      bytecode: stripHex(bytecode, 'contract bytecode', false),
-      callValue: exactCallValue,
-      feeLimit: this.config.feeLimit,
-      name,
-      rawParameter: stripHex(constructorData, 'constructor data'),
-    };
-    const transaction = await this.tronWeb.transactionBuilder.createSmartContract(
-      options,
-      this.ownerAddress(ownerAddress),
-    );
-    return this.signBuiltTransaction(transaction);
+  async buildCreate(options = {}) {
+    return runtimeBuildCreate(this.tronWeb, options, this.config);
   }
 
-  async buildCall({ contractAddress, data = '', ownerAddress, callValue = 0 } = {}) {
-    const exactCallValue = normalizeCallValue(callValue);
-    const wrapper = await this.tronWeb.transactionBuilder.triggerSmartContract(
-      toTronHexAddress(contractAddress),
-      '',
-      {
-        callValue: exactCallValue,
-        feeLimit: this.config.feeLimit,
-        input: stripHex(data, 'call data'),
-        txLocal: true,
-      },
-      [],
-      this.ownerAddress(ownerAddress),
-    );
-    if (!isObject(wrapper) || wrapper.result?.result !== true) {
-      throw new Error(`Native call prebuild failed${wrapper?.result?.message ? `: ${wrapper.result.message}` : ''}`);
-    }
-    return this.signBuiltTransaction(wrapper.transaction);
+  async buildCall(options = {}) {
+    return runtimeBuildCall(this.tronWeb, options, this.config);
   }
 
   async simulateSigned(signedNativeTransaction, expectedNativeTransactionId, builtTransaction, options = {}) {
