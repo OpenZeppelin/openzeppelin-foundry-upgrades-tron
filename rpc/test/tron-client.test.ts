@@ -1,23 +1,31 @@
-const assert = require('node:assert/strict');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import test from 'node:test';
 
-const { concat, dataSlice, keccak256 } = require('ethers');
-const { TronWeb, utils } = require('tronweb');
+import { concat, dataSlice, keccak256 } from 'ethers';
+import { TronWeb, utils } from 'tronweb';
 
-const {
+import {
   TronClient,
   nativeTxIdFromSignedBytes,
   retryableTransportError,
   serializeSignedTransaction,
-} = require('../tron-client.cjs');
-const { translateReceipt } = require('../receipts.cjs');
+  type TronTransport,
+} from '../../dist/rpc/tron-client.js';
+import { translateReceipt } from '../../dist/rpc/receipts.js';
+
+// Test-local fixtures (native TRON transaction/response payloads, including deliberately invalid
+// overrides) are deliberately loosely shaped, the same way the real caller-supplied input
+// rpc-src/tron-client.ts validates at runtime is. `any` is used deliberately throughout this file
+// for that content, matching rpc-src/tron-client.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
 const OWNER = `41${'11'.repeat(20)}`;
 const CONTRACT = `41${'22'.repeat(20)}`;
 
-function unsignedTransaction() {
-  const transaction = {
+function unsignedTransaction(): JsonAny {
+  const transaction: JsonAny = {
     visible: false,
     txID: '',
     raw_data_hex: '',
@@ -44,8 +52,8 @@ function unsignedTransaction() {
   return transaction;
 }
 
-function unsignedCreateTransaction(bytecode = '6000') {
-  const transaction = {
+function unsignedCreateTransaction(bytecode = '6000'): JsonAny {
+  const transaction: JsonAny = {
     visible: false,
     txID: '',
     raw_data_hex: '',
@@ -75,7 +83,7 @@ function unsignedCreateTransaction(bytecode = '6000') {
   return transaction;
 }
 
-function constantEcho(body, overrides = {}) {
+function constantEcho(body: JsonAny, overrides: JsonAny = {}): JsonAny {
   const transaction = unsignedTransaction();
   transaction.raw_data.contract[0].parameter.value = {
     owner_address: body.owner_address,
@@ -89,7 +97,7 @@ function constantEcho(body, overrides = {}) {
   return { ...transaction, ...overrides };
 }
 
-function constantCreateEcho(body, overrides = {}) {
+function constantCreateEcho(body: JsonAny, overrides: JsonAny = {}): JsonAny {
   const transaction = unsignedCreateTransaction(body.data);
   transaction.raw_data.contract[0].parameter.value.owner_address = body.owner_address;
   transaction.raw_data.contract[0].parameter.value.new_contract.origin_address = body.owner_address;
@@ -113,9 +121,9 @@ function signedFixture() {
   return utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
 }
 
-function encodeVarint(value) {
+function encodeVarint(value: number): Buffer {
   let remaining = BigInt(value);
-  const bytes = [];
+  const bytes: number[] = [];
   do {
     let byte = Number(remaining & 0x7fn);
     remaining >>= 7n;
@@ -125,7 +133,7 @@ function encodeVarint(value) {
   return Buffer.from(bytes);
 }
 
-function readTestVarint(bytes, offset) {
+function readTestVarint(bytes: Buffer, offset: number): { value: number; offset: number } {
   let value = 0;
   let shift = 0;
   for (;;) {
@@ -154,29 +162,47 @@ function signedWrapperParts() {
   };
 }
 
-function fixture(overrides = {}) {
-  const calls = [];
+interface FixtureOverrides {
+  config?: JsonAny;
+  tronWeb?: JsonAny;
+  transport?: TronTransport;
+  now?: () => number;
+  sleep?: (delay: number) => Promise<unknown>;
+  pollIntervalMs?: number;
+  receiptTimeoutMs?: number;
+  maxBroadcastAttempts?: number;
+  simulationReadinessTimeoutMs?: number;
+}
+
+function fixture(overrides: FixtureOverrides = {}) {
+  const calls: JsonAny[] = [];
   const tronWeb = {
     defaultAddress: { hex: OWNER },
     transactionBuilder: {
-      async createSmartContract(options, issuerAddress) {
+      async createSmartContract(options: JsonAny, issuerAddress: JsonAny) {
         calls.push({ method: 'createSmartContract', options, issuerAddress });
         return unsignedTransaction();
       },
-      async triggerSmartContract(address, selector, options, parameters, issuerAddress) {
+      async triggerSmartContract(
+        address: JsonAny,
+        selector: JsonAny,
+        options: JsonAny,
+        parameters: JsonAny,
+        issuerAddress: JsonAny,
+      ) {
         calls.push({ method: 'triggerSmartContract', address, selector, options, parameters, issuerAddress });
         return { result: { result: true }, transaction: unsignedTransaction() };
       },
     },
     trx: {
-      async sign(transaction, privateKey) {
+      async sign(transaction: JsonAny, privateKey: JsonAny) {
         calls.push({ method: 'sign', privateKey });
         return utils.crypto.signTransaction(privateKey, structuredClone(transaction));
       },
     },
   };
   const transport = {
-    async request(path, body) {
+    async request(path: JsonAny, body: JsonAny) {
       calls.push({ method: 'request', path, body });
       throw new Error(`Unexpected request: ${path}`);
     },
@@ -245,7 +271,7 @@ test('prebuilds and signs a native CreateSmartContract using normalized owner an
   assert.equal(calls[1].privateKey, PRIVATE_KEY);
   assert.match(built.signedNativeTransaction, /^[0-9a-f]+$/);
   assert.equal(built.nativeTransactionId, nativeTxIdFromSignedBytes(built.signedNativeTransaction));
-  assert.equal(built.nativeTransactionId, built.transaction.txID);
+  assert.equal(built.nativeTransactionId, (built.transaction as JsonAny).txID);
 });
 
 test('prebuilds a raw TriggerSmartContract call without ABI re-encoding', async () => {
@@ -289,7 +315,7 @@ test('accepts exact safe call values from bigint, decimal string, and number and
     await t.test(`rejects ${String(value)}`, async () => {
       const { calls, client } = fixture();
       await assert.rejects(
-        () => client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value }),
+        () => client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value } as JsonAny),
         /call value/i,
       );
       assert.equal(calls.length, 0);
@@ -308,7 +334,7 @@ test('uses TronWeb 6.4 to encode and sign the exact native create and trigger pr
   const client = new TronClient({
     config: { privateKey: PRIVATE_KEY, feeLimit: 1_000_000_000, fullHost: 'http://127.0.0.1:9090' },
     tronWeb,
-    transport: { request: async path => assert.fail(`Unexpected network request: ${path}`) },
+    transport: { request: async (path: string) => assert.fail(`Unexpected network request: ${path}`) },
   });
   const callValue = BigInt(Number.MAX_SAFE_INTEGER);
   const abi = [{ type: 'constructor', inputs: [], stateMutability: 'payable' }];
@@ -320,7 +346,10 @@ test('uses TronWeb 6.4 to encode and sign the exact native create and trigger pr
     name: 'Exact',
     callValue: callValue.toString(),
   });
-  const createRaw = utils.deserializeTx.deserializeTransaction('CreateSmartContract', created.transaction.raw_data_hex);
+  const createRaw = utils.deserializeTx.deserializeTransaction(
+    'CreateSmartContract',
+    (created.transaction as JsonAny).raw_data_hex,
+  );
   const createContract = createRaw.contract[0];
   assert.equal(createContract.type, 'CreateSmartContract');
   assert.equal(createContract.parameter.value.new_contract.bytecode, '60001234');
@@ -333,7 +362,10 @@ test('uses TronWeb 6.4 to encode and sign the exact native create and trigger pr
     data: '0x1234abcd',
     callValue,
   });
-  const callRaw = utils.deserializeTx.deserializeTransaction('TriggerSmartContract', called.transaction.raw_data_hex);
+  const callRaw = utils.deserializeTx.deserializeTransaction(
+    'TriggerSmartContract',
+    (called.transaction as JsonAny).raw_data_hex,
+  );
   const callContract = callRaw.contract[0];
   assert.equal(callContract.type, 'TriggerSmartContract');
   assert.equal(callContract.parameter.value.contract_address.toLowerCase(), CONTRACT);
@@ -417,7 +449,7 @@ test('simulates the exact signed transaction and returns a complete ordered chil
   const built = signedFixture();
   const signedBytes = serializeSignedTransaction(built);
   const txid = nativeTxIdFromSignedBytes(signedBytes);
-  const requests = [];
+  const requests: JsonAny[] = [];
   const { client } = fixture({
     transport: {
       async request(path, body) {
@@ -491,7 +523,7 @@ test('falls back only after explicit exact-endpoint absence and validates the si
   const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
   const signedBytes = serializeSignedTransaction(built);
   const txid = nativeTxIdFromSignedBytes(signedBytes);
-  const requests = [];
+  const requests: JsonAny[] = [];
   const syntheticChild = `41${'33'.repeat(20)}`;
   const { client } = fixture({
     transport: {
@@ -558,10 +590,10 @@ test('falls back only after explicit exact-endpoint absence and validates the si
 });
 
 test('derives constant-create fallback only from the byte-identical signed transaction JSON', async () => {
-  const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction('60006000f3'));
+  const built: JsonAny = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction('60006000f3'));
   const signedBytes = serializeSignedTransaction(built);
   const txid = nativeTxIdFromSignedBytes(signedBytes);
-  const requests = [];
+  const requests: JsonAny[] = [];
   const { client } = fixture({
     transport: {
       async request(path, body) {
@@ -661,7 +693,7 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
   const txid = nativeTxIdFromSignedBytes(signedBytes);
 
   await t.test('ambiguous exact failure', async () => {
-    const paths = [];
+    const paths: JsonAny[] = [];
     const { client } = fixture({
       transport: {
         async request(path) {
@@ -680,9 +712,9 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
       'HTTP-200 capability-looking message',
       Promise.resolve({ result: { result: false }, code: 'METHOD_NOT_FOUND', message: 'method not found' }),
     ],
-  ]) {
+  ] as [string, Promise<JsonAny>][]) {
     await t.test(name, async () => {
-      const paths = [];
+      const paths: JsonAny[] = [];
       const { client } = fixture({
         transport: {
           async request(path) {
@@ -699,11 +731,15 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
   for (const [name, mutate, pattern] of [
     [
       'payload mismatch',
-      transaction => (transaction.raw_data.contract[0].parameter.value.data = 'ffff'),
+      (transaction: JsonAny) => (transaction.raw_data.contract[0].parameter.value.data = 'ffff'),
       /echo.*payload/i,
     ],
-    ['contract revert', transaction => (transaction.ret = [{ contractRet: 'REVERT' }]), /revert|contract result/i],
-  ]) {
+    [
+      'contract revert',
+      (transaction: JsonAny) => (transaction.ret = [{ contractRet: 'REVERT' }]),
+      /revert|contract result/i,
+    ],
+  ] as [string, (transaction: JsonAny) => void, RegExp][]) {
     await t.test(name, async () => {
       const { client } = fixture({
         transport: {
@@ -724,12 +760,12 @@ test('does not fall back for ambiguous exact-simulation failures and rejects uns
 
 test('bounds readiness with an adapter-owned timer and aborts stalled simulation transport cleanly', async () => {
   const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction());
-  let observedSignal;
+  let observedSignal: AbortSignal | undefined;
   const { client } = fixture({
     simulationReadinessTimeoutMs: 25,
     transport: {
       request(_path, _body, options) {
-        observedSignal = options.signal;
+        observedSignal = options!.signal;
         return new Promise(() => {});
       },
     },
@@ -744,13 +780,13 @@ test('bounds readiness with an adapter-owned timer and aborts stalled simulation
   await assert.rejects(() => client.assertSimulationReady(), /readiness.*timed out/i);
   assert.ok(Date.now() - started >= 15);
   assert.ok(Date.now() - started < 500);
-  assert.equal(observedSignal.aborted, true);
+  assert.equal(observedSignal!.aborted, true);
 });
 
 test('refuses exact simulation when the capability is unavailable, mismatched, or incomplete', async t => {
   const signedBytes = serializeSignedTransaction(signedFixture());
   const txid = nativeTxIdFromSignedBytes(signedBytes);
-  const cases = [
+  const cases: JsonAny[] = [
     {
       name: 'unavailable',
       response: Promise.reject(Object.assign(new Error('404'), { status: 404 })),
@@ -789,8 +825,8 @@ test('refuses exact simulation when the capability is unavailable, mismatched, o
 test('queries an existing native transaction and distinguishes unconfirmed and absent results', async () => {
   const transaction = unsignedTransaction();
   const txid = transaction.txID;
-  const responses = [transaction, {}, {}, {}];
-  const requests = [];
+  const responses: JsonAny[] = [transaction, {}, {}, {}];
+  const requests: JsonAny[] = [];
   const { client } = fixture({
     transport: {
       async request(path, body) {
@@ -821,8 +857,8 @@ test('queries an existing native transaction and distinguishes unconfirmed and a
 test('rebroadcasts exact signed bytes, retries transient sends, and accepts a duplicate response', async () => {
   const signedBytes = serializeSignedTransaction(signedFixture());
   const txid = nativeTxIdFromSignedBytes(signedBytes);
-  const attempts = [];
-  const responses = [new Error('connection reset'), { result: true, txid }];
+  const attempts: JsonAny[] = [];
+  const responses: JsonAny[] = [new Error('connection reset'), { result: true, txid }];
   const { client } = fixture({
     maxBroadcastAttempts: 3,
     sleep: async () => {},
@@ -883,7 +919,7 @@ test('polls unconfirmed transactions until a confirmed translated receipt exists
   const sourceHash = `0x${'ab'.repeat(32)}`;
   const transaction = unsignedTransaction();
   const txid = transaction.txID;
-  const snapshots = [
+  const snapshots: JsonAny[] = [
     { transaction, info: null, confirmed: false },
     {
       transaction,
@@ -899,7 +935,7 @@ test('polls unconfirmed transactions until a confirmed translated receipt exists
       confirmed: true,
     },
   ];
-  const sleeps = [];
+  const sleeps: number[] = [];
   const { client } = fixture({ sleep: async delay => sleeps.push(delay), pollIntervalMs: 7 });
   client.getTransaction = async () => snapshots.shift();
 
@@ -916,7 +952,7 @@ test('loads the confirmed block hash while querying a native receipt', async () 
   const txid = transaction.txID;
   const before = { txID: 'aa'.repeat(32) };
   const after = { txID: 'bb'.repeat(32) };
-  const requests = [];
+  const requests: JsonAny[] = [];
   const { client } = fixture({
     transport: {
       async request(path, body) {
@@ -945,9 +981,9 @@ test('loads the confirmed block hash while querying a native receipt', async () 
 
   const snapshot = await client.getTransaction(txid);
 
-  assert.equal(snapshot.confirmed, true);
-  assert.equal(snapshot.info.blockHash, 'ef'.repeat(32));
-  assert.equal(snapshot.info.transactionIndex, 1);
+  assert.equal(snapshot!.confirmed, true);
+  assert.equal(snapshot!.info.blockHash, 'ef'.repeat(32));
+  assert.equal(snapshot!.info.transactionIndex, 1);
   const translated = translateReceipt(snapshot, {
     sourceTransactionHash: `0x${'ab'.repeat(32)}`,
   });
@@ -959,7 +995,7 @@ test('loads the confirmed block hash while querying a native receipt', async () 
 test('rejects confirmed solid blocks that cannot uniquely bind the transaction, block, and index', async t => {
   const transaction = unsignedTransaction();
   const txid = transaction.txID;
-  const cases = [
+  const cases: JsonAny[] = [
     {
       name: 'transaction absent',
       info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
@@ -1028,7 +1064,7 @@ test('rejects confirmed solid blocks that cannot uniquely bind the transaction, 
 test('does not confirm from full-node transaction inclusion without a solid receipt', async () => {
   const transaction = unsignedTransaction();
   let clock = 0;
-  const paths = [];
+  const paths: JsonAny[] = [];
   const { client } = fixture({
     now: () => clock,
     receiptTimeoutMs: 5,
@@ -1057,7 +1093,7 @@ test('does not confirm from full-node transaction inclusion without a solid rece
 test('retries transient solid-node query failures and then returns the confirmed receipt', async () => {
   const transaction = unsignedTransaction();
   let solidAttempts = 0;
-  const sleeps = [];
+  const sleeps: number[] = [];
   const { client } = fixture({
     sleep: async delay => sleeps.push(delay),
     transport: {
@@ -1157,7 +1193,7 @@ test('times out repeated transient receipt queries with the last transport failu
 
   await assert.rejects(
     () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
-    error => /timed out/i.test(error.message) && /offline.*walletsolidity/i.test(error.cause?.message ?? ''),
+    (error: JsonAny) => /timed out/i.test(error.message) && /offline.*walletsolidity/i.test(error.cause?.message ?? ''),
   );
 });
 
