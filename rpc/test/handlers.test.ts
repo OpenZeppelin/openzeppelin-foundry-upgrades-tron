@@ -1,19 +1,24 @@
-'use strict';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import { Transaction, Wallet, getCreateAddress, keccak256, toBeHex } from 'ethers';
 
-const { Transaction, Wallet, getCreateAddress, keccak256, toBeHex } = require('ethers');
+import { AddressMap } from '../../dist/rpc/address-map.js';
+import { contractKindForArtifact, createRpcHandlers, nativeContractAddress } from '../../dist/rpc/handlers.js';
+import { TransactionJournal, recordRetainedFailureInChain } from '../../dist/rpc/journal.js';
+import { acquireStateLock } from '../../dist/rpc/state-lock.js';
+import { JsonStore } from '../../dist/rpc/store.js';
+import { UpstreamRpcError } from '../../dist/rpc/upstream.js';
 
-const { AddressMap } = require('../address-map.cjs');
-const { contractKindForArtifact, createRpcHandlers, nativeContractAddress } = require('../handlers.cjs');
-const { TransactionJournal, recordRetainedFailureInChain } = require('../journal.cjs');
-const { acquireStateLock } = require('../state-lock.cjs');
-const { JsonStore } = require('../store.cjs');
-const { UpstreamRpcError } = require('../upstream.cjs');
+// Test fixtures — signed transactions, journal records, native/simulation/receipt payloads, and the
+// injectable handler dependency overrides — are deliberately loosely shaped, mirroring the external,
+// dynamically-shaped data rpc-src/handlers.ts validates at runtime. `any` is used deliberately
+// throughout this file for that content, matching rpc-src/handlers.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const PRIVATE_KEY = '11'.repeat(32);
 const WALLET = new Wallet(PRIVATE_KEY);
@@ -32,12 +37,12 @@ const ARTIFACT_IDENTITY = {
 };
 
 function deferred() {
-  let resolve;
+  let resolve!: (value?: unknown) => void;
   const promise = new Promise(resolvePromise => (resolve = resolvePromise));
   return { promise, resolve };
 }
 
-async function signedTransaction(overrides = {}) {
+async function signedTransaction(overrides: JsonAny = {}) {
   return WALLET.signTransaction({
     type: 0,
     chainId: CHAIN_ID,
@@ -51,13 +56,13 @@ async function signedTransaction(overrides = {}) {
 }
 
 async function seedConfirmedDeployment(
-  result,
+  result: JsonAny,
   {
     identity = ARTIFACT_IDENTITY,
     provenanceHash = `0x${'55'.repeat(32)}`,
     predicted = TARGET,
     actual = TARGET_ACTUAL,
-  } = {},
+  }: JsonAny = {},
 ) {
   const raw = await signedTransaction({ to: null, nonce: 12, data: '0x6000' });
   const sourceHash = keccak256(raw);
@@ -94,7 +99,7 @@ async function seedConfirmedDeployment(
   return sourceHash;
 }
 
-function translatedReceipt(sourceHash, context, overrides = {}) {
+function translatedReceipt(sourceHash: JsonAny, context: JsonAny, overrides: JsonAny = {}) {
   return {
     transactionHash: sourceHash,
     transactionIndex: '0x0',
@@ -119,7 +124,7 @@ function translatedReceipt(sourceHash, context, overrides = {}) {
   };
 }
 
-function fixture(t, overrides = {}) {
+function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-handlers-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const generatedStatePath = path.join(directory, 'state.json');
@@ -134,9 +139,9 @@ function fixture(t, overrides = {}) {
       allowRecovery: overrides.allowRecovery ?? false,
     });
   const addressMap = overrides.addressMap ?? new AddressMap(store, CHAIN);
-  const calls = [];
+  const calls: JsonAny[] = [];
   const upstream = overrides.upstream ?? {
-    async request(method, params) {
+    async request(method: JsonAny, params: JsonAny) {
       calls.push({ type: 'upstream', method, params });
       return `${method}:result`;
     },
@@ -146,15 +151,15 @@ function fixture(t, overrides = {}) {
       calls.push({ type: 'simulationReady' });
       return 'exact-signed';
     },
-    async buildCreate(value) {
+    async buildCreate(value: JsonAny) {
       calls.push({ type: 'buildCreate', value });
       return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID, transaction: { built: true } };
     },
-    async buildCall(value) {
+    async buildCall(value: JsonAny) {
       calls.push({ type: 'buildCall', value });
       return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID, transaction: { built: true } };
     },
-    async simulateSigned(bytes, txid, transaction) {
+    async simulateSigned(bytes: JsonAny, txid: JsonAny, transaction: JsonAny) {
       calls.push({ type: 'simulate', bytes, txid, transaction });
       return {
         mode: 'exact-signed',
@@ -165,7 +170,7 @@ function fixture(t, overrides = {}) {
         childCreateAttempts: [],
       };
     },
-    async broadcastSigned(bytes, txid) {
+    async broadcastSigned(bytes: JsonAny, txid: JsonAny) {
       calls.push({
         type: 'broadcast',
         bytes,
@@ -174,17 +179,17 @@ function fixture(t, overrides = {}) {
       });
       return { nativeTransactionId: txid, duplicate: false };
     },
-    async getTransaction(txid) {
+    async getTransaction(txid: JsonAny) {
       calls.push({ type: 'getTransaction', txid });
       return null;
     },
-    async waitForReceipt(txid, context) {
+    async waitForReceipt(txid: JsonAny, context: JsonAny) {
       calls.push({ type: 'wait', txid, context });
       return translatedReceipt(context.sourceTransactionHash, context);
     },
   };
   const reconciler = overrides.reconciler ?? {
-    recordPreparedNative(sourceHash, native, simulation, operationContext) {
+    recordPreparedNative(sourceHash: JsonAny, native: JsonAny, simulation: JsonAny, operationContext: JsonAny) {
       calls.push({ type: 'prepared', sourceHash, native, simulation, operationContext });
       return journal.recordNativeBuilt(sourceHash, native, {
         operationContext,
@@ -199,7 +204,7 @@ function fixture(t, overrides = {}) {
         },
       });
     },
-    reconcile(sourceHash, receipt) {
+    reconcile(sourceHash: JsonAny, receipt: JsonAny) {
       calls.push({ type: 'reconcile', sourceHash, receipt });
       return journal.recordConfirmed(sourceHash, receipt);
     },
@@ -226,13 +231,16 @@ function fixture(t, overrides = {}) {
         artifact: { abi: [{ type: 'constructor', inputs: [] }] },
         creationBytecode: '0x6000',
         constructorData: '0x',
-        contractName: 'Box',
+        // FIXME(strict): the original fixture also set `contractName: 'Box'` immediately before the
+        // `...ARTIFACT_IDENTITY` spread, whose `contractName` (also 'Box') overwrites it. Strict TS
+        // flags the dead duplicate key (TS2783); dropping the provably-overwritten literal preserves
+        // the fixture's exact resulting shape and value.
         ...ARTIFACT_IDENTITY,
         provenanceHash: `0x${'55'.repeat(32)}`,
         requiresLinking: false,
       })),
-    rewriteDeployment: overrides.rewriteDeployment ?? (async match => ({ ...match, initcode: '0x6000' })),
-    rewriteCall: overrides.rewriteCall ?? (async decoded => ({ ...decoded, to: TARGET_ACTUAL })),
+    rewriteDeployment: overrides.rewriteDeployment ?? (async (match: JsonAny) => ({ ...match, initcode: '0x6000' })),
+    rewriteCall: overrides.rewriteCall ?? (async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL })),
     ...(overrides.findArtifactPaths === undefined ? {} : { findArtifactPaths: overrides.findArtifactPaths }),
     ...(overrides.verifyArtifactProvenance === undefined
       ? {}
@@ -249,11 +257,11 @@ function fixture(t, overrides = {}) {
   return { addressMap, calls, directory, handlers, journal, nativeClient, out, statePath, store, upstream };
 }
 
-async function send(handlers, raw, id = 1) {
+async function send(handlers: JsonAny, raw: JsonAny, id = 1) {
   return handlers.handle({ jsonrpc: '2.0', id, method: 'eth_sendRawTransaction', params: [raw] });
 }
 
-test('reports chain ID and serves a virtual source nonce while forwarding gas queries', async t => {
+test('reports chain ID and serves a virtual source nonce while forwarding gas queries', async (t: TestContext) => {
   const { handlers, calls } = fixture(t);
   assert.deepEqual(await handlers.handle({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), {
     jsonrpc: '2.0',
@@ -282,7 +290,7 @@ test('reports chain ID and serves a virtual source nonce while forwarding gas qu
     params: [{ to: TARGET, data: '0x1234' }],
   });
   assert.deepEqual(
-    calls.filter(call => call.type === 'upstream').map(call => [call.method, call.params]),
+    calls.filter((call: JsonAny) => call.type === 'upstream').map((call: JsonAny) => [call.method, call.params]),
     [
       ['eth_gasPrice', []],
       ['eth_estimateGas', [{ to: TARGET_ACTUAL, data: '0x1234' }]],
@@ -290,14 +298,14 @@ test('reports chain ID and serves a virtual source nonce while forwarding gas qu
   );
 });
 
-test('derives latest and pending source nonces from durable journal state without upstream support', async t => {
+test('derives latest and pending source nonces from durable journal state without upstream support', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 3 });
   const result = fixture(t, { sourceHash: keccak256(raw) });
   result.journal.receive(raw);
   const wrongChain = await signedTransaction({ chainId: 1, nonce: 99 });
   result.journal.receive(wrongChain);
 
-  const count = block =>
+  const count = (block: JsonAny) =>
     result.handlers.handle({
       jsonrpc: '2.0',
       id: block === 'pending' ? 1 : 2,
@@ -329,7 +337,7 @@ test('derives latest and pending source nonces from durable journal state withou
     '0x0',
   );
   assert.equal(
-    result.calls.some(call => call.type === 'upstream'),
+    result.calls.some((call: JsonAny) => call.type === 'upstream'),
     false,
   );
 
@@ -337,7 +345,7 @@ test('derives latest and pending source nonces from durable journal state withou
   assert.equal((await count('latest')).result, '0x4');
   assert.equal((await count('pending')).result, '0x4');
   assert.equal(
-    result.calls.some(call => call.type === 'upstream'),
+    result.calls.some((call: JsonAny) => call.type === 'upstream'),
     false,
   );
 
@@ -350,12 +358,12 @@ test('derives latest and pending source nonces from durable journal state withou
   assert.equal(unsupported.error.code, -32602);
 });
 
-test('derives historical source nonces from confirmed journal receipts at canonical block quantities', async t => {
+test('derives historical source nonces from confirmed journal receipts at canonical block quantities', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 3 });
   const result = fixture(t, { sourceHash: keccak256(raw) });
   await result.handlers.dispatch('eth_sendRawTransaction', [raw]);
 
-  const count = async (block, address = WALLET.address) =>
+  const count = async (block: JsonAny, address: JsonAny = WALLET.address) =>
     (
       await result.handlers.handle({
         jsonrpc: '2.0',
@@ -371,7 +379,7 @@ test('derives historical source nonces from confirmed journal receipts at canoni
   assert.equal(await count('0x2b'), '0x4');
   assert.equal(await count('0x2a', TARGET), '0x0');
   assert.equal(
-    result.calls.some(call => call.type === 'upstream'),
+    result.calls.some((call: JsonAny) => call.type === 'upstream'),
     false,
   );
 
@@ -386,7 +394,7 @@ test('derives historical source nonces from confirmed journal receipts at canoni
   }
 });
 
-test('normalizes the stock TRE empty state root before Forge deserializes a block', async t => {
+test('normalizes the stock TRE empty state root before Forge deserializes a block', async (t: TestContext) => {
   const hash = `0x${'12'.repeat(32)}`;
   const block = {
     hash,
@@ -402,7 +410,7 @@ test('normalizes the stock TRE empty state root before Forge deserializes a bloc
   };
   const result = fixture(t, {
     upstream: {
-      async request(method, params) {
+      async request(method: JsonAny, params: JsonAny) {
         result.calls.push({ type: 'upstream', method, params });
         return structuredClone(block);
       },
@@ -454,17 +462,17 @@ test('normalizes the stock TRE empty state root before Forge deserializes a bloc
   assert.equal(nullResponse.result, null);
 });
 
-test('provenance-matches and address-rewrites deployment gas estimates without building or journaling', async t => {
+test('provenance-matches and address-rewrites deployment gas estimates without building or journaling', async (t: TestContext) => {
   const senderActual = `0x${'a1'.repeat(20)}`;
   for (const [dataKey, target] of [
     ['data', undefined],
     ['input', null],
-  ]) {
-    await t.test(`${dataKey}/${target === null ? 'null target' : 'absent target'}`, async t => {
-      let matched;
-      let rewritten;
+  ] as [string, null | undefined][]) {
+    await t.test(`${dataKey}/${target === null ? 'null target' : 'absent target'}`, async (t: TestContext) => {
+      let matched: JsonAny;
+      let rewritten: JsonAny;
       const result = fixture(t, {
-        matchDeploymentArtifact(value) {
+        matchDeploymentArtifact(value: JsonAny) {
           matched = value;
           return {
             provenanceHash: `0x${'55'.repeat(32)}`,
@@ -472,7 +480,7 @@ test('provenance-matches and address-rewrites deployment gas estimates without b
             creationBytecode: '0x6000',
           };
         },
-        async rewriteDeployment(match, dependencies) {
+        async rewriteDeployment(match: JsonAny, dependencies: JsonAny) {
           rewritten = { match, mappedConstructorAddress: dependencies.addressMap.toActual(TARGET) };
           return { ...match, initcode: '0x60aabb' };
         },
@@ -491,7 +499,7 @@ test('provenance-matches and address-rewrites deployment gas estimates without b
         sender: WALLET.address,
         sourceTransaction: SOURCE_TX,
       });
-      const transaction = { from: WALLET.address, [dataKey]: '0x6000', value: '0x0' };
+      const transaction: JsonAny = { from: WALLET.address, [dataKey]: '0x6000', value: '0x0' };
       if (target === null) transaction.to = null;
 
       const response = await result.handlers.handle({
@@ -517,7 +525,7 @@ test('provenance-matches and address-rewrites deployment gas estimates without b
         ],
       });
       assert.equal(
-        result.calls.some(call => call.type === 'buildCreate' || call.type === 'buildCall'),
+        result.calls.some((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall'),
         false,
       );
       assert.deepEqual(result.journal.list(), []);
@@ -525,15 +533,15 @@ test('provenance-matches and address-rewrites deployment gas estimates without b
   }
 });
 
-test('rejects malformed or provenance-mismatched deployment estimates before upstream or native work', async t => {
+test('rejects malformed or provenance-mismatched deployment estimates before upstream or native work', async (t: TestContext) => {
   for (const [name, transaction] of [
     ['conflicting data/input', { data: '0x6000', input: '0x6001' }],
     ['artifact mismatch', { data: '0xdeadbeef' }],
-  ]) {
-    await t.test(name, async t => {
+  ] as [string, JsonAny][]) {
+    await t.test(name, async (t: TestContext) => {
       const result = fixture(t, {
         matchDeploymentArtifact() {
-          const error = new Error('No provenance-verified deployment artifact matches');
+          const error: JsonAny = new Error('No provenance-verified deployment artifact matches');
           error.code = 'ARTIFACT_NOT_FOUND';
           throw error;
         },
@@ -551,7 +559,7 @@ test('rejects malformed or provenance-mismatched deployment estimates before ups
   }
 });
 
-test('composes deployment decode, provenance, rewrite, exact simulation, durable prepare, broadcast, wait, and reconcile', async t => {
+test('composes deployment decode, provenance, rewrite, exact simulation, durable prepare, broadcast, wait, and reconcile', async (t: TestContext) => {
   const raw = await signedTransaction();
   const sourceHash = keccak256(raw);
   const result = fixture(t, { sourceHash });
@@ -559,28 +567,28 @@ test('composes deployment decode, provenance, rewrite, exact simulation, durable
 
   assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: sourceHash });
   assert.deepEqual(
-    result.calls.map(call => call.type),
+    result.calls.map((call: JsonAny) => call.type),
     ['simulationReady', 'buildCreate', 'simulate', 'prepared', 'broadcast', 'wait', 'reconcile'],
   );
-  assert.equal(result.calls.find(call => call.type === 'broadcast').state, 'native-built');
-  const operation = result.calls.find(call => call.type === 'prepared').operationContext;
+  assert.equal(result.calls.find((call: JsonAny) => call.type === 'broadcast').state, 'native-built');
+  const operation = result.calls.find((call: JsonAny) => call.type === 'prepared').operationContext;
   assert.equal(operation.predictedContractAddress, getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase());
   assert.equal(operation.actualTarget, ACTUAL_TARGET);
   assert.equal(operation.contractKind, 'contract');
   assert.deepEqual(operation.artifactIdentity, ARTIFACT_IDENTITY);
-  const receiptResolvers = result.calls.find(call => call.type === 'wait').context;
+  const receiptResolvers = result.calls.find((call: JsonAny) => call.type === 'wait').context;
   assert.equal(receiptResolvers.resolveAddress(ACTUAL_TARGET), operation.predictedContractAddress);
   assert.equal(receiptResolvers.resolveInternalAddress(ACTUAL_TARGET), ACTUAL_TARGET);
   assert.equal(result.journal.get(sourceHash).state, 'confirmed');
 });
 
-test('joins concurrent source retries and never invokes a second native builder', async t => {
+test('joins concurrent source retries and never invokes a second native builder', async (t: TestContext) => {
   const raw = await signedTransaction();
-  let release;
+  let release!: (value?: unknown) => void;
   const gate = new Promise(resolve => (release = resolve));
   const result = fixture(t);
   const wait = result.nativeClient.waitForReceipt;
-  result.nativeClient.waitForReceipt = async (...args) => {
+  result.nativeClient.waitForReceipt = async (...args: JsonAny[]) => {
     await gate;
     return wait(...args);
   };
@@ -588,21 +596,21 @@ test('joins concurrent source retries and never invokes a second native builder'
   const first = send(result.handlers, raw, 1);
   const second = send(result.handlers, raw, 2);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(result.calls.filter(call => call.type === 'buildCreate').length, 1);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate').length, 1);
   release();
   assert.equal((await first).result, keccak256(raw));
   assert.equal((await second).result, keccak256(raw));
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 1);
 });
 
-test('same-owner retries resume a transient builder failure without concurrent duplicate work', async t => {
+test('same-owner retries resume a transient builder failure without concurrent duplicate work', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 30 });
   const sourceHash = keccak256(raw);
   const result = fixture(t, { sourceHash });
   const originalBuild = result.nativeClient.buildCreate.bind(result.nativeClient);
   const firstBuild = deferred();
   let buildAttempts = 0;
-  result.nativeClient.buildCreate = async value => {
+  result.nativeClient.buildCreate = async (value: JsonAny) => {
     buildAttempts += 1;
     if (buildAttempts === 1) {
       await firstBuild.promise;
@@ -622,21 +630,21 @@ test('same-owner retries resume a transient builder failure without concurrent d
   assert.equal((await joined).error.code, -32000);
   assert.equal(result.journal.get(sourceHash).state, 'received');
   assert.equal(result.journal.get(sourceHash).buildClaimOwner, result.journal.ownerId);
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 0);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 0);
 
   assert.equal((await send(result.handlers, raw, 3)).result, sourceHash);
   assert.equal(buildAttempts, 2);
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 1);
   assert.equal(result.journal.get(sourceHash).state, 'confirmed');
 });
 
-test('same-owner retries rebuild after a transient exact-simulation transport failure', async t => {
+test('same-owner retries rebuild after a transient exact-simulation transport failure', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 31 });
   const sourceHash = keccak256(raw);
   const result = fixture(t, { sourceHash });
   const originalSimulation = result.nativeClient.simulateSigned.bind(result.nativeClient);
   let simulationAttempts = 0;
-  result.nativeClient.simulateSigned = async (...args) => {
+  result.nativeClient.simulateSigned = async (...args: JsonAny[]) => {
     simulationAttempts += 1;
     if (simulationAttempts === 1) {
       throw new Error('Exact signed-transaction simulation is unavailable', {
@@ -648,15 +656,15 @@ test('same-owner retries rebuild after a transient exact-simulation transport fa
 
   assert.equal((await send(result.handlers, raw, 1)).error.code, -32000);
   assert.equal(result.journal.get(sourceHash).state, 'received');
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 0);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 0);
 
   assert.equal((await send(result.handlers, raw, 2)).result, sourceHash);
   assert.equal(simulationAttempts, 2);
-  assert.equal(result.calls.filter(call => call.type === 'buildCreate').length, 2);
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 1);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate').length, 2);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 1);
 });
 
-test('ordinary send retries cannot take over a received claim owned by another boot', async t => {
+test('ordinary send retries cannot take over a received claim owned by another boot', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 32 });
   const sourceHash = keccak256(raw);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-foreign-claim-'));
@@ -671,31 +679,31 @@ test('ordinary send retries cannot take over a received claim owned by another b
   assert.equal(result.journal.get(sourceHash).state, 'received');
   assert.equal(result.journal.get(sourceHash).buildClaimOwner, 'boot-old');
   assert.equal(
-    result.calls.some(call => call.type === 'buildCreate' || call.type === 'broadcast'),
+    result.calls.some((call: JsonAny) => call.type === 'buildCreate' || call.type === 'broadcast'),
     false,
   );
 });
 
-test('rewrites and builds a native call once with durable target metadata', async t => {
+test('rewrites and builds a native call once with durable target metadata', async (t: TestContext) => {
   const raw = await signedTransaction({ to: TARGET, nonce: 7, data: '0x1234' });
   const sourceHash = keccak256(raw);
   const result = fixture(t, { sourceHash });
 
   const response = await send(result.handlers, raw);
   assert.equal(response.result, sourceHash);
-  assert.equal(result.calls.filter(call => call.type === 'buildCreate').length, 0);
-  assert.equal(result.calls.filter(call => call.type === 'buildCall').length, 1);
-  assert.equal(result.calls.find(call => call.type === 'buildCall').value.contractAddress, TARGET_ACTUAL);
-  const operation = result.calls.find(call => call.type === 'prepared').operationContext;
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate').length, 0);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCall').length, 1);
+  assert.equal(result.calls.find((call: JsonAny) => call.type === 'buildCall').value.contractAddress, TARGET_ACTUAL);
+  const operation = result.calls.find((call: JsonAny) => call.type === 'prepared').operationContext;
   assert.equal(operation.kind, 'call');
   assert.equal(operation.to, TARGET.toLowerCase());
   assert.equal(operation.actualTarget, TARGET_ACTUAL);
   assert.deepEqual(operation.artifactIdentity, ARTIFACT_IDENTITY);
 });
 
-test('presents a confirmed call target in the same predicted or actual domain signed by Forge', async t => {
+test('presents a confirmed call target in the same predicted or actual domain signed by Forge', async (t: TestContext) => {
   for (const [index, sourceTarget] of [TARGET, TARGET_ACTUAL].entries()) {
-    await t.test(index === 0 ? 'predicted source target' : 'actual source target', async t => {
+    await t.test(index === 0 ? 'predicted source target' : 'actual source target', async (t: TestContext) => {
       const raw = await signedTransaction({ to: sourceTarget, nonce: 40 + index, data: '0x1234' });
       const sourceHash = keccak256(raw);
       const result = fixture(t, { sourceHash });
@@ -708,8 +716,8 @@ test('presents a confirmed call target in the same predicted or actual domain si
       });
 
       assert.equal((await send(result.handlers, raw)).result, sourceHash);
-      const operation = result.calls.find(call => call.type === 'prepared').operationContext;
-      const receiptResolvers = result.calls.find(call => call.type === 'wait').context;
+      const operation = result.calls.find((call: JsonAny) => call.type === 'prepared').operationContext;
+      const receiptResolvers = result.calls.find((call: JsonAny) => call.type === 'wait').context;
       assert.equal(operation.to.toLowerCase(), sourceTarget.toLowerCase());
       assert.equal(operation.actualTarget, TARGET_ACTUAL);
       assert.equal(receiptResolvers.resolveAddress(TARGET_ACTUAL), sourceTarget.toLowerCase());
@@ -717,14 +725,14 @@ test('presents a confirmed call target in the same predicted or actual domain si
   }
 });
 
-test('recovers native-built and broadcast records without ever calling a builder', async t => {
+test('recovers native-built and broadcast records without ever calling a builder', async (t: TestContext) => {
   for (const [initialState, present, expectedBroadcasts] of [
     ['native-built', true, 0],
     ['native-built', false, 1],
     ['broadcast', true, 0],
     ['broadcast', false, 1],
   ]) {
-    await t.test(`${initialState}/${present ? 'present' : 'absent'}`, async t => {
+    await t.test(`${initialState}/${present ? 'present' : 'absent'}`, async (t: TestContext) => {
       const raw = await signedTransaction({ nonce: initialState === 'native-built' ? 4 : 5 });
       const sourceHash = keccak256(raw);
       const result = fixture(t, {
@@ -764,24 +772,27 @@ test('recovers native-built and broadcast records without ever calling a builder
         },
       );
       if (initialState === 'broadcast') result.journal.recordBroadcast(sourceHash);
-      result.nativeClient.getTransaction = async txid => {
+      result.nativeClient.getTransaction = async (txid: JsonAny) => {
         result.calls.push({ type: 'getTransaction', txid });
         return present ? { confirmed: false, transaction: {} } : null;
       };
 
       const response = await send(result.handlers, raw);
       assert.equal(response.result, sourceHash);
-      assert.equal(result.calls.filter(call => call.type === 'buildCreate' || call.type === 'buildCall').length, 0);
-      assert.equal(result.calls.filter(call => call.type === 'broadcast').length, expectedBroadcasts);
+      assert.equal(
+        result.calls.filter((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall').length,
+        0,
+      );
+      assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, expectedBroadcasts);
       if (expectedBroadcasts === 1) {
-        assert.equal(result.calls.find(call => call.type === 'broadcast').bytes, NATIVE_BYTES);
+        assert.equal(result.calls.find((call: JsonAny) => call.type === 'broadcast').bytes, NATIVE_BYTES);
       }
       assert.equal(result.journal.get(sourceHash).state, 'confirmed');
     });
   }
 });
 
-test('startup recovery requires an authentic held state lock and explicitly CAS-recovers received claims', async t => {
+test('startup recovery requires an authentic held state lock and explicitly CAS-recovers received claims', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 9 });
   const result = fixture(t, { ownerId: 'boot-new', allowRecovery: true });
   const oldJournal = new TransactionJournal(result.store, CHAIN, { ownerId: 'boot-old' });
@@ -799,11 +810,11 @@ test('startup recovery requires an authentic held state lock and explicitly CAS-
   t.after(() => capability.release());
   const recovered = await result.handlers.recoverStartup(capability);
   assert.deepEqual(recovered, [keccak256(raw)]);
-  assert.equal(result.calls.filter(call => call.type === 'buildCreate').length, 1);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate').length, 1);
   assert.equal(result.journal.get(keccak256(raw)).state, 'confirmed');
 });
 
-test('replays durable receipts and Ethereum transactions after restart', async t => {
+test('replays durable receipts and Ethereum transactions after restart', async (t: TestContext) => {
   const raw = await signedTransaction();
   const sourceHash = keccak256(raw);
   const first = fixture(t, { sourceHash });
@@ -831,7 +842,7 @@ test('replays durable receipts and Ethereum transactions after restart', async t
   assert.equal(transaction.result.blockNumber, '0x2a');
   assert.equal(transaction.result.from, WALLET.address);
   assert.equal(transaction.result.to, null);
-  assert.equal(transaction.result.v, toBeHex(Transaction.from(raw).signature.networkV));
+  assert.equal(transaction.result.v, toBeHex(Transaction.from(raw).signature!.networkV!));
   for (const block of ['latest', 'pending']) {
     const count = await restarted.handlers.handle({
       jsonrpc: '2.0',
@@ -843,9 +854,9 @@ test('replays durable receipts and Ethereum transactions after restart', async t
   }
 });
 
-test('replays receipts only from confirmed journal records and hides retained success-shaped failure receipts', async t => {
+test('replays receipts only from confirmed journal records and hides retained success-shaped failure receipts', async (t: TestContext) => {
   for (const state of ['received', 'native-built', 'broadcast', 'failed-retained']) {
-    await t.test(state, async t => {
+    await t.test(state, async (t: TestContext) => {
       const raw = await signedTransaction({
         nonce: 20 + ['received', 'native-built', 'broadcast', 'failed-retained'].indexOf(state),
       });
@@ -886,7 +897,7 @@ test('replays receipts only from confirmed journal records and hides retained su
         if (state === 'broadcast' || state === 'failed-retained') result.journal.recordBroadcast(sourceHash);
         if (state === 'failed-retained') {
           const retained = translatedReceipt(sourceHash, operationContext, { status: '0x1' });
-          result.store.transaction(CHAIN, chain =>
+          result.store.transaction(CHAIN, (chain: JsonAny) =>
             recordRetainedFailureInChain(
               chain,
               sourceHash,
@@ -905,12 +916,12 @@ test('replays receipts only from confirmed journal records and hides retained su
         params: [sourceHash],
       });
       assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: null });
-      assert.equal(result.calls.filter(call => call.type === 'upstream').length, 0);
+      assert.equal(result.calls.filter((call: JsonAny) => call.type === 'upstream').length, 0);
     });
   }
 });
 
-test('maps code, storage, balance, and eth_call targets while preserving safe opaque calldata', async t => {
+test('maps code, storage, balance, and eth_call targets while preserving safe opaque calldata', async (t: TestContext) => {
   const result = fixture(t, {
     resolveCallContext: async () => undefined,
   });
@@ -930,7 +941,7 @@ test('maps code, storage, balance, and eth_call targets while preserving safe op
     await result.handlers.handle({ jsonrpc: '2.0', id: method, method, params });
   }
   assert.deepEqual(
-    result.calls.filter(call => call.type === 'upstream').map(call => call.params),
+    result.calls.filter((call: JsonAny) => call.type === 'upstream').map((call: JsonAny) => call.params),
     [
       [TARGET_ACTUAL, 'latest'],
       [TARGET_ACTUAL, '0x0', 'latest'],
@@ -948,12 +959,12 @@ test('maps code, storage, balance, and eth_call targets while preserving safe op
   assert.deepEqual(result.calls.at(-1).params, [`0x${'00'.repeat(20)}`, 'latest']);
 });
 
-test('retries numbered immutable reads as latest only after the explicit stock TRE quantity error', async t => {
-  const attempts = [];
+test('retries numbered immutable reads as latest only after the explicit stock TRE quantity error', async (t: TestContext) => {
+  const attempts: JsonAny[] = [];
   const result = fixture(t, {
     resolveCallContext: async () => undefined,
     upstream: {
-      async request(method, params) {
+      async request(method: JsonAny, params: JsonAny) {
         attempts.push({ method, params: structuredClone(params) });
         if (params.at(-1) === '0x13') {
           throw new UpstreamRpcError(-32602, 'QUANTITY not supported, just support TAG as latest');
@@ -1008,7 +1019,7 @@ test('retries numbered immutable reads as latest only after the explicit stock T
   }
 });
 
-test('rejects opaque call bytes containing a known predicted ABI word when metadata is unavailable', async t => {
+test('rejects opaque call bytes containing a known predicted ABI word when metadata is unavailable', async (t: TestContext) => {
   const result = fixture(t, { resolveCallContext: async () => undefined });
   result.addressMap.set({
     predicted: TARGET,
@@ -1026,10 +1037,10 @@ test('rejects opaque call bytes containing a known predicted ABI word when metad
   });
   assert.equal(response.error.code, -32000);
   assert.equal(response.error.data.code, 'OPAQUE_PREDICTED_ADDRESS');
-  assert.equal(result.calls.filter(call => call.type === 'upstream').length, 0);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'upstream').length, 0);
 });
 
-test('resolves predicted and actual addresses to EVM, TRON hex, Base58, provenance, and durable metadata', async t => {
+test('resolves predicted and actual addresses to EVM, TRON hex, Base58, provenance, and durable metadata', async (t: TestContext) => {
   const result = fixture(t);
   result.addressMap.set({
     predicted: TARGET,
@@ -1072,7 +1083,7 @@ test('resolves predicted and actual addresses to EVM, TRON hex, Base58, provenan
   assert.equal(zero.result.mapping, null);
 });
 
-test('resolves an internally-created ProxyAdmin ABI from durable metadata and verified artifacts', async t => {
+test('resolves an internally-created ProxyAdmin ABI from durable metadata and verified artifacts', async (t: TestContext) => {
   let seenContext;
   const transparentIdentity = {
     sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
@@ -1082,19 +1093,19 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
   };
   const result = fixture(t, {
     useDefaultResolveCallContext: true,
-    findArtifactPaths(outputDirectory, reference) {
+    findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
       if (reference === transparentIdentity.fullyQualifiedName) {
         return [path.join(outputDirectory, 'TransparentUpgradeableProxy.sol', 'TransparentUpgradeableProxy.json')];
       }
       assert.equal(reference, 'openzeppelin-tron-solidity/contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin');
       return [path.join(outputDirectory, 'ProxyAdmin.sol', 'ProxyAdmin.json')];
     },
-    verifyArtifactProvenance({ artifactPath }) {
+    verifyArtifactProvenance({ artifactPath }: JsonAny) {
       return artifactPath.includes('TransparentUpgradeableProxy')
         ? { abi: [], provenanceHash: `0x${'55'.repeat(32)}` }
         : { abi: ['function owner() view returns (address)'], provenanceHash: `0x${'66'.repeat(32)}` };
     },
-    async rewriteCall(decoded, context) {
+    async rewriteCall(decoded: JsonAny, context: JsonAny) {
       seenContext = context;
       return { ...decoded, to: TARGET_ACTUAL };
     },
@@ -1128,10 +1139,10 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
   });
 });
 
-test('rejects a same-name artifact whose provenance changed after deployment', async t => {
+test('rejects a same-name artifact whose provenance changed after deployment', async (t: TestContext) => {
   const result = fixture(t, {
     useDefaultResolveCallContext: true,
-    findArtifactPaths(outputDirectory, reference) {
+    findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
       assert.equal(reference, ARTIFACT_IDENTITY.fullyQualifiedName);
       return [path.join(outputDirectory, 'Box.sol', 'Box.json')];
     },
@@ -1159,12 +1170,12 @@ test('rejects a same-name artifact whose provenance changed after deployment', a
   assert.equal(response.error.code, -32000);
   assert.equal(response.error.data.code, 'ARTIFACT_PROVENANCE_CHANGED');
   assert.equal(
-    result.calls.some(call => call.type === 'buildCall' || call.type === 'broadcast'),
+    result.calls.some((call: JsonAny) => call.type === 'buildCall' || call.type === 'broadcast'),
     false,
   );
 });
 
-test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async t => {
+test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async (t: TestContext) => {
   const error = new UpstreamRpcError(-32042, 'upstream reverted', { reason: 'boom' }, true);
   const { handlers } = fixture(t, {
     upstream: {
@@ -1181,7 +1192,7 @@ test('propagates branded upstream JSON-RPC errors without rewriting their code o
   });
 });
 
-test('does not reflect arbitrary dependency error messages to JSON-RPC clients', async t => {
+test('does not reflect arbitrary dependency error messages to JSON-RPC clients', async (t: TestContext) => {
   const secret = 'PRIVATE_KEY_MATERIAL_SHOULD_NOT_LEAK';
   const { handlers } = fixture(t, {
     upstream: {
@@ -1196,7 +1207,7 @@ test('does not reflect arbitrary dependency error messages to JSON-RPC clients',
   assert.equal(JSON.stringify(response).includes(secret), false);
 });
 
-test('implements strict JSON-RPC single, batch, notification, and invalid request semantics', async t => {
+test('implements strict JSON-RPC single, batch, notification, and invalid request semantics', async (t: TestContext) => {
   const { handlers } = fixture(t);
   assert.deepEqual(await handlers.handle([]), {
     jsonrpc: '2.0',
@@ -1220,13 +1231,13 @@ test('implements strict JSON-RPC single, batch, notification, and invalid reques
   );
 });
 
-test('turns deterministic prebuild failures into durable terminal failures and never broadcasts', async t => {
+test('turns deterministic prebuild failures into durable terminal failures and never broadcasts', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 12 });
   const sourceHash = keccak256(raw);
   const result = fixture(t, {
     sourceHash,
     matchDeploymentArtifact() {
-      const error = new Error('artifact mismatch');
+      const error: JsonAny = new Error('artifact mismatch');
       error.code = 'ARTIFACT_NOT_FOUND';
       throw error;
     },
@@ -1235,7 +1246,7 @@ test('turns deterministic prebuild failures into durable terminal failures and n
   assert.equal(response.error.code, -32000);
   assert.equal(result.journal.get(sourceHash).state, 'failed');
   assert.equal(result.journal.get(sourceHash).failure.code, 'ARTIFACT_NOT_FOUND');
-  assert.equal(result.calls.filter(call => call.type === 'broadcast').length, 0);
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 0);
   assert.equal(
     (
       await result.handlers.handle({

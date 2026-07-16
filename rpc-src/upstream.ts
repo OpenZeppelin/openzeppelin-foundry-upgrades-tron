@@ -20,7 +20,7 @@ class UpstreamRpcError extends Error {
   declare code: number;
   declare data?: unknown;
 
-  constructor(code: number, message: string, data: unknown, hasData = false) {
+  constructor(code: number, message: string, data?: unknown, hasData = false) {
     super(message);
     this.name = 'UpstreamRpcError';
     this.code = code;
