@@ -59,9 +59,11 @@ class RpcError extends Error {
 
   // FIXME(strict): the original `.cjs` constructor accepts only (code, message, data); the
   // `normalizeEvmAddress` call site passes a 4th `{ cause }` argument that JS silently drops. The
-  // unused `options` parameter preserves that call-site arity and its drop-the-cause behavior under
-  // strict TS — the cause is intentionally not forwarded to `super`, exactly as before.
-  constructor(code: number, message: string, data?: unknown, _options?: ErrorOptions) {
+  // unused `_options` parameter preserves that call-site arity and its drop-the-cause behavior under
+  // strict TS — the cause is intentionally not forwarded to `super`, exactly as before. It carries a
+  // default value so it is excluded from `Function.length`, keeping `RpcError.length === 3` as in the
+  // `.cjs` original (a bare `_options?` would emit a plain param and bump the arity to 4).
+  constructor(code: number, message: string, data?: unknown, _options: ErrorOptions | undefined = undefined) {
     super(message);
     this.name = 'RpcError';
     this.code = code;
