@@ -211,10 +211,12 @@ untrusted party.
 
 ## Start the RPC adapter
 
-Install the package dependencies before starting the adapter:
+Install the package dependencies before starting the adapter. When running
+from source, build the adapter first; `npm run build:rpc` emits `dist/rpc/`:
 
 ```sh
 npm install
+npm run build:rpc
 npm run rpc:start
 ```
 
