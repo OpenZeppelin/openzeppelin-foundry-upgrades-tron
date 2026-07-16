@@ -1,13 +1,20 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { keccak256 } = require('ethers');
+import { keccak256 } from 'ethers';
 
-const { TransactionJournal } = require('../journal.cjs');
-const { JsonStore } = require('../store.cjs');
+import { TransactionJournal } from '../../dist/rpc/journal.js';
+import { JsonStore } from '../../dist/rpc/store.js';
+
+// Test-local fixtures (native transaction/preparation payloads, including deliberately invalid
+// overrides) are deliberately loosely shaped, the same way the real caller-supplied input
+// rpc-src/journal.ts validates at runtime is. `any` is used deliberately throughout this file for
+// that content, matching rpc-src/journal.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const SOURCE_BYTES = `0x${'01'.repeat(97)}`;
 const SOURCE_HASH = keccak256(SOURCE_BYTES);
@@ -18,7 +25,7 @@ const NATIVE_TXID = `${'cd'.repeat(32)}`;
 const FROM = `0x${'11'.repeat(20)}`;
 const TO = `0x${'22'.repeat(20)}`;
 
-function fixture(t, chain = 'tre:728126428', ownerId = 'boot-a') {
+function fixture(t: TestContext, chain: JsonAny = 'tre:728126428', ownerId: JsonAny = 'boot-a') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-journal-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const statePath = path.join(directory, 'state.json');
@@ -28,7 +35,7 @@ function fixture(t, chain = 'tre:728126428', ownerId = 'boot-a') {
   };
 }
 
-function nativeTransaction(overrides = {}) {
+function nativeTransaction(overrides: Record<string, JsonAny> = {}) {
   return {
     signedNativeTransaction: NATIVE_BYTES,
     nativeTransactionId: NATIVE_TXID,
@@ -61,7 +68,7 @@ function preparation() {
   };
 }
 
-function recordPrepared(journal, native = nativeTransaction()) {
+function recordPrepared(journal: TransactionJournal, native: JsonAny = nativeTransaction()) {
   return journal.recordNativeBuilt(SOURCE_HASH, native, preparation());
 }
 
@@ -112,7 +119,7 @@ test('refuses a second native transaction that reuses an in-flight (from, nonce)
     () => journal.recordNativeBuilt(SECOND_HASH, nativeTransaction(), preparation()),
     /nonce is already in flight/i,
   );
-  assert.equal(journal.get(SECOND_HASH).state, 'received');
+  assert.equal(journal.get(SECOND_HASH)?.state, 'received');
   assert.throws(() => journal.recordBroadcast(SECOND_HASH), /received.*broadcast/i);
 });
 
@@ -145,10 +152,10 @@ test('refuses native-built state until operation context and a complete child CR
   journal.receive(SOURCE_BYTES);
 
   assert.throws(
-    () => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction()),
+    () => journal.recordNativeBuilt(SOURCE_HASH, nativeTransaction(), undefined),
     /operation context|child CREATE plan/i,
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'received');
+  assert.equal(journal.get(SOURCE_HASH)?.state, 'received');
 });
 
 test('records terminal failures idempotently and forbids later transitions', t => {
@@ -338,8 +345,8 @@ test('resumes the exact signed native transaction after a crash at native-built'
     record: journal.get(SOURCE_HASH),
     shouldBuild: false,
   });
-  assert.equal(restarted.get(SOURCE_HASH).signedNativeTransaction, NATIVE_BYTES);
-  assert.equal(restarted.get(SOURCE_HASH).nativeTransactionId, NATIVE_TXID);
+  assert.equal(restarted.get(SOURCE_HASH)?.signedNativeTransaction, NATIVE_BYTES);
+  assert.equal(restarted.get(SOURCE_HASH)?.nativeTransactionId, NATIVE_TXID);
 });
 
 test('resumes the exact native transaction after a crash at broadcast', t => {
@@ -439,7 +446,7 @@ test('rejects a non-durable receipt before committing confirmation', t => {
   journal.recordBroadcast(SOURCE_HASH);
 
   assert.throws(() => journal.recordConfirmed(SOURCE_HASH, undefined), /receipt/i);
-  assert.equal(journal.get(SOURCE_HASH).state, 'broadcast');
+  assert.equal(journal.get(SOURCE_HASH)?.state, 'broadcast');
 });
 
 test('preserves signed native bytes and txid exactly', t => {
