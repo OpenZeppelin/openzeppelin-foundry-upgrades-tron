@@ -1,22 +1,28 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const http = require('node:http');
-const net = require('node:net');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { createRpcServer } = require('../server.cjs');
+import { createRpcServer, type RpcServer } from '../../dist/rpc/server.js';
 
-function temporaryStatePath(t) {
+// Test-local plumbing (fake dependencies, raw HTTP fixtures) is deliberately loosely shaped, the
+// same way the real `rawOptions`/JSON-RPC payloads it feeds `createRpcServer` are. `any` is used
+// deliberately throughout this file for that content, matching rpc-src/server.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
+
+function temporaryStatePath(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-rpc-server-'));
   t.after(() => fs.rmSync(directory, { force: true, recursive: true }));
   return path.join(directory, 'adapter-state.json');
 }
 
-function fakeHandlers(overrides = {}) {
+function fakeHandlers(overrides: Record<string, JsonAny> = {}) {
   return {
-    async handle(payload) {
+    async handle(payload: JsonAny) {
       return { jsonrpc: '2.0', id: payload.id, result: payload.method };
     },
     async recoverStartup() {},
@@ -24,7 +30,7 @@ function fakeHandlers(overrides = {}) {
   };
 }
 
-function request(address, options = {}) {
+function request(address: JsonAny, options: JsonAny = {}): Promise<JsonAny> {
   const body = options.body ?? '';
   const headers = { ...(options.headers ?? {}) };
   if (body !== '' && headers['content-length'] === undefined && headers['transfer-encoding'] === undefined) {
@@ -42,7 +48,7 @@ function request(address, options = {}) {
         headers,
       },
       response => {
-        const chunks = [];
+        const chunks: Buffer[] = [];
         response.on('data', chunk => chunks.push(chunk));
         response.on('end', () =>
           resolve({
@@ -58,17 +64,17 @@ function request(address, options = {}) {
   });
 }
 
-function deferred() {
-  let reject;
-  let resolve;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
+function deferred(): { promise: Promise<void>; reject: (error: unknown) => void; resolve: () => void } {
+  let reject!: (error: unknown) => void;
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     reject = rejectPromise;
     resolve = resolvePromise;
   });
   return { promise, reject, resolve };
 }
 
-function startStreamingRequest(address, options = {}) {
+function startStreamingRequest(address: JsonAny, options: JsonAny = {}): Promise<JsonAny> {
   const response = new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -79,7 +85,7 @@ function startStreamingRequest(address, options = {}) {
         headers: options.headers,
       },
       incoming => {
-        const chunks = [];
+        const chunks: Buffer[] = [];
         incoming.on('data', chunk => chunks.push(chunk));
         incoming.on('end', () =>
           resolve({
@@ -96,10 +102,10 @@ function startStreamingRequest(address, options = {}) {
   return response;
 }
 
-function partialHeaders(address, bytes) {
+function partialHeaders(address: JsonAny, bytes: JsonAny): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: address.host, port: address.port });
-    const chunks = [];
+    const chunks: Buffer[] = [];
     socket.on('connect', () => socket.write(bytes));
     socket.on('data', chunk => chunks.push(chunk));
     socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
@@ -107,15 +113,15 @@ function partialHeaders(address, bytes) {
   });
 }
 
-async function openPartialRequest(address, bytes) {
+async function openPartialRequest(address: JsonAny, bytes: JsonAny) {
   const socket = net.createConnection({ host: address.host, port: address.port });
-  const chunks = [];
-  await new Promise((resolve, reject) => {
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
     socket.once('connect', resolve);
     socket.once('error', reject);
   });
   socket.write(bytes);
-  const response = new Promise((resolve, reject) => {
+  const response = new Promise<string>((resolve, reject) => {
     socket.on('data', chunk => chunks.push(chunk));
     socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     socket.on('error', reject);
@@ -123,7 +129,7 @@ async function openPartialRequest(address, bytes) {
   return { response, socket };
 }
 
-async function startedServer(t, options = {}) {
+async function startedServer(t: TestContext, options: JsonAny = {}): Promise<RpcServer> {
   const server = createRpcServer({
     handlers: fakeHandlers(),
     port: 0,
@@ -136,7 +142,7 @@ async function startedServer(t, options = {}) {
 }
 
 test('acquires the state lock and completes recovery before listening', async t => {
-  const events = [];
+  const events: string[] = [];
   const lock = {
     async release() {
       events.push('release');
@@ -144,12 +150,12 @@ test('acquires the state lock and completes recovery before listening', async t 
   };
   let listeningAddress;
   const server = createRpcServer({
-    acquireLock: async statePath => {
+    acquireLock: async (statePath: string) => {
       events.push(`lock:${path.basename(statePath)}`);
       return lock;
     },
     handlers: fakeHandlers({
-      async recoverStartup(receivedLock) {
+      async recoverStartup(receivedLock: JsonAny) {
         assert.equal(receivedLock, lock);
         events.push('recover');
         assert.equal(server.address(), undefined);
@@ -169,10 +175,10 @@ test('acquires the state lock and completes recovery before listening', async t 
 });
 
 test('serves single and batch JSON-RPC payloads and omits notification bodies', async t => {
-  const seen = [];
+  const seen: JsonAny[] = [];
   const server = await startedServer(t, {
     handlers: fakeHandlers({
-      async handle(payload) {
+      async handle(payload: JsonAny) {
         seen.push(payload);
         if (
           (Array.isArray(payload) && payload.every(item => item.id === undefined)) ||
@@ -288,7 +294,7 @@ test('suppresses handler and serialization failures for notification-only payloa
           if (failure === 'handler') {
             throw new Error('private failure');
           }
-          const circular = {};
+          const circular: JsonAny = {};
           circular.result = circular;
           return circular;
         },
@@ -329,7 +335,7 @@ test('returns fallback errors only for response-bearing items in a mixed batch',
           if (failure === 'handler') {
             throw new Error('private failure');
           }
-          const circular = {};
+          const circular: JsonAny = {};
           circular.result = circular;
           return circular;
         },
@@ -351,7 +357,7 @@ test('does not suppress malformed no-id objects on fallback failures', async t =
       handlers: fakeHandlers({
         async handle() {
           if (failure === 'handler') throw new Error('private failure');
-          const circular = {};
+          const circular: JsonAny = {};
           circular.result = circular;
           return circular;
         },
@@ -388,7 +394,7 @@ test('releases the lock when recovery fails and combines a release failure', asy
     statePath: temporaryStatePath(t),
   });
 
-  await assert.rejects(server.start(), error => {
+  await assert.rejects(server.start(), (error: JsonAny) => {
     assert.ok(error instanceof AggregateError);
     assert.deepEqual(error.errors, [recoveryError, releaseError]);
     return true;
@@ -434,7 +440,7 @@ test('refuses two live servers that share a canonical state path', async t => {
 test('rejects unsupported paths, methods, media types, charsets, and content encodings', async t => {
   const server = await startedServer(t);
   const validBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId' });
-  const cases = [
+  const cases: Array<[JsonAny, number]> = [
     [{ method: 'GET', path: '/' }, 405],
     [{ method: 'POST', path: '/jsonrpc', headers: { 'content-type': 'application/json' }, body: validBody }, 404],
     [{ method: 'POST', body: validBody }, 415],
@@ -479,7 +485,7 @@ test('rejects oversized declared and chunked bodies by raw byte count', async t 
   });
   const chunked = await startStreamingRequest(server.address(), {
     headers: { 'content-type': 'application/json' },
-    onRequest(req) {
+    onRequest(req: JsonAny) {
       req.write('123456789');
       req.end('123456789');
     },
@@ -503,7 +509,7 @@ test('times out an incomplete request body without invoking handlers', async t =
 
   const response = await startStreamingRequest(server.address(), {
     headers: { 'content-type': 'application/json', 'transfer-encoding': 'chunked' },
-    onRequest(req) {
+    onRequest(req: JsonAny) {
       req.write('{');
     },
   });
@@ -536,7 +542,7 @@ test('reports ready and draining health without dispatching new RPC work', async
   let calls = 0;
   const server = await startedServer(t, {
     handlers: fakeHandlers({
-      async handle(payload) {
+      async handle(payload: JsonAny) {
         calls += 1;
         entered.resolve();
         await finish.promise;
@@ -572,7 +578,7 @@ test('reports ready and draining health without dispatching new RPC work', async
 test('waits for in-flight handlers, releases last, and makes shutdown idempotent', async t => {
   const entered = deferred();
   const finish = deferred();
-  const events = [];
+  const events: string[] = [];
   const server = createRpcServer({
     acquireLock: async () => ({
       async release() {
@@ -580,7 +586,7 @@ test('waits for in-flight handlers, releases last, and makes shutdown idempotent
       },
     }),
     handlers: fakeHandlers({
-      async handle(payload) {
+      async handle(payload: JsonAny) {
         events.push('handle');
         entered.resolve();
         await finish.promise;
@@ -598,8 +604,8 @@ test('waits for in-flight handlers, releases last, and makes shutdown idempotent
     headers: { 'content-type': 'application/json' },
   });
   const responseOutcome = response.then(
-    value => ({ value }),
-    error => ({ error }),
+    (value: JsonAny) => ({ value }),
+    (error: JsonAny) => ({ error }),
   );
   await entered.promise;
 
@@ -612,7 +618,7 @@ test('waits for in-flight handlers, releases last, and makes shutdown idempotent
 
   assert.deepEqual(events, ['handle', 'handled', 'release']);
   assert.equal(server.address(), undefined);
-  assert.match((await responseOutcome).error.message, /socket hang up|reset/i);
+  assert.match(((await responseOutcome) as { error: JsonAny }).error.message, /socket hang up|reset/i);
   await server.stop();
   assert.equal(events.filter(event => event === 'release').length, 1);
 });
@@ -646,11 +652,11 @@ test('sanitizes handler and serialization failures', async t => {
   const secret = 'private-key-material';
   const server = await startedServer(t, {
     handlers: fakeHandlers({
-      async handle(payload) {
+      async handle(payload: JsonAny) {
         if (payload.method === 'throw') {
           throw new Error(secret);
         }
-        const circular = { jsonrpc: '2.0', id: payload.id };
+        const circular: JsonAny = { jsonrpc: '2.0', id: payload.id };
         circular.result = circular;
         return circular;
       },
@@ -697,7 +703,7 @@ test('surfaces a release failure once after a normal shutdown', async t => {
 
 test('releases the lock when the HTTP listener cannot bind', async t => {
   const occupied = net.createServer();
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     occupied.once('error', reject);
     occupied.listen({ host: '127.0.0.1', port: 0 }, resolve);
   });
@@ -710,11 +716,11 @@ test('releases the lock when the HTTP listener cannot bind', async t => {
       },
     }),
     handlers: fakeHandlers(),
-    port: occupied.address().port,
+    port: (occupied.address() as net.AddressInfo).port,
     statePath: temporaryStatePath(t),
   });
 
-  await assert.rejects(server.start(), error => error.code === 'EADDRINUSE');
+  await assert.rejects(server.start(), (error: JsonAny) => error.code === 'EADDRINUSE');
   assert.equal(releases, 1);
   assert.equal(server.address(), undefined);
 });
@@ -722,7 +728,7 @@ test('releases the lock when the HTTP listener cannot bind', async t => {
 test('validates server dependencies and bounded numeric settings before acquisition', () => {
   const handlers = fakeHandlers();
   const statePath = '/tmp/adapter-state.json';
-  const invalid = [
+  const invalid: JsonAny[] = [
     undefined,
     { handlers, statePath: '' },
     { handlers: {}, statePath },
