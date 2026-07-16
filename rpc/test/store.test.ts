@@ -1,13 +1,13 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { acquireStateLock, assertStateLockHeld } = require('../state-lock.cjs');
-const { JsonStore, STORE_VERSION } = require('../store.cjs');
+import { acquireStateLock, assertStateLockHeld } from '../../dist/rpc/state-lock.js';
+import { JsonStore, STORE_VERSION } from '../../dist/rpc/store.js';
 
-function temporaryState(t) {
+function temporaryState(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-store-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, 'state.json');
@@ -15,11 +15,11 @@ function temporaryState(t) {
 
 test('commits state through a same-directory atomic rename', t => {
   const statePath = temporaryState(t);
-  const renames = [];
+  const renames: Array<[string, string]> = [];
   const fileSystem = {
     ...fs,
-    renameSync(source, destination) {
-      renames.push([source, destination]);
+    renameSync(source: fs.PathLike, destination: fs.PathLike) {
+      renames.push([source.toString(), destination.toString()]);
       return fs.renameSync(source, destination);
     },
   };
@@ -43,7 +43,7 @@ test('commits state through a same-directory atomic rename', t => {
 });
 
 test('refuses corrupt, truncated, and unsupported state instead of resetting it', t => {
-  const cases = [
+  const cases: Array<[string, RegExp]> = [
     ['{', /parse/i],
     [JSON.stringify({ version: STORE_VERSION + 1, chains: {} }), /version/i],
     [JSON.stringify({ version: STORE_VERSION, chains: [] }), /chains/i],
@@ -67,7 +67,7 @@ test('isolates chain state and returns defensive copies', t => {
   });
 
   const first = store.readChain('chain-a');
-  first.marker = 'mutated';
+  first!.marker = 'mutated';
   assert.deepEqual(store.readChain('chain-a'), { marker: 'a' });
   assert.deepEqual(store.readChain('chain-b'), { marker: 'b' });
   assert.equal(store.readChain('chain-c'), undefined);
