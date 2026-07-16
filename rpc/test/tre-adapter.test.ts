@@ -1,22 +1,32 @@
-'use strict';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile, spawnSync } from 'node:child_process';
+import test from 'node:test';
+import { promisify } from 'node:util';
 
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const net = require('node:net');
-const os = require('node:os');
-const path = require('node:path');
-const { execFile, spawnSync } = require('node:child_process');
-const test = require('node:test');
-const { promisify } = require('node:util');
+import { ContractFactory, Interface, Wallet, getCreateAddress, keccak256 } from 'ethers';
+import { TronWeb } from 'tronweb';
 
-const { ContractFactory, Interface, Wallet, getCreateAddress, keccak256 } = require('ethers');
-const { TronWeb } = require('tronweb');
+import { toTronHexAddress } from '../../dist/rpc/address-codec.js';
+import { buildRuntime } from '../../dist/rpc/cli.js';
+import type { AdapterRuntime } from '../../dist/rpc/cli.js';
+import { DEFAULT_CHAIN_ID, DEFAULT_TRE_PRIVATE_KEY, parseConfig } from '../../dist/rpc/config.js';
+import type { Config } from '../../dist/rpc/config.js';
 
-const { toTronHexAddress } = require('../address-codec.cjs');
-const { buildRuntime } = require('../cli.cjs');
-const { DEFAULT_CHAIN_ID, DEFAULT_TRE_PRIVATE_KEY, parseConfig } = require('../config.cjs');
+// These two helper scripts are not part of the rpc-src TypeScript migration (they stay `.cjs`), so
+// they are required directly rather than imported.
 const { startTre, TRE_ENVIRONMENT } = require('../../scripts/start-tre.cjs');
 const { waitForTre } = require('../../scripts/wait-for-tre.cjs');
+
+// Foundry-compiled artifacts, TRON/JSON-RPC responses, and other externally-sourced JSON this test
+// constructs and inspects are deliberately loosely shaped, mirroring how rpc-src/cli.ts and its
+// siblings handle such dynamically-shaped data at runtime. `any` is used deliberately throughout
+// this file for that content, matching rpc-src/cli.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const RUN_TRE = process.env.RUN_TRE_E2E === '1';
 const execFileAsync = promisify(execFile);
@@ -28,31 +38,31 @@ contract Counter {
     function set(uint256 nextValue) external { value = nextValue; }
 }`;
 
-async function unusedLoopbackEndpoint() {
+async function unusedLoopbackEndpoint(): Promise<string> {
   const server = net.createServer();
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  const { port } = server.address();
-  await new Promise((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+  const { port } = server.address() as net.AddressInfo;
+  await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
   return `http://127.0.0.1:${port}`;
 }
 
-async function rpc(url, method, params = [], id = 1) {
+async function rpc(url: string, method: string, params: unknown[] = [], id: number = 1): Promise<JsonAny> {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
   });
   assert.equal(response.status, 200);
-  const body = await response.json();
+  const body: JsonAny = await response.json();
   if (body.error !== undefined)
     throw new Error(`${method}: ${body.error.message} (${body.error.data?.code ?? body.error.code})`);
   return body.result;
 }
 
-function compileCounter(directory) {
+function compileCounter(directory: string): { artifact: JsonAny; out: string } {
   fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
   fs.writeFileSync(
     path.join(directory, 'foundry.toml'),
@@ -65,7 +75,7 @@ function compileCounter(directory) {
   return { artifact, out: path.join(directory, 'out') };
 }
 
-async function startAdapter(config) {
+async function startAdapter(config: Config): Promise<{ runtime: AdapterRuntime; url: string }> {
   const runtime = buildRuntime(config, { host: '127.0.0.1', port: 0 });
   const simulationMode = await runtime.nativeClient.assertSimulationReady();
   assert.equal(simulationMode, 'constant-create');
@@ -122,7 +132,7 @@ test(
     const factory = new ContractFactory(artifact.abi, artifact.bytecode.object, wallet);
     const firstDeploy = await factory.getDeployTransaction(11n);
     const secondDeploy = await factory.getDeployTransaction(22n);
-    const legacy = transaction =>
+    const legacy = (transaction: JsonAny) =>
       wallet.signTransaction({
         chainId: DEFAULT_CHAIN_ID,
         gasLimit: 12_000_000,

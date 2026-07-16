@@ -1,19 +1,17 @@
-'use strict';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const assert = require('node:assert/strict');
-const { EventEmitter } = require('node:events');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
-
-const { AddressMap } = require('../address-map.cjs');
-const { buildRuntime, run } = require('../cli.cjs');
-const { parseConfig } = require('../config.cjs');
-const { CreateReconciler } = require('../create-reconciler.cjs');
-const { TransactionJournal } = require('../journal.cjs');
-const { JsonStore } = require('../store.cjs');
-const { TronClient } = require('../tron-client.cjs');
+import { AddressMap } from '../../dist/rpc/address-map.js';
+import { buildRuntime, run } from '../../dist/rpc/cli.js';
+import { parseConfig } from '../../dist/rpc/config.js';
+import { CreateReconciler } from '../../dist/rpc/create-reconciler.js';
+import { TransactionJournal } from '../../dist/rpc/journal.js';
+import { JsonStore } from '../../dist/rpc/store.js';
+import { TronClient } from '../../dist/rpc/tron-client.js';
 
 const PRIVATE_KEY = '11'.repeat(32);
 const PREDICTED_A = `0x${'11'.repeat(20)}`;
@@ -24,17 +22,17 @@ const CREATOR = `0x${'55'.repeat(20)}`;
 const SOURCE_A = `0x${'aa'.repeat(32)}`;
 const SOURCE_B = `0x${'bb'.repeat(32)}`;
 
-function temporaryDirectory(t) {
+function temporaryDirectory(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-cli-'));
   t.after(() => fs.rmSync(directory, { force: true, recursive: true }));
   return directory;
 }
 
-function output() {
+function output(): { stream: { write(chunk: string): boolean }; read: () => string } {
   let contents = '';
   return {
     stream: {
-      write(chunk) {
+      write(chunk: string): boolean {
         contents += String(chunk);
         return true;
       },
@@ -43,9 +41,9 @@ function output() {
   };
 }
 
-function matchingUpstream(chainId, events) {
+function matchingUpstream(chainId: bigint, events?: string[]) {
   return {
-    async request(method, params) {
+    async request(method: string, params: unknown[]): Promise<string> {
       assert.equal(method, 'eth_chainId');
       assert.deepEqual(params, []);
       events?.push('chain');
@@ -54,7 +52,7 @@ function matchingUpstream(chainId, events) {
   };
 }
 
-function readOnlyEnvironment(stateFile) {
+function readOnlyEnvironment(stateFile: string): NodeJS.ProcessEnv {
   return {
     TRON_NETWORK: 'nile',
     TRON_CHAIN_ID: '3448148188',
@@ -62,7 +60,7 @@ function readOnlyEnvironment(stateFile) {
   };
 }
 
-function seedMappings(stateFile) {
+function seedMappings(stateFile: string): void {
   const store = new JsonStore(stateFile);
   const addressMap = new AddressMap(store, 'nile:3448148188');
   for (const mapping of [
@@ -123,7 +121,7 @@ test('builds the complete recovery-enabled adapter runtime from validated config
 });
 
 test('starts on loopback, reports only sanitized readiness data, and stops once for repeated signals', async () => {
-  const events = [];
+  const events: string[] = [];
   const signals = new EventEmitter();
   const stdout = output();
   const stderr = output();
@@ -192,8 +190,8 @@ test('keeps both signal handlers installed throughout draining and still stops o
   const signals = new EventEmitter();
   const stdout = output();
   let stopCalls = 0;
-  let finishStop;
-  const draining = new Promise(resolve => {
+  let finishStop: () => void;
+  const draining = new Promise<void>(resolve => {
     finishStop = resolve;
   });
   const server = {
@@ -229,7 +227,7 @@ test('keeps both signal handlers installed throughout draining and still stops o
   signals.emit('SIGTERM');
   signals.emit('SIGTERM');
   assert.equal(stopCalls, 1);
-  finishStop();
+  finishStop!();
 
   assert.equal(await running, 0);
   assert.equal(stopCalls, 1);
@@ -259,7 +257,7 @@ test('requires explicit opt-in before binding to a non-loopback host', async () 
 test('accepts explicit non-loopback opt-in and strict canonical ports', async () => {
   const signals = new EventEmitter();
   const stdout = output();
-  const seen = [];
+  const seen: string[] = [];
   stdout.stream.write = chunk => {
     seen.push(String(chunk));
     signals.emit('SIGTERM');
@@ -491,7 +489,7 @@ test('mappings returns predicted-address-sorted stable JSON without private key 
   assert.equal(stderr.read(), '');
   const mappings = JSON.parse(stdout.read());
   assert.deepEqual(
-    mappings.map(mapping => mapping.predicted),
+    mappings.map((mapping: { predicted: string }) => mapping.predicted),
     [PREDICTED_A, PREDICTED_B],
   );
   assert.equal(Object.keys(mappings[0]).join(','), 'actual,creator,predicted,sender,sourceTransaction');
