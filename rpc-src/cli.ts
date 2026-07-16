@@ -354,7 +354,11 @@ function escapeRegExp(value: string): string {
 }
 
 function sanitizedMessage(error: unknown, environment: NodeJS.ProcessEnv): string {
-  const candidate = isObject(error) ? error.message : undefined;
+  // `isObject` would exclude arrays and functions, but the original `error?.message` reads
+  // `.message` off *any* non-null/undefined thrown value (arrays and functions can carry
+  // arbitrary properties too); cast instead of narrowing so exotic thrown values keep matching
+  // the original's byte-for-byte behavior.
+  const candidate = (error as { message?: unknown } | null | undefined)?.message;
   let message = typeof candidate === 'string' && candidate.length > 0 ? candidate : 'Command failed';
   for (const key of ['TRON_PRIVATE_KEY', 'TRON_RPC_URL']) {
     const secret = environment?.[key];
