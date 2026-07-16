@@ -27,7 +27,7 @@ export interface DecodedLegacyTransaction {
 }
 
 class TransactionDecodeError extends Error {
-  code: string;
+  declare code: string;
 
   constructor(code: string, message: string, options?: ErrorOptions) {
     super(message, options);

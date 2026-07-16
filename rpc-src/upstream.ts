@@ -18,7 +18,7 @@ function own(object: object, key: string): boolean {
 
 class UpstreamRpcError extends Error {
   code: number;
-  data?: unknown;
+  declare data?: unknown;
 
   constructor(code: number, message: string, data: unknown, hasData = false) {
     super(message);

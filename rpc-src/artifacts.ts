@@ -161,8 +161,8 @@ export interface DeploymentMatchResult {
 }
 
 class ArtifactProvenanceError extends Error {
-  code: string;
-  details: Record<string, unknown>;
+  declare code: string;
+  declare details: Record<string, unknown>;
 
   constructor(code: string, message: string, details: Record<string, unknown> = {}) {
     super(message);
