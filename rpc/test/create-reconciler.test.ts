@@ -1,15 +1,22 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { getCreateAddress, keccak256 } = require('ethers');
+import { getCreateAddress, keccak256 } from 'ethers';
 
-const { AddressMap } = require('../address-map.cjs');
-const { CreateReconciler, CreateReconciliationError } = require('../create-reconciler.cjs');
-const { TransactionJournal } = require('../journal.cjs');
-const { JsonStore } = require('../store.cjs');
+import { AddressMap } from '../../dist/rpc/address-map.js';
+import { CreateReconciler, CreateReconciliationError } from '../../dist/rpc/create-reconciler.js';
+import { TransactionJournal } from '../../dist/rpc/journal.js';
+import { JsonStore } from '../../dist/rpc/store.js';
+
+// Test-local fixtures (native transaction/simulation/receipt payloads, including deliberately
+// invalid overrides) are deliberately loosely shaped, the same way the real caller-supplied input
+// rpc-src/create-reconciler.ts validates at runtime is. `any` is used deliberately throughout this
+// file for that content, matching rpc-src/create-reconciler.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const CHAIN = 'tre:728126428';
 const SOURCE_BYTES = `0x${'01'.repeat(97)}`;
@@ -43,7 +50,7 @@ const UPSTREAM_V4_TRANSPARENT_IDENTITY = {
     'node_modules/@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
 };
 
-function fixture(t) {
+function fixture(t: TestContext) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-reconciler-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const statePath = path.join(directory, 'state.json');
@@ -59,7 +66,7 @@ function nativeTransaction() {
   return { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID };
 }
 
-function simulation(attempts) {
+function simulation(attempts: JsonAny[]) {
   return {
     mode: 'exact-signed',
     nativeTransactionId: NATIVE_TXID,
@@ -72,7 +79,7 @@ function simulation(attempts) {
   };
 }
 
-function payloadSimulation(attempts, overrides = {}) {
+function payloadSimulation(attempts: JsonAny[], overrides: JsonAny = {}) {
   return {
     mode: 'constant-create',
     nativeTransactionId: NATIVE_TXID,
@@ -83,11 +90,11 @@ function payloadSimulation(attempts, overrides = {}) {
   };
 }
 
-function attempt(callerAddress, createdAddress, success = true) {
+function attempt(callerAddress: JsonAny, createdAddress: JsonAny, success = true) {
   return { callerAddress, createdAddress, success };
 }
 
-function context(overrides = {}) {
+function context(overrides: JsonAny = {}) {
   return {
     kind: 'deployment',
     from: SENDER,
@@ -102,7 +109,7 @@ function context(overrides = {}) {
   };
 }
 
-function receipt(creations) {
+function receipt(creations: JsonAny[]): JsonAny {
   return {
     transactionHash: SOURCE_HASH,
     blockNumber: '0x2a',
@@ -113,7 +120,7 @@ function receipt(creations) {
     tron: {
       nativeTransactionId: NATIVE_TXID,
       actualContractAddress: ROOT_ACTUAL,
-      internalTransactions: creations.map((entry, index) => ({
+      internalTransactions: creations.map((entry: JsonAny, index: number) => ({
         hash: `0x${String(index + 1).padStart(64, '0')}`,
         callerAddress: typeof entry === 'string' ? ROOT_ACTUAL : (entry.callerAddress ?? ROOT_ACTUAL),
         transferToAddress: typeof entry === 'string' ? entry : entry.actualAddress,
@@ -125,7 +132,12 @@ function receipt(creations) {
   };
 }
 
-function prepareAndBroadcast(journal, reconciler, attempts, prepareContext = context()) {
+function prepareAndBroadcast(
+  journal: TransactionJournal,
+  reconciler: CreateReconciler,
+  attempts: JsonAny[],
+  prepareContext: JsonAny = context(),
+) {
   const prepared = reconciler.recordPreparedNative(
     SOURCE_HASH,
     nativeTransaction(),
@@ -133,7 +145,7 @@ function prepareAndBroadcast(journal, reconciler, attempts, prepareContext = con
     prepareContext,
   );
   journal.recordBroadcast(SOURCE_HASH);
-  return prepared.childCreatePlan;
+  return prepared.childCreatePlan!;
 }
 
 test('reverse-resolves the actual caller and derives the first child with CREATE nonce 1', t => {
@@ -144,7 +156,7 @@ test('reverse-resolves the actual caller and derives the first child with CREATE
   assert.equal(plan.attempts[0].predictedCaller, ROOT_PREDICTED);
   assert.equal(plan.attempts[0].nonce, '1');
   assert.equal(plan.attempts[0].predictedAddress, predicted.toLowerCase());
-  assert.deepEqual(journal.get(SOURCE_HASH).childCreatePlan, plan);
+  assert.deepEqual(journal.get(SOURCE_HASH)!.childCreatePlan, plan);
 });
 
 test('advances caller nonces for failed attempts and maps successful children in execution order', t => {
@@ -184,7 +196,7 @@ test('concurrent factory transactions reserve distinct predicted children at pre
 
   const factoryPredicted = EXISTING_PREDICTED;
   const factoryActual = EXISTING_ACTUAL;
-  const callContext = nonce =>
+  const callContext = (nonce: JsonAny) =>
     context({
       kind: 'call',
       to: factoryPredicted,
@@ -195,7 +207,7 @@ test('concurrent factory transactions reserve distinct predicted children at pre
       provenanceHash: null,
       nonce,
     });
-  const factorySimulation = child => ({
+  const factorySimulation = (child: JsonAny) => ({
     mode: 'exact-signed',
     nativeTransactionId: NATIVE_TXID,
     simulationRootAddress: factoryActual,
@@ -208,13 +220,13 @@ test('concurrent factory transactions reserve distinct predicted children at pre
     nativeTransaction(),
     factorySimulation(CHILD_ACTUAL_1),
     callContext('0'),
-  ).childCreatePlan;
+  ).childCreatePlan!;
   const planB = reconciler.recordPreparedNative(
     secondHash,
     nativeTransaction(),
     factorySimulation(CHILD_ACTUAL_2),
     callContext('1'),
-  ).childCreatePlan;
+  ).childCreatePlan!;
 
   // The first factory transaction reserved child nonce 1 at prepare, so the second derives nonce 2
   // and a distinct predicted child address rather than colliding on the same one.
@@ -251,9 +263,9 @@ test('persists payload-relative mode, normalizes its synthetic root, and binds o
     context(),
   );
 
-  assert.equal(prepared.childCreatePlan.mode, 'constant-create');
-  assert.equal(prepared.childCreatePlan.simulationRootAddress, syntheticRoot);
-  assert.equal(prepared.childCreatePlan.attempts[0].predictedCaller, ROOT_PREDICTED);
+  assert.equal(prepared.childCreatePlan!.mode, 'constant-create');
+  assert.equal(prepared.childCreatePlan!.simulationRootAddress, syntheticRoot);
+  assert.equal(prepared.childCreatePlan!.attempts[0].predictedCaller, ROOT_PREDICTED);
   assert.equal(addressMap.resolveActual(syntheticChild), undefined);
   journal.recordBroadcast(SOURCE_HASH);
   const translated = receipt([CHILD_ACTUAL_1]);
@@ -276,7 +288,7 @@ test('persists payload-relative mode, normalizes its synthetic root, and binds o
 });
 
 test('fails closed outside the distinguishable stock constant-simulation CREATE profile', t => {
-  const cases = [
+  const cases: JsonAny[] = [
     {
       name: 'transparent proxy missing its ProxyAdmin',
       operationContext: context(),
@@ -316,15 +328,15 @@ test('fails closed outside the distinguishable stock constant-simulation CREATE 
           payloadSimulation(item.attempts, item.simulationOverrides),
           item.operationContext,
         ),
-      error => error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
+      (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
       item.name,
     );
-    assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+    assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
   }
 });
 
 test('distinguishes v5 child-creating and upstream v4 zero-child transparent proxy profiles', t => {
-  const cases = [
+  const cases: JsonAny[] = [
     {
       name: 'TRON v5 accepts its one successful ProxyAdmin child',
       operationContext: context(),
@@ -362,14 +374,15 @@ test('distinguishes v5 child-creating and upstream v4 zero-child transparent pro
       );
     if (item.accepted) {
       assert.doesNotThrow(prepare, item.name);
-      assert.equal(journal.get(SOURCE_HASH).state, 'native-built');
+      assert.equal(journal.get(SOURCE_HASH)!.state, 'native-built');
     } else {
       assert.throws(
         prepare,
-        error => error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
+        (error: JsonAny) =>
+          error instanceof CreateReconciliationError && error.code === 'UNSAFE_CONSTANT_CREATE_PROFILE',
         item.name,
       );
-      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+      assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
     }
   }
 });
@@ -394,8 +407,8 @@ test('recognizes every supported TRON Contracts layout and preserves its ProxyAd
       payloadSimulation([attempt(`0x${'77'.repeat(20)}`, `0x${'88'.repeat(20)}`)]),
       context({ artifactIdentity: identity }),
     );
-    assert.equal(journal.get(SOURCE_HASH).state, 'native-built');
-    assert.deepEqual(prepared.childCreatePlan.attempts[0].childMetadata?.artifactIdentity, {
+    assert.equal(journal.get(SOURCE_HASH)!.state, 'native-built');
+    assert.deepEqual(prepared.childCreatePlan!.attempts[0].childMetadata?.artifactIdentity, {
       sourceName: `${root}contracts/proxy/transparent/ProxyAdmin.sol`,
       contractName: 'ProxyAdmin',
       fullyQualifiedName: `${root}contracts/proxy/transparent/ProxyAdmin.sol:ProxyAdmin`,
@@ -412,7 +425,7 @@ test('compares every exact CREATE attempt status and requires a successful top-l
   const statusMismatch = receipt([CHILD_ACTUAL_1, { actualAddress: CHILD_ACTUAL_2, rejected: false }]);
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, statusMismatch),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
   );
 
   const other = fixture(t);
@@ -421,7 +434,7 @@ test('compares every exact CREATE attempt status and requires a successful top-l
   reverted.status = '0x0';
   assert.throws(
     () => other.reconciler.reconcile(SOURCE_HASH, reverted),
-    error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
   );
 });
 
@@ -492,7 +505,7 @@ test('does not label a transparent proxy runtime child as its constructor-create
     simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
     callContext,
   );
-  assert.equal(prepared.childCreatePlan.attempts[0].childMetadata, undefined);
+  assert.equal(prepared.childCreatePlan!.attempts[0].childMetadata, undefined);
   journal.recordBroadcast(SOURCE_HASH);
   const callReceipt = receipt([CHILD_ACTUAL_1]);
   callReceipt.to = ROOT_PREDICTED;
@@ -510,11 +523,11 @@ test('rejects a CREATE2 child attempt before journal-prep and broadcast', t => {
 
   assert.throws(
     () => reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), simulation([create2Attempt]), context()),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE2_REJECTED',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE2_REJECTED',
   );
   // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.signedNativeTransaction, undefined);
   assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /failed.*broadcast/i);
 });
 
@@ -534,11 +547,11 @@ test('fails closed on an exact-signed child create whose opcode kind is absent',
 
   assert.throws(
     () => reconciler.recordPreparedNative(SOURCE_HASH, nativeTransaction(), kindlessSimulation, context()),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_KIND_UNKNOWN',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_KIND_UNKNOWN',
   );
   // Fails closed pre-broadcast: no native transaction was recorded, so nothing can be broadcast.
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.signedNativeTransaction, undefined);
   assert.throws(() => journal.recordBroadcast(SOURCE_HASH), /failed.*broadcast/i);
 });
 
@@ -553,9 +566,9 @@ test('refuses incomplete simulation before broadcast and persists a deterministi
         { nativeTransactionId: NATIVE_TXID, traceComplete: false, childCreateAttempts: [] },
         context(),
       ),
-    error => error instanceof CreateReconciliationError && error.code === 'SIMULATION_INCOMPLETE',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'SIMULATION_INCOMPLETE',
   );
-  assert.deepEqual(journal.get(SOURCE_HASH).failure, {
+  assert.deepEqual(journal.get(SOURCE_HASH)!.failure, {
     code: 'SIMULATION_INCOMPLETE',
     message: 'Exact simulation did not provide a complete child CREATE trace',
   });
@@ -573,9 +586,9 @@ test('binds the complete simulation trace to the exact signed native transaction
         { ...simulation([]), nativeTransactionId: 'ef'.repeat(32) },
         context(),
       ),
-    error => error instanceof CreateReconciliationError && error.code === 'SIMULATION_TRANSACTION_MISMATCH',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'SIMULATION_TRANSACTION_MISMATCH',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
 });
 
 test('recovers only a simulation-complete native-built transaction with its exact operation context', t => {
@@ -585,10 +598,10 @@ test('recovers only a simulation-complete native-built transaction with its exac
     nativeTransaction(),
     simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
     context(),
-  ).childCreatePlan;
+  ).childCreatePlan!;
 
   const restarted = new TransactionJournal(new JsonStore(statePath), CHAIN, { ownerId: 'boot-b' });
-  const record = restarted.get(SOURCE_HASH);
+  const record = restarted.get(SOURCE_HASH)!;
   assert.equal(record.state, 'native-built');
   assert.deepEqual(
     {
@@ -610,7 +623,7 @@ test('refuses a persisted plan whose predicted child is not derived from its cal
     simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
     context(),
   );
-  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const state: JsonAny = JSON.parse(fs.readFileSync(statePath, 'utf8'));
   state.chains[CHAIN].transactionJournal.records[SOURCE_HASH].childCreatePlan.attempts[0].predictedAddress =
     CHILD_ACTUAL_3;
   fs.writeFileSync(statePath, JSON.stringify(state));
@@ -632,9 +645,9 @@ for (const mismatch of ['count', 'order']) {
 
     assert.throws(
       () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
-      error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
+      (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
     );
-    const retained = journal.get(SOURCE_HASH);
+    const retained = journal.get(SOURCE_HASH)!;
     assert.equal(retained.state, 'failed');
     assert.deepEqual(retained.receipt, mismatchedReceipt);
     assert.deepEqual(retained.childCreatePlan, plan);
@@ -653,9 +666,9 @@ test('retains a fatal mismatch when a receipt creation has a different caller th
 
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_MISMATCH',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
   assert.equal(addressMap.list().length, 0);
 });
 
@@ -678,10 +691,10 @@ test('rejects a simulated child mapping conflict before native-built or broadcas
         simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
         context(),
       ),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(journal.get(SOURCE_HASH).signedNativeTransaction, undefined);
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.signedNativeTransaction, undefined);
   assert.equal(addressMap.toActual(predicted), CHILD_ACTUAL_3);
   assert.equal(addressMap.resolveContractMetadata(predicted), undefined);
   assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
@@ -717,9 +730,9 @@ test('rejects conflicting persisted child metadata during simulation preflight',
         simulation([attempt(ROOT_ACTUAL, CHILD_ACTUAL_1)]),
         context(),
       ),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_SIMULATION_CONFLICT',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
 });
 
 test('retains a conflict that appears only after successful simulation preflight', t => {
@@ -742,17 +755,17 @@ test('retains a conflict that appears only after successful simulation preflight
 
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1])),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_CONFLICT',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_CONFLICT',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
-  assert.equal(journal.get(SOURCE_HASH).receipt.tron.internalTransactions.length, 1);
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.receipt.tron.internalTransactions.length, 1);
   assert.equal(addressMap.toActual(predicted), CHILD_ACTUAL_3);
   // The child nonce was reserved at prepare and remains reserved after the post-broadcast conflict.
   assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 2n);
 });
 
 test('binds every top-level deployment receipt field before publishing mappings', async t => {
-  const mismatches = [
+  const mismatches: [string, (value: JsonAny) => void][] = [
     ['source hash', value => (value.transactionHash = `0x${'ff'.repeat(32)}`)],
     ['sender', value => (value.from = CHILD_ACTUAL_3)],
     ['to', value => (value.to = CHILD_ACTUAL_3)],
@@ -768,9 +781,9 @@ test('binds every top-level deployment receipt field before publishing mappings'
 
       assert.throws(
         () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
-        error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+        (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
       );
-      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+      assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
       assert.equal(addressMap.list().length, 0);
       assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
     });
@@ -786,7 +799,7 @@ test('binds every top-level call receipt field before confirmation', async t => 
     artifactIdentity: null,
     provenanceHash: null,
   });
-  const mismatches = [
+  const mismatches: [string, (value: JsonAny) => void][] = [
     ['source hash', value => (value.transactionHash = `0x${'ff'.repeat(32)}`)],
     ['sender', value => (value.from = CHILD_ACTUAL_3)],
     ['target', value => (value.to = CHILD_ACTUAL_3)],
@@ -804,9 +817,9 @@ test('binds every top-level call receipt field before confirmation', async t => 
 
       assert.throws(
         () => reconciler.reconcile(SOURCE_HASH, mismatchedReceipt),
-        error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+        (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
       );
-      assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+      assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
       assert.equal(addressMap.list().length, 0);
     });
   }
@@ -849,7 +862,7 @@ test('rejects a native call receipt that reports a different actual target', t =
 
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, callReceipt),
-    error => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'TOP_LEVEL_RECEIPT_MISMATCH',
   );
 });
 
@@ -881,8 +894,8 @@ test('refuses a reconcile whose reserved caller counter has regressed', t => {
 
   assert.throws(
     () => reconciler.reconcile(SOURCE_HASH, receipt([CHILD_ACTUAL_1])),
-    error => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_COUNTER_CONFLICT',
+    (error: JsonAny) => error instanceof CreateReconciliationError && error.code === 'CHILD_CREATE_COUNTER_CONFLICT',
   );
-  assert.equal(journal.get(SOURCE_HASH).state, 'failed');
+  assert.equal(journal.get(SOURCE_HASH)!.state, 'failed');
   assert.equal(reconciler.nextNonce(ROOT_PREDICTED), 1n);
 });
