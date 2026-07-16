@@ -11,7 +11,7 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   const remappings = fs.readFileSync('remappings.txt', 'utf8');
 
   assert.equal(pkg.name, '@openzeppelin/foundry-upgrades-tron');
-  assert.deepEqual(pkg.files, ['src/**/*', 'rpc/*.cjs', 'rpc/SECURITY.md']);
+  assert.deepEqual(pkg.files, ['src/**/*', 'dist/rpc/**/*', 'rpc/SECURITY.md']);
   assert.equal(pkg.engines.node, '>=22');
   assert.equal(pkg.scripts.test, 'npm run test:package && npm run test:solidity && npm run test:rpc');
   assert.equal(pkg.scripts['test:package'], 'node scripts/test-package.cjs');
@@ -19,12 +19,12 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.equal(pkg.scripts['test:rpc'], 'node scripts/test-rpc.cjs');
   assert.equal(pkg.scripts.lint, 'node scripts/lint.cjs');
   assert.equal(pkg.scripts['lint:fix'], 'node scripts/lint.cjs --write');
-  assert.equal(pkg.scripts.prepack, 'node scripts/require-package-contents.cjs');
-  assert.equal(pkg.scripts.rpc, 'node rpc/cli.cjs');
-  assert.equal(pkg.scripts['rpc:start'], 'node rpc/cli.cjs start');
-  assert.equal(pkg.scripts['rpc:resolve'], 'node rpc/cli.cjs resolve');
-  assert.equal(pkg.scripts['rpc:mappings'], 'node rpc/cli.cjs mappings');
-  assert.deepEqual(pkg.bin, { 'openzeppelin-foundry-upgrades-tron': 'rpc/cli.cjs' });
+  assert.equal(pkg.scripts.prepack, 'npm run build:rpc && node scripts/require-package-contents.cjs');
+  assert.equal(pkg.scripts.rpc, 'node dist/rpc/cli.js');
+  assert.equal(pkg.scripts['rpc:start'], 'node dist/rpc/cli.js start');
+  assert.equal(pkg.scripts['rpc:resolve'], 'node dist/rpc/cli.js resolve');
+  assert.equal(pkg.scripts['rpc:mappings'], 'node dist/rpc/cli.js mappings');
+  assert.deepEqual(pkg.bin, { 'openzeppelin-foundry-upgrades-tron': 'dist/rpc/cli.js' });
 
   assert.match(foundryConfig, /^ffi = true$/m);
   assert.match(foundryConfig, /^ast = true$/m);
@@ -170,11 +170,23 @@ test('published package contains runtime RPC files but no tests or fixture build
   assert.equal(packed.status, 0, packed.stderr || packed.stdout);
   const files = JSON.parse(packed.stdout)[0].files.map(file => file.path);
 
-  for (const runtime of ['src/Upgrades.sol', 'src/LegacyUpgrades.sol', 'rpc/cli.cjs', 'rpc/SECURITY.md']) {
+  for (const runtime of ['src/Upgrades.sol', 'src/LegacyUpgrades.sol', 'dist/rpc/cli.js', 'rpc/SECURITY.md']) {
     assert.ok(files.includes(runtime), `missing ${runtime}`);
   }
   assert.equal(
     files.some(file => file.startsWith('rpc/test/')),
+    false,
+  );
+  assert.equal(
+    files.some(file => file.startsWith('rpc-src/')),
+    false,
+  );
+  assert.equal(
+    files.some(file => /\.test\.(c?ts|c?js)$/u.test(file)),
+    false,
+  );
+  assert.equal(
+    files.some(file => /^tsconfig.*\.json$/u.test(path.basename(file))),
     false,
   );
   assert.equal(
