@@ -1,11 +1,16 @@
-'use strict';
+import assert from 'node:assert/strict';
+import test from 'node:test';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import { AbiCoder, Interface, getAddress, zeroPadValue } from 'ethers';
 
-const { AbiCoder, Interface, getAddress, zeroPadValue } = require('ethers');
-
-const { rewriteAbiValues, rewriteCall, rewriteCalldata, rewriteDeployment } = require('../rewriter.cjs');
+import {
+  rewriteAbiValues,
+  rewriteCall,
+  rewriteCalldata,
+  rewriteDeployment,
+  type RewriterAddressMap,
+  type RewriterDependencies,
+} from '../../dist/rpc/rewriter.js';
 
 const PREDICTED_IMPLEMENTATION = getAddress(`0x${'11'.repeat(20)}`);
 const ACTUAL_IMPLEMENTATION = getAddress(`0x${'a1'.repeat(20)}`);
@@ -28,7 +33,7 @@ const records = [
   [PREDICTED_LIBRARY, ACTUAL_LIBRARY],
 ].map(([predicted, actual]) => ({ predicted: predicted.toLowerCase(), actual: actual.toLowerCase() }));
 
-function fakeAddressMap() {
+function fakeAddressMap(): RewriterAddressMap {
   return {
     toActual(address) {
       const normalized = address.toLowerCase();
@@ -48,7 +53,7 @@ const initializerAbi = [
   'function initialize(address owner,address[][] peers,(address target,(address nested) child) config,(address,uint256)[][2] matrix,bytes32 marker)',
 ];
 
-function dependencies(overrides = {}) {
+function dependencies(overrides: Partial<RewriterDependencies> = {}): RewriterDependencies {
   return {
     addressMap: fakeAddressMap(),
     async resolveArtifact(address) {
@@ -65,7 +70,7 @@ function dependencies(overrides = {}) {
   };
 }
 
-function initializerData({ owner = PREDICTED_OWNER, marker = SAFE_MARKER } = {}) {
+function initializerData({ owner = PREDICTED_OWNER, marker = SAFE_MARKER }: { owner?: string; marker?: string } = {}) {
   return new Interface(initializerAbi).encodeFunctionData('initialize', [
     owner,
     [[PREDICTED_PROXY, ACTUAL_PROXY], [UNMAPPED]],
@@ -81,7 +86,7 @@ function initializerData({ owner = PREDICTED_OWNER, marker = SAFE_MARKER } = {})
   ]);
 }
 
-function assertInitializerRewritten(data, expectedOwner = ACTUAL_OWNER) {
+function assertInitializerRewritten(data: string, expectedOwner = ACTUAL_OWNER) {
   const decoded = new Interface(initializerAbi).decodeFunctionData('initialize', data);
   assert.equal(decoded.owner, expectedOwner);
   assert.equal(decoded.peers[0][0], ACTUAL_PROXY);
@@ -95,7 +100,24 @@ function assertInitializerRewritten(data, expectedOwner = ACTUAL_OWNER) {
   assert.equal(decoded.marker, SAFE_MARKER);
 }
 
-function constructorMatch({ fullyQualifiedName, inputs, values, creationBytecode = '0x60006000', artifact = {} }) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
+
+interface ConstructorMatchOptions {
+  fullyQualifiedName: string;
+  inputs: JsonAny[];
+  values: JsonAny[];
+  creationBytecode?: string;
+  artifact?: JsonAny;
+}
+
+function constructorMatch({
+  fullyQualifiedName,
+  inputs,
+  values,
+  creationBytecode = '0x60006000',
+  artifact = {},
+}: ConstructorMatchOptions) {
   return {
     fullyQualifiedName,
     abi: [{ type: 'constructor', inputs }],
@@ -261,7 +283,10 @@ test('rewrites the canonical beacon constructor and BeaconProxy initializer', as
 });
 
 test('resolves BeaconProxy metadata through mapped actual beacon and implementation addresses', async () => {
-  const seen = { beacon: undefined, implementation: undefined };
+  const seen: { beacon: string | undefined; implementation: string | undefined } = {
+    beacon: undefined,
+    implementation: undefined,
+  };
   const deps = dependencies({
     async resolveBeaconImplementation(address) {
       seen.beacon = address;
@@ -574,7 +599,7 @@ test('passes an unknown selector only through a declared fallback after opaque s
       { targetKind: 'beacon-proxy', abi: fallbackAbi },
       dependencies(),
     ),
-    error => error.code === 'OPAQUE_PREDICTED_ADDRESS',
+    (error: unknown) => (error as { code?: string }).code === 'OPAQUE_PREDICTED_ADDRESS',
   );
 
   await assert.rejects(
@@ -667,7 +692,10 @@ test('rejects a predicted address smuggled through a numeric constructor field',
     values: [BigInt(PREDICTED_OWNER)],
   });
 
-  await assert.rejects(rewriteDeployment(match, dependencies()), error => error.code === 'OPAQUE_PREDICTED_ADDRESS');
+  await assert.rejects(
+    rewriteDeployment(match, dependencies()),
+    (error: unknown) => (error as { code?: string }).code === 'OPAQUE_PREDICTED_ADDRESS',
+  );
 });
 
 test('allows a genuine numeric constructor field that is not a known predicted address', async () => {
@@ -686,7 +714,7 @@ test('rejects a predicted address smuggled through a numeric ABI calldata field'
   const calldata = new Interface(abi).encodeFunctionData('stash', [BigInt(PREDICTED_OWNER)]);
   await assert.rejects(
     rewriteCalldata(calldata, abi, dependencies()),
-    error => error.code === 'OPAQUE_PREDICTED_ADDRESS',
+    (error: unknown) => (error as { code?: string }).code === 'OPAQUE_PREDICTED_ADDRESS',
   );
 });
 
