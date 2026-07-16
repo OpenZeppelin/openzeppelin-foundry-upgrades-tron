@@ -1,7 +1,7 @@
-const assert = require('node:assert/strict');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import test from 'node:test';
 
-const { normalizeAddress, toBase58Address, toEvmAddress, toTronHexAddress } = require('../address-codec.cjs');
+import { normalizeAddress, toBase58Address, toEvmAddress, toTronHexAddress } from '../../dist/rpc/address-codec.js';
 
 const EVM_ADDRESS = '0x1111111111111111111111111111111111111111';
 const TRON_HEX_ADDRESS = '411111111111111111111111111111111111111111';
@@ -54,7 +54,9 @@ test('preserves the zero address across all encodings', () => {
 });
 
 test('rejects malformed, non-TRON, and non-string addresses', () => {
-  const invalidAddresses = [
+  // Deliberately includes non-string runtime values (null, 0) to verify normalizeAddress
+  // rejects them at runtime despite its typed signature requiring a string.
+  const invalidAddresses: unknown[] = [
     '',
     ' 0x1111111111111111111111111111111111111111',
     '0x111111111111111111111111111111111111111',
@@ -67,6 +69,6 @@ test('rejects malformed, non-TRON, and non-string addresses', () => {
   ];
 
   for (const address of invalidAddresses) {
-    assert.throws(() => normalizeAddress(address), /invalid TRON address/i, String(address));
+    assert.throws(() => normalizeAddress(address as string), /invalid TRON address/i, String(address));
   }
 });
