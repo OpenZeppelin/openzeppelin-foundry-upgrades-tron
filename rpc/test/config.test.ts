@@ -1,10 +1,10 @@
-const assert = require('node:assert/strict');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import test from 'node:test';
 
-const { computeAddress } = require('ethers');
+import { computeAddress } from 'ethers';
 
-const {
+import {
   DEFAULT_FEE_LIMIT,
   DEFAULT_TRE_ENDPOINT,
   DEFAULT_TRE_PRIVATE_KEY,
@@ -12,7 +12,7 @@ const {
   normalizeEndpoint,
   parseConfig,
   parseStateConfig,
-} = require('../config.cjs');
+} from '../../dist/rpc/config.js';
 
 const PRIVATE_KEY = '11'.repeat(32);
 const SECOND_TRE_PRIVATE_KEY = 'f1aa5a7966c3863ccde3047f6a1e266cdc0c76b399e256b8fede92b1c69e4f4e';
