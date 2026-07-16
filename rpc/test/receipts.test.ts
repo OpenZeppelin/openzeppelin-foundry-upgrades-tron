@@ -1,7 +1,7 @@
-const assert = require('node:assert/strict');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import test from 'node:test';
 
-const { internalCreateAttempts, internalCreateTransactions, translateReceipt } = require('../receipts.cjs');
+import { internalCreateAttempts, internalCreateTransactions, translateReceipt } from '../../dist/rpc/receipts.js';
 
 const SOURCE_HASH = `0x${'aa'.repeat(32)}`;
 const NATIVE_TXID = 'bb'.repeat(32);
@@ -23,7 +23,7 @@ function nativeTransaction(type = 'CreateSmartContract') {
   };
 }
 
-function confirmedInfo(overrides = {}) {
+function confirmedInfo(overrides: Record<string, unknown> = {}) {
   return {
     id: NATIVE_TXID,
     blockNumber: 42,
@@ -240,7 +240,7 @@ test('refuses unconfirmed, mismatched, or malformed native receipt data', () => 
     /transaction index/i,
   );
   const malformedRejected = confirmedInfo();
-  malformedRejected.internal_transactions[0].rejected = 'false';
+  malformedRejected.internal_transactions[0].rejected = 'false' as unknown as boolean;
   assert.throws(
     () =>
       translateReceipt(
@@ -285,7 +285,7 @@ test('fails closed on an internal transaction whose note is missing or malformed
 
   // End-to-end: a non-string raw note decodes to null and the classifier rejects it.
   const info = confirmedInfo();
-  info.internal_transactions[0].note = 42;
+  info.internal_transactions[0].note = 42 as unknown as string;
   const translated = translateReceipt(
     { transaction: nativeTransaction(), info },
     { sourceTransactionHash: SOURCE_HASH, predictedContractAddress: PREDICTED_CONTRACT },
