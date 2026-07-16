@@ -1,16 +1,14 @@
-'use strict';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import { Transaction, Wallet, encodeRlp, hexlify, toBeArray, type TransactionRequest } from 'ethers';
 
-const { Transaction, Wallet, encodeRlp, hexlify, toBeArray } = require('ethers');
-
-const { decodeLegacyTransaction } = require('../transactions.cjs');
+import { decodeLegacyTransaction } from '../../dist/rpc/transactions.js';
 
 const wallet = new Wallet(`0x${'11'.repeat(32)}`);
 const recipient = `0x${'22'.repeat(20)}`;
 
-async function signed(overrides = {}) {
+async function signed(overrides: TransactionRequest = {}): Promise<string> {
   return wallet.signTransaction({
     type: 0,
     chainId: 1337,
@@ -122,12 +120,12 @@ test('rejects malformed, unsigned, typed, and unprotected transactions', async t
 test('rejects noncanonical legacy RLP', async () => {
   const raw = await signed();
   const transaction = Transaction.from(raw);
-  const signature = transaction.signature;
+  const signature = transaction.signature!;
   const noncanonical = encodeRlp([
     hexlify(toBeArray(transaction.nonce)),
-    hexlify(toBeArray(transaction.gasPrice)),
+    hexlify(toBeArray(transaction.gasPrice!)),
     hexlify(toBeArray(transaction.gasLimit)),
-    transaction.to,
+    transaction.to!,
     '0x00',
     transaction.data,
     hexlify(toBeArray(signature.v)),
@@ -182,10 +180,10 @@ test('requires valid expected sender and chain constraints', async () => {
   assert.throws(() => decodeLegacyTransaction(raw, { expectedSender: wallet.address, expectedChainId: 0 }), /chain/i);
   assert.throws(
     () => decodeLegacyTransaction(raw, { expectedChainId: 1337 }),
-    error => error.code === 'INVALID_EXPECTED_SENDER',
+    (error: unknown) => (error as { code?: string }).code === 'INVALID_EXPECTED_SENDER',
   );
   assert.throws(
     () => decodeLegacyTransaction(raw, { expectedSender: wallet.address }),
-    error => error.code === 'INVALID_EXPECTED_CHAIN',
+    (error: unknown) => (error as { code?: string }).code === 'INVALID_EXPECTED_CHAIN',
   );
 });
