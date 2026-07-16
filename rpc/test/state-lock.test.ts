@@ -1,41 +1,41 @@
-const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const net = require('node:net');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { acquireStateLock, assertStateLockHeld } = require('../state-lock.cjs');
+import { acquireStateLock, assertStateLockHeld, type StateLockCapability } from '../../dist/rpc/state-lock.js';
 
-const STATE_LOCK_PATH = path.resolve(__dirname, '../state-lock.cjs');
+const STATE_LOCK_PATH = path.resolve(__dirname, '../../dist/rpc/state-lock.js');
 
-function temporaryDirectory(t) {
+function temporaryDirectory(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-state-lock-'));
   t.after(() => fs.rmSync(directory, { force: true, recursive: true }));
   return directory;
 }
 
-async function listen(server, port = 0) {
-  await new Promise((resolve, reject) => {
+async function listen(server: net.Server, port = 0): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen({ host: '127.0.0.1', port }, resolve);
+    server.listen({ host: '127.0.0.1', port }, () => resolve());
   });
-  return server.address().port;
+  return (server.address() as net.AddressInfo).port;
 }
 
-async function close(server) {
+async function close(server: net.Server): Promise<void> {
   if (!server.listening) {
     return;
   }
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.close(error => (error === undefined ? resolve() : reject(error)));
   });
 }
 
-async function freeCandidatePorts(count = 8) {
+async function freeCandidatePorts(count = 8): Promise<number[]> {
   const servers = Array.from({ length: count }, () => net.createServer());
-  const ports = [];
+  const ports: number[] = [];
   try {
     for (const server of servers) {
       ports.push(await listen(server));
@@ -46,19 +46,19 @@ async function freeCandidatePorts(count = 8) {
   return ports;
 }
 
-async function waitForLine(stream, timeoutMs = 2_000) {
+async function waitForLine(stream: NodeJS.ReadableStream, timeoutMs = 2_000): Promise<string> {
   return new Promise((resolve, reject) => {
     let buffer = '';
     const timer = setTimeout(() => finish(new Error('Timed out waiting for child lock')), timeoutMs);
 
-    function finish(error, line) {
+    function finish(error: Error | undefined, line?: string) {
       clearTimeout(timer);
       stream.off('data', onData);
-      error === undefined ? resolve(line) : reject(error);
+      error === undefined ? resolve(line as string) : reject(error);
     }
 
-    function onData(chunk) {
-      buffer += chunk.toString('utf8');
+    function onData(chunk: Buffer | string) {
+      buffer += chunk.toString();
       const newline = buffer.indexOf('\n');
       if (newline !== -1) {
         finish(undefined, buffer.slice(0, newline));
@@ -69,9 +69,9 @@ async function waitForLine(stream, timeoutMs = 2_000) {
   });
 }
 
-async function eventuallyAcquire(statePath, timeoutMs = 2_000) {
+async function eventuallyAcquire(statePath: string, timeoutMs = 2_000): Promise<StateLockCapability> {
   const deadline = Date.now() + timeoutMs;
-  let lastError;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     try {
       return await acquireStateLock(statePath);
@@ -132,7 +132,7 @@ test('uses the next candidate when different states deterministically collide', 
 test('refuses a duplicate after changing foreign occupancy exposes an earlier candidate', async t => {
   const statePath = path.join(temporaryDirectory(t), 'adapter-state.json');
   const candidatePorts = await freeCandidatePorts();
-  const foreignSockets = new Set();
+  const foreignSockets = new Set<net.Socket>();
   const foreign = net.createServer(socket => {
     foreignSockets.add(socket);
     socket.on('close', () => foreignSockets.delete(socket));
@@ -213,7 +213,7 @@ test('the kernel releases the lock when its owner process crashes', async t => {
     }
   });
 
-  const ready = JSON.parse(await waitForLine(child.stdout));
+  const ready = JSON.parse(await waitForLine(child.stdout as NodeJS.ReadableStream));
   assert.match(ready.ownerId, /^[0-9a-f]{64}$/);
   assert.ok(Number.isInteger(ready.port));
 
@@ -253,7 +253,7 @@ test('skips a responsive foreign listener without disclosing the state path', as
 test('bounds an unresponsive foreign probe and advances to the next candidate', async t => {
   const statePath = path.join(temporaryDirectory(t), 'adapter-state.json');
   const candidatePorts = await freeCandidatePorts();
-  const sockets = new Set();
+  const sockets = new Set<net.Socket>();
   const foreign = net.createServer(socket => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
