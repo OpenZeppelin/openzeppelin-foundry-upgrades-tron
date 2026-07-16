@@ -1,11 +1,18 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const test = require('node:test');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test, { type TestContext } from 'node:test';
 
-const { AddressMap } = require('../address-map.cjs');
-const { JsonStore } = require('../store.cjs');
+import { AddressMap } from '../../dist/rpc/address-map.js';
+import { JsonStore } from '../../dist/rpc/store.js';
+
+// Test-local fixtures (mapping/contract-metadata payloads, including deliberately invalid
+// overrides) are deliberately loosely shaped, the same way the real caller-supplied input
+// rpc-src/address-map.ts validates at runtime is. `any` is used deliberately throughout this file
+// for that content, matching rpc-src/address-map.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
 
 const PREDICTED = `0x${'11'.repeat(20)}`;
 const ACTUAL = `0x${'22'.repeat(20)}`;
@@ -15,14 +22,14 @@ const CREATOR = `0x${'55'.repeat(20)}`;
 const SENDER = `0x${'66'.repeat(20)}`;
 const SOURCE_TRANSACTION = `0x${'ab'.repeat(32)}`;
 
-function fixture(t, chain = 'tre:728126428') {
+function fixture(t: TestContext, chain: JsonAny = 'tre:728126428') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-address-map-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const statePath = path.join(directory, 'state.json');
   return { addressMap: new AddressMap(new JsonStore(statePath), chain), statePath };
 }
 
-function mapping(overrides = {}) {
+function mapping(overrides: Record<string, JsonAny> = {}) {
   return {
     predicted: PREDICTED,
     actual: ACTUAL,
