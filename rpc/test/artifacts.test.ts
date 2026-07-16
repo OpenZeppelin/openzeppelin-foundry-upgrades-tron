@@ -1,14 +1,13 @@
-'use strict';
+import test, { type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
+import { AbiCoder, keccak256, toUtf8Bytes } from 'ethers';
 
-const { AbiCoder, keccak256, toUtf8Bytes } = require('ethers');
-
-const { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } = require('../artifacts.cjs');
+import { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } from '../../dist/rpc/artifacts.js';
+// Load-bearing `.cjs` FFI helper; kept as a plain `require` (see rpc-src/artifacts.ts).
 const { verify: solidityProvenanceHelper } = require('../../src/internal/artifact-provenance.cjs');
 
 const root = path.resolve(__dirname, '../..');
@@ -16,22 +15,32 @@ const fixtures = path.join(__dirname, 'fixtures/artifacts');
 const provenanceFixtures = path.join(root, 'test/fixtures/provenance');
 const resultTypes = ['uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'string', 'string', 'bytes32', 'bytes32'];
 
-function copyTree(t, source) {
+// `assert.throws`'s predicate receives `unknown`; these narrow the thrown ArtifactProvenanceError
+// shape without importing the class itself (kept identical to the original duck-typed checks).
+function provenanceErrorCode(error: unknown): string | undefined {
+  return (error as { code?: string }).code;
+}
+
+function provenanceErrorDetails(error: unknown): Record<string, unknown> {
+  return (error as { details?: Record<string, unknown> }).details ?? {};
+}
+
+function copyTree(t: TestContext, source: string): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-artifacts-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.cpSync(source, directory, { recursive: true });
   return directory;
 }
 
-function basicOut(t) {
+function basicOut(t: TestContext): string {
   return path.join(copyTree(t, path.join(fixtures, 'basic')), 'out');
 }
 
-function provenanceOut(t, name) {
+function provenanceOut(t: TestContext, name: string): string {
   return path.join(copyTree(t, path.join(provenanceFixtures, name)), 'out');
 }
 
-function addAbi(artifactPath) {
+function addAbi(artifactPath: string): void {
   const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
   artifact.abi = [];
   fs.writeFileSync(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`);
@@ -91,7 +100,7 @@ test('refuses artifact and build-info creation-bytecode mismatch', t => {
 
   assert.throws(
     () => verifyArtifactProvenance({ outputDirectory: out, artifactPath }),
-    error => error.code === 'BYTECODE_MISMATCH',
+    (error: unknown) => provenanceErrorCode(error) === 'BYTECODE_MISMATCH',
   );
 });
 
@@ -107,7 +116,8 @@ test('checks every metadata source against build-info source content', async t =
       assert.throws(
         () =>
           verifyArtifactProvenance({ outputDirectory: out, artifactPath: path.join(out, 'Widget.sol/Widget.json') }),
-        error => error.code === 'SOURCE_HASH_MISMATCH' && error.details.sourceName === sourceName,
+        (error: unknown) =>
+          provenanceErrorCode(error) === 'SOURCE_HASH_MISMATCH' && provenanceErrorDetails(error).sourceName === sourceName,
       );
     });
   }
@@ -122,7 +132,8 @@ test('refuses a metadata source missing from build-info', t => {
 
   assert.throws(
     () => verifyArtifactProvenance({ outputDirectory: out, artifactPath: path.join(out, 'Widget.sol/Widget.json') }),
-    error => error.code === 'MISSING_SOURCE' && error.details.sourceName === 'contracts/Lib.sol',
+    (error: unknown) =>
+      provenanceErrorCode(error) === 'MISSING_SOURCE' && provenanceErrorDetails(error).sourceName === 'contracts/Lib.sol',
   );
 });
 
@@ -134,7 +145,7 @@ test('requires exact compiler build identity, not only a semantic version', t =>
     const out = provenanceOut(t, fixture);
     assert.throws(
       () => verifyArtifactProvenance({ outputDirectory: out, artifactPath: path.join(out, 'Widget.sol/Widget.json') }),
-      error => error.code === code,
+      (error: unknown) => provenanceErrorCode(error) === code,
     );
   }
 });
@@ -153,7 +164,7 @@ test('requires one absolute FOUNDRY_OUT and confines artifacts to it', t => {
         outputDirectory: out,
         artifactPath: path.join(outsideOut, 'Widget.sol/Widget.json'),
       }),
-    error => error.code === 'ARTIFACT_OUTSIDE_OUTPUT',
+    (error: unknown) => provenanceErrorCode(error) === 'ARTIFACT_OUTSIDE_OUTPUT',
   );
 });
 
@@ -240,7 +251,7 @@ test('rebinds the raw initcode prefix to the artifact snapshot selected by prove
           },
         },
       }),
-    error => error.code === 'ARTIFACT_NOT_FOUND' || error.code === 'PROVENANCE_CHANGED',
+    (error: unknown) => provenanceErrorCode(error) === 'ARTIFACT_NOT_FOUND' || provenanceErrorCode(error) === 'PROVENANCE_CHANGED',
   );
 });
 
@@ -270,7 +281,7 @@ test('never returns compiler fields from transient unverified build-info', t => 
           },
         },
       }),
-    error => error.code === 'PROVENANCE_CHANGED',
+    (error: unknown) => provenanceErrorCode(error) === 'PROVENANCE_CHANGED',
   );
 });
 
@@ -289,7 +300,7 @@ test('rejects a build-info symlink that escapes the absolute output tree', t => 
         outputDirectory: out,
         artifactPath: path.join(out, 'Widget.sol/Widget.json'),
       }),
-    error => error.code === 'ARTIFACT_OUTSIDE_OUTPUT',
+    (error: unknown) => provenanceErrorCode(error) === 'ARTIFACT_OUTSIDE_OUTPUT',
   );
 });
 
@@ -313,7 +324,7 @@ test('rejects an artifact leaf swapped to an escaping symlink after its boundary
           },
         },
       }),
-    error => error.code === 'ARTIFACT_OUTSIDE_OUTPUT',
+    (error: unknown) => provenanceErrorCode(error) === 'ARTIFACT_OUTSIDE_OUTPUT',
   );
 });
 
@@ -342,7 +353,7 @@ test('binds both Hardhat 3 split build-info files to one verification snapshot',
           },
         },
       }),
-    error => error.code === 'PROVENANCE_CHANGED',
+    (error: unknown) => provenanceErrorCode(error) === 'PROVENANCE_CHANGED',
   );
 });
 
@@ -353,7 +364,7 @@ test('rejects FOUNDRY_OUT when the configured root itself is a symlink', t => {
 
   assert.throws(
     () => findArtifactPaths(symlink, 'Widget'),
-    error => error.code === 'INVALID_OUTPUT_DIRECTORY',
+    (error: unknown) => provenanceErrorCode(error) === 'INVALID_OUTPUT_DIRECTORY',
   );
 });
 
@@ -374,7 +385,7 @@ test('detects replacement of FOUNDRY_OUT by a different tree at the same path', 
           },
         },
       }),
-    error => error.code === 'PROVENANCE_CHANGED',
+    (error: unknown) => provenanceErrorCode(error) === 'PROVENANCE_CHANGED',
   );
 });
 
@@ -394,6 +405,6 @@ test('binds FOUNDRY_OUT identity before deployment candidate enumeration', t => 
           },
         },
       }),
-    error => error.code === 'PROVENANCE_CHANGED',
+    (error: unknown) => provenanceErrorCode(error) === 'PROVENANCE_CHANGED',
   );
 });
