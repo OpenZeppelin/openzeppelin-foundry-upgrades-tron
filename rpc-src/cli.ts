@@ -1,7 +1,16 @@
 #!/usr/bin/env node
+import { keccak256, toUtf8Bytes } from 'ethers';
+
 import { AddressMap } from './address-map.js';
 import type { AddressMapping, ContractMetadataRecord } from './address-map.js';
+import {
+  setArtifactSnapshotInChain,
+  setContractMetadataInChain,
+  setMappingInChain,
+  setNonceBaselineInChain,
+} from './address-map.js';
 import { normalizeAddress, toEvmAddress } from './address-codec.js';
+import { findArtifactPaths, verifyArtifactProvenance } from './artifacts.js';
 import { parseConfig, parseStateConfig } from './config.js';
 import type { Config, StateConfig } from './config.js';
 import { CreateReconciler } from './create-reconciler.js';
@@ -9,6 +18,8 @@ import { createRpcHandlers } from './handlers.js';
 import { TransactionJournal } from './journal.js';
 import { createRpcServer } from './server.js';
 import type { RpcServer, RpcServerHandlers } from './server.js';
+import { acquireStateLock, assertStateLockHeld } from './state-lock.js';
+import type { StateLockCapability } from './state-lock.js';
 import { JsonStore, createStateFile } from './store.js';
 import { TronClient } from './tron-client.js';
 import { createUpstreamClient } from './upstream.js';
@@ -17,15 +28,49 @@ import type { UpstreamClient } from './upstream.js';
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8_545;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
+const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
+const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
+const ADOPTABLE_KINDS = new Set([
+  'contract',
+  'uups-proxy',
+  'transparent-proxy',
+  'beacon-proxy',
+  'upgradeable-beacon',
+  'proxy-admin',
+]);
+// The TRC-1967 storage slot each proxy kind must expose consistently with its declared references.
+const PROXY_SLOTS = new Map<string, { slot: string; flag: keyof AdoptReferences; label: string }>([
+  ['uups-proxy', { slot: IMPLEMENTATION_SLOT, flag: 'impl', label: 'implementation' }],
+  ['transparent-proxy', { slot: ADMIN_SLOT, flag: 'admin', label: 'admin' }],
+  ['beacon-proxy', { slot: BEACON_SLOT, flag: 'beacon', label: 'beacon' }],
+]);
+const ADOPT_FLAGS = [
+  '--predicted',
+  '--actual',
+  '--artifact',
+  '--kind',
+  '--admin',
+  '--beacon',
+  '--impl',
+  '--nonce-baseline',
+];
 const USAGE = `Usage:
   openzeppelin-foundry-upgrades-tron init
   openzeppelin-foundry-upgrades-tron start [--host HOST] [--port PORT] [--allow-non-loopback]
   openzeppelin-foundry-upgrades-tron resolve ADDRESS
   openzeppelin-foundry-upgrades-tron mappings
+  openzeppelin-foundry-upgrades-tron adopt --predicted EVM --actual TRON --artifact FQN --kind KIND
+                                           [--impl ADDR] [--admin ADDR] [--beacon ADDR] [--nonce-baseline N]
 
 Run init once to create the state file, then back it up like a keystore. Every
 other command refuses to run against a missing state file rather than presenting
 an empty deployment history.
+
+adopt re-registers a verified on-chain deployment into gateway state after a lost
+state file, so it can be operated ABI-aware again. It verifies the artifact
+provenance, the on-chain runtime code, and the proxy storage slots before writing
+anything. It does not reconstruct historical nonces or receipts.
 
 TRON endpoints, private keys, state paths, chain identity, and Foundry output are configured through the environment.
 `;
@@ -107,13 +152,31 @@ export interface MappingsArguments {
   command: 'mappings';
 }
 
+/** The optional proxy reference addresses accepted by the `adopt` command. */
+export interface AdoptReferences {
+  admin?: string;
+  beacon?: string;
+  impl?: string;
+}
+
+/** The parsed `adopt` invocation. */
+export interface AdoptArguments extends AdoptReferences {
+  command: 'adopt';
+  predicted: string;
+  actual: string;
+  artifact: string;
+  kind: string;
+  nonceBaseline?: string;
+}
+
 /** The result of {@link parseArguments}, discriminated by `command`. */
 export type ParsedArguments =
   | HelpArguments
   | InitArguments
   | StartArguments
   | ResolveArguments
-  | MappingsArguments;
+  | MappingsArguments
+  | AdoptArguments;
 
 /** Options accepted by {@link run}. */
 export interface RunOptions {
@@ -125,6 +188,10 @@ export interface RunOptions {
   parseStateConfig?: (environment: NodeJS.ProcessEnv) => StateConfig;
   runtimeFactory?: (config: JsonAny, options: BuildRuntimeOptions) => unknown;
   fetch?: typeof fetch;
+  verifyArtifactProvenance?: (options: { outputDirectory: string; artifactPath: string }) => JsonAny;
+  findArtifactPaths?: (outputDirectory: string, reference: string) => string[];
+  upstreamClient?: UpstreamClient;
+  acquireStateLock?: (statePath: string) => Promise<StateLockCapability>;
 }
 
 /** The fully-resolved options {@link run} threads through the CLI's dispatch. */
@@ -137,6 +204,10 @@ interface ResolvedRunContext {
   parseStateConfig: (environment: NodeJS.ProcessEnv) => StateConfig;
   runtimeFactory: (config: JsonAny, options: BuildRuntimeOptions) => unknown;
   fetch: typeof fetch | undefined;
+  verifyArtifactProvenance: (options: { outputDirectory: string; artifactPath: string }) => JsonAny;
+  findArtifactPaths: (outputDirectory: string, reference: string) => string[];
+  adoptUpstream: (config: JsonAny) => UpstreamClient;
+  acquireStateLock: (statePath: string) => Promise<StateLockCapability>;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -192,6 +263,37 @@ function parseStartArguments(args: string[]): StartArguments {
   return { command: 'start', host, port };
 }
 
+function parseAdoptArguments(args: string[]): AdoptArguments {
+  const values: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index];
+    if (!ADOPT_FLAGS.includes(flag)) {
+      throw new Error(flag.startsWith('--') ? `Unknown option ${flag}` : 'The adopt command only accepts options');
+    }
+    if (seen.has(flag)) throw new Error(`Duplicate option ${flag}`);
+    seen.add(flag);
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+    index += 1;
+    values[flag] = value;
+  }
+  for (const required of ['--predicted', '--actual', '--artifact', '--kind']) {
+    if (values[required] === undefined) throw new Error(`The adopt command requires ${required}`);
+  }
+  return {
+    command: 'adopt',
+    predicted: values['--predicted'],
+    actual: values['--actual'],
+    artifact: values['--artifact'],
+    kind: values['--kind'],
+    ...(values['--admin'] === undefined ? {} : { admin: values['--admin'] }),
+    ...(values['--beacon'] === undefined ? {} : { beacon: values['--beacon'] }),
+    ...(values['--impl'] === undefined ? {} : { impl: values['--impl'] }),
+    ...(values['--nonce-baseline'] === undefined ? {} : { nonceBaseline: values['--nonce-baseline'] }),
+  };
+}
+
 function parseArguments(argv: string[]): ParsedArguments {
   if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) throw new Error('Invalid CLI arguments');
   if (argv.length === 1 && (argv[0] === '--help' || argv[0] === 'help')) return { command: 'help' };
@@ -200,6 +302,7 @@ function parseArguments(argv: string[]): ParsedArguments {
     if (args.length !== 0) throw new Error('The init command does not accept operands');
     return { command };
   }
+  if (command === 'adopt') return parseAdoptArguments(args);
   if (command === 'start') return parseStartArguments(args);
   if (command === 'resolve') {
     if (args.length !== 1) throw new Error('The resolve command requires exactly one address');
@@ -364,6 +467,166 @@ async function startCommand(parsed: StartArguments, context: ResolvedRunContext)
   }
 }
 
+function requireNonzeroEvmAddress(value: JsonAny, label: string): string {
+  let normalized;
+  try {
+    normalized = toEvmAddress(value);
+  } catch (error) {
+    throw new Error(`Invalid ${label} address`, { cause: error });
+  }
+  if (normalized === ZERO_ADDRESS) throw new Error(`Invalid ${label} address`);
+  return normalized;
+}
+
+function requireAdoptableKind(kind: JsonAny): string {
+  if (typeof kind !== 'string' || !ADOPTABLE_KINDS.has(kind)) {
+    throw new Error(`Unsupported contract kind ${typeof kind === 'string' ? kind : ''}`.trim());
+  }
+  return kind;
+}
+
+function parseNonceBaseline(value: JsonAny): bigint {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error('--nonce-baseline must be a canonical non-negative integer');
+  }
+  return BigInt(value);
+}
+
+function bytecodeHexHash(value: JsonAny, label: string): string {
+  const hex = typeof value === 'string' ? value : value?.object;
+  if (typeof hex !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(hex)) {
+    throw new Error(`Verified artifact ${label} is unavailable`);
+  }
+  return keccak256(hex.toLowerCase());
+}
+
+async function readSlotAddress(upstream: UpstreamClient, target: string, slot: string): Promise<string> {
+  const value = await upstream.request('eth_getStorageAt', [target, slot, 'latest']);
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/i.test(value)) {
+    throw new Error('TRON node returned invalid slot storage');
+  }
+  try {
+    return toEvmAddress(`0x${value.slice(-40)}`);
+  } catch (error) {
+    throw new Error('TRON node returned an invalid slot address', { cause: error });
+  }
+}
+
+async function assertProxyReferences(
+  upstream: UpstreamClient,
+  kind: string,
+  actual: string,
+  references: AdoptReferences,
+): Promise<void> {
+  // A reference flag is meaningful only for the proxy kind whose slot it describes; refuse a flag
+  // supplied for any other kind rather than silently ignoring it.
+  const requirement = PROXY_SLOTS.get(kind);
+  for (const [otherKind, spec] of PROXY_SLOTS) {
+    if (references[spec.flag] !== undefined && otherKind !== kind) {
+      throw new Error(`--${spec.flag} is not valid for a ${kind} adoption`);
+    }
+  }
+  if (requirement === undefined) return;
+  const declared = references[requirement.flag];
+  if (declared === undefined) throw new Error(`A ${kind} adoption requires --${requirement.flag}`);
+  const expected = requireNonzeroEvmAddress(declared, requirement.label);
+  const stored = await readSlotAddress(upstream, actual, requirement.slot);
+  if (stored !== expected) {
+    throw new Error(`The ${kind} ${requirement.label} slot at ${actual} does not match --${requirement.flag}`);
+  }
+}
+
+async function adoptCommand(parsed: AdoptArguments, context: ResolvedRunContext): Promise<void> {
+  const config = context.parseConfig(context.environment);
+  const predicted = requireNonzeroEvmAddress(parsed.predicted, 'predicted');
+  const actual = requireNonzeroEvmAddress(parsed.actual, 'actual');
+  const kind = requireAdoptableKind(parsed.kind);
+  const nonceBaseline = parsed.nonceBaseline === undefined ? undefined : parseNonceBaseline(parsed.nonceBaseline);
+  const references: AdoptReferences = {
+    ...(parsed.admin === undefined ? {} : { admin: parsed.admin }),
+    ...(parsed.beacon === undefined ? {} : { beacon: parsed.beacon }),
+    ...(parsed.impl === undefined ? {} : { impl: parsed.impl }),
+  };
+
+  // Open durable state in refuse-on-missing mode, so adoption also fails loudly on a lost state path.
+  const store = new JsonStore(config.stateFile, { createIfMissing: false });
+  const upstream = context.adoptUpstream(config);
+
+  // Hold the exclusive state lock across every verification and the single durable write, so
+  // adoption can never race a live gateway that owns the same canonical state path.
+  const lock = await context.acquireStateLock(config.stateFile);
+  try {
+    store.bindLockAssertion(() => assertStateLockHeld(lock, config.stateFile));
+    await assertUpstreamChainId(upstream, config.chainId);
+
+    const matches = context.findArtifactPaths(config.foundryOut, parsed.artifact);
+    if (matches.length !== 1) {
+      throw new Error(`Expected one artifact for ${parsed.artifact}, found ${matches.length}`);
+    }
+    const verified = context.verifyArtifactProvenance({ outputDirectory: config.foundryOut, artifactPath: matches[0] });
+    const artifactIdentity = {
+      sourceName: verified.sourceName,
+      contractName: verified.contractName,
+      fullyQualifiedName: verified.fullyQualifiedName,
+    };
+    const runtimeBytecodeHash = bytecodeHexHash(verified.artifact?.deployedBytecode, 'runtime bytecode');
+    const creationBytecodeHash = bytecodeHexHash(verified.artifact?.bytecode, 'creation bytecode');
+
+    const onchainCode = await upstream.request('eth_getCode', [actual, 'latest']);
+    if (
+      typeof onchainCode !== 'string' ||
+      !/^0x(?:[0-9a-f]{2})*$/i.test(onchainCode) ||
+      keccak256(onchainCode.toLowerCase()) !== runtimeBytecodeHash
+    ) {
+      throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
+    }
+
+    await assertProxyReferences(upstream, kind, actual, references);
+
+    const sourceTransaction = keccak256(toUtf8Bytes(`adopt:${config.chainIdentity}:${predicted}:${actual}`));
+    const provenanceHash = verified.provenanceHash;
+    store.transaction(config.chainIdentity, chain => {
+      setMappingInChain(chain, {
+        predicted,
+        actual,
+        creator: config.expectedSender,
+        sender: config.expectedSender,
+        sourceTransaction,
+      });
+      setContractMetadataInChain(chain, {
+        predicted,
+        contractKind: kind,
+        artifactIdentity,
+        sourceTransaction,
+        provenanceHash,
+      });
+      setArtifactSnapshotInChain(chain, {
+        provenanceHash,
+        artifactIdentity,
+        contractKind: kind,
+        abi: verified.artifact?.abi,
+        creationBytecodeHash,
+        runtimeBytecodeHash,
+      });
+      if (nonceBaseline !== undefined) {
+        setNonceBaselineInChain(chain, { sender: config.expectedSender, nonce: nonceBaseline });
+      }
+    });
+
+    writeJson(context.stdout, {
+      status: 'adopted',
+      predicted,
+      actual,
+      kind,
+      artifact: verified.fullyQualifiedName,
+      provenanceHash,
+      ...(nonceBaseline === undefined ? {} : { nonceBaseline: nonceBaseline.toString() }),
+    });
+  } finally {
+    await lock.release();
+  }
+}
+
 function readOnlyMap(
   environment: NodeJS.ProcessEnv,
   parseReadOnlyConfig: (environment: NodeJS.ProcessEnv) => StateConfig = parseStateConfig,
@@ -403,6 +666,14 @@ async function run(argv: string[] = process.argv.slice(2), options: RunOptions =
     parseStateConfig: options.parseStateConfig ?? parseStateConfig,
     runtimeFactory: options.runtimeFactory ?? buildRuntime,
     fetch: options.fetch,
+    verifyArtifactProvenance: options.verifyArtifactProvenance ?? verifyArtifactProvenance,
+    findArtifactPaths: options.findArtifactPaths ?? findArtifactPaths,
+    acquireStateLock: options.acquireStateLock ?? acquireStateLock,
+    adoptUpstream:
+      options.upstreamClient !== undefined
+        ? () => options.upstreamClient as UpstreamClient
+        : (config: JsonAny) =>
+            createUpstreamClient(config.jsonRpcEndpoint, options.fetch === undefined ? {} : { fetch: options.fetch }),
   };
   try {
     const parsed = parseArguments(argv);
@@ -412,6 +683,8 @@ async function run(argv: string[] = process.argv.slice(2), options: RunOptions =
       const config = context.parseStateConfig(context.environment);
       const stateFile = createStateFile(config.stateFile);
       writeJson(context.stdout, { status: 'initialized', chainIdentity: config.chainIdentity, stateFile });
+    } else if (parsed.command === 'adopt') {
+      await adoptCommand(parsed, context);
     } else if (parsed.command === 'start') {
       await startCommand(parsed, context);
     } else {

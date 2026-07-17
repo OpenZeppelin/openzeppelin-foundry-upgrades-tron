@@ -330,6 +330,7 @@ function virtualTransactionCount(
   blockTag: JsonAny = 'latest',
   decode: JsonAny = decodeLegacyTransaction,
   chainId?: JsonAny,
+  baseline: bigint = 0n,
 ): string {
   const sender = normalizeEvmAddress(address, 'transaction-count address');
   const expected = normalizeEvmAddress(expectedSender, 'configured sender');
@@ -377,7 +378,9 @@ function virtualTransactionCount(
     }
     if (included && from === expected && nonce >= next) next = nonce + 1n;
   }
-  return quantity(next);
+  // A deployment adopted after state loss records how many nonces the signer already consumed
+  // on-chain, so the virtual count never rewinds below that declared baseline for its own sender.
+  return quantity(next < baseline ? baseline : next);
 }
 
 function normalizeUpstreamBlock(block: JsonAny): JsonAny {
@@ -423,12 +426,28 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   const opaqueSafety = options.assertOpaqueBytesSafe ?? assertOpaqueBytesSafe;
   const inFlight = new Map<string, Promise<JsonAny>>();
   const gapDeadlineMs = options.nonceGapDeadlineMs ?? DEFAULT_NONCE_GAP_DEADLINE_MS;
+
+  function nonceBaselineFor(signer: JsonAny): bigint {
+    if (typeof addressMap.resolveNonceBaseline !== 'function') return 0n;
+    return addressMap.resolveNonceBaseline(signer) ?? 0n;
+  }
+
   const queue = new NonceOrderedQueue({
     // The signer's next expected nonce is the durable virtual latest count: the number of its
     // confirmed (or reverted-with-receipt) source transactions, which advances only when a
     // transaction reaches a solid receipt and its address mappings are published.
     expectedNonce: (signer: JsonAny) =>
-      BigInt(virtualTransactionCount(journal, config.expectedSender, signer, 'latest', decode, config.chainId)),
+      BigInt(
+        virtualTransactionCount(
+          journal,
+          config.expectedSender,
+          signer,
+          'latest',
+          decode,
+          config.chainId,
+          nonceBaselineFor(signer),
+        ),
+      ),
     gapDeadlineMs,
     ...(options.scheduleTimeout === undefined ? {} : { scheduleTimeout: options.scheduleTimeout }),
     ...(options.cancelTimeout === undefined ? {} : { cancelTimeout: options.cancelTimeout }),
@@ -518,6 +537,24 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   }
 
   function verifiedArtifactForMetadata(metadata: JsonAny): JsonAny {
+    // Metadata re-registered through adoption binds its ABI directly to a captured artifact snapshot
+    // by provenance hash, because an adopted deployment has no confirmed transaction journal record.
+    if (metadata.provenanceHash !== undefined && metadata.provenanceHash !== null) {
+      const snapshot = addressMap.resolveArtifactSnapshot(metadata.provenanceHash);
+      if (
+        snapshot === undefined ||
+        snapshot.artifactIdentity.fullyQualifiedName !== metadata.artifactIdentity.fullyQualifiedName
+      ) {
+        throw provenanceFailure('Adopted contract artifact snapshot is unavailable', 'UNBOUND_ARTIFACT_METADATA');
+      }
+      return {
+        abi: snapshot.abi,
+        provenanceHash: snapshot.provenanceHash,
+        fullyQualifiedName: snapshot.artifactIdentity.fullyQualifiedName,
+        artifactIdentity: snapshot.artifactIdentity,
+        fromSnapshot: true,
+      };
+    }
     const source = journal.get(metadata.sourceTransaction);
     const operation = source?.operationContext;
     if (
@@ -870,7 +907,15 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       }
       case 'eth_getTransactionCount': {
         const [address, block] = requirePositional(params, 1, 2);
-        return virtualTransactionCount(journal, config.expectedSender, address, block, decode, config.chainId);
+        return virtualTransactionCount(
+          journal,
+          config.expectedSender,
+          address,
+          block,
+          decode,
+          config.chainId,
+          nonceBaselineFor(config.expectedSender),
+        );
       }
       case 'eth_call':
       case 'eth_estimateGas': {

@@ -77,6 +77,15 @@ status, ordered child-attempt topology, and rejection markers. A post-broadcast
 mismatch is irreversible on-chain, so the adapter retains the receipt and
 reports a fatal failure without publishing partial mappings.
 
+The `adopt` command is the only writer besides the deployment flow. It is
+local, never an RPC method, and holds the exclusive state lock so it cannot race
+a live gateway. It writes nothing until it has provenance-verified the named
+artifact from `FOUNDRY_OUT`, matched the on-chain runtime code at the declared
+address against that artifact's runtime bytecode, and, for a proxy kind, matched
+the TRC-1967 implementation, admin, or beacon slot against the declared
+reference; any mismatch is refused. It re-registers a deployment for ABI-aware
+operation but does not reconstruct historical nonces or receipts.
+
 ## HTTP boundary
 
 The server accepts strict JSON-RPC 2.0 POST requests with bounded headers,

@@ -285,6 +285,34 @@ The same lookup is exposed over JSON-RPC:
 { "jsonrpc": "2.0", "id": 1, "method": "tron_resolveAddress", "params": ["0x1234567890123456789012345678901234567890"] }
 ```
 
+## Re-register a deployment after state loss
+
+When a state file is lost and no backup exists, `adopt` re-registers a single
+on-chain deployment so the adapter can operate it ABI-aware again. It is a
+local, offline-signing-free command; it is never exposed over JSON-RPC.
+
+```sh
+npm run rpc:adopt -- \
+  --predicted 0xEVM... --actual TRON... \
+  --artifact contracts/Box.sol:Box --kind uups-proxy --impl 0xEVM...
+```
+
+Adoption verifies before it writes anything and refuses on any mismatch. It
+resolves and provenance-verifies the named artifact from `FOUNDRY_OUT`, fetches
+the on-chain runtime code at `--actual` and requires it to match the artifact's
+runtime bytecode, and for a proxy kind reads the TRC-1967 slots and requires
+them to match the declared references (`--impl` for `uups-proxy`, `--admin` for
+`transparent-proxy`, `--beacon` for `beacon-proxy`; a bare implementation has no
+slots). Only then does it record the address mapping, contract metadata, and the
+verified artifact snapshot, and set an optional `--nonce-baseline`. The address
+accepts Base58, `41`-hex, or `0x` TRON forms.
+
+`adopt` does not reconstruct historical nonces or receipts. It re-registers a
+deployment for ABI-aware operation going forward. Adopt a proxy's implementation
+alongside the proxy so calls that resolve through the implementation stay
+ABI-aware. Provide `--nonce-baseline` with the sender's already-consumed on-chain
+nonce count so Forge does not reuse a spent nonce after re-registration.
+
 ## Adapter behavior
 
 The adapter forwards compatible reads to the node's read-only `/jsonrpc`

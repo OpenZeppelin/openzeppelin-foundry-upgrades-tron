@@ -35,6 +35,7 @@
     "rpc:start": "node dist/rpc/cli.js start",
     "rpc:resolve": "node dist/rpc/cli.js resolve",
     "rpc:mappings": "node dist/rpc/cli.js mappings",
+    "rpc:adopt": "node dist/rpc/cli.js adopt",
     "build:rpc": "tsc -p tsconfig.build.json",
     "typecheck:rpc": "tsc -p tsconfig.json",
     "prepack": "npm run build:rpc && node scripts/require-package-contents.cjs"

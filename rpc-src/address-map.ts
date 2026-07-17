@@ -5,8 +5,10 @@ import { validateChainIdentity, type ChainState } from './store.js';
 const ADDRESS_MAP_VERSION = 1;
 const CONTRACT_METADATA_VERSION = 1;
 const ARTIFACT_SNAPSHOT_VERSION = 1;
+const NONCE_BASELINE_VERSION = 1;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
 const CONTRACT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
+const NONCE_PATTERN = /^(0|[1-9][0-9]*)$/;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 
 // Address mappings, contract metadata, and caller-supplied identifiers this module validates are
@@ -39,6 +41,9 @@ export interface ContractMetadataRecord {
   contractKind: string;
   artifactIdentity: ArtifactIdentity;
   sourceTransaction: string;
+  // Present only for deployments re-registered through adoption, where it binds the contract's ABI
+  // directly to a captured artifact snapshot rather than to a confirmed transaction journal record.
+  provenanceHash?: string;
 }
 
 /** The durable contract-metadata index for one chain. */
@@ -207,20 +212,28 @@ function normalizeArtifactIdentity(identity: JsonAny): ArtifactIdentity {
 }
 
 function normalizeContractMetadata(metadata: JsonAny): ContractMetadataRecord {
+  if (!isObject(metadata)) {
+    throw new Error('Invalid contract metadata');
+  }
+  const fields = Object.keys(metadata).sort().join(',');
+  const withProvenance = fields === 'artifactIdentity,contractKind,predicted,provenanceHash,sourceTransaction';
   if (
-    !isObject(metadata) ||
-    Object.keys(metadata).sort().join(',') !== 'artifactIdentity,contractKind,predicted,sourceTransaction' ||
+    (fields !== 'artifactIdentity,contractKind,predicted,sourceTransaction' && !withProvenance) ||
     typeof metadata.contractKind !== 'string' ||
-    !/^[a-z][a-z0-9-]{0,63}$/.test(metadata.contractKind)
+    !CONTRACT_KIND_PATTERN.test(metadata.contractKind)
   ) {
     throw new Error('Invalid contract metadata');
   }
-  return {
+  const record: ContractMetadataRecord = {
     predicted: normalizeNonzeroAddress(metadata.predicted, 'predicted'),
     contractKind: metadata.contractKind,
     artifactIdentity: normalizeArtifactIdentity(metadata.artifactIdentity),
     sourceTransaction: normalizeSourceTransaction(metadata.sourceTransaction),
   };
+  if (withProvenance) {
+    record.provenanceHash = normalizeHash32(metadata.provenanceHash, 'provenance hash');
+  }
+  return record;
 }
 
 function emptyContractMetadata(): ContractMetadataIndex {
@@ -360,6 +373,66 @@ function resolveArtifactSnapshotInChain(chain: ChainState, provenanceHash: JsonA
   return requireArtifactSnapshots(chain).byProvenanceHash[normalized];
 }
 
+/** The durable per-signer transaction-count baseline index for one chain. */
+export interface NonceBaselineIndex {
+  version: number;
+  bySender: Record<string, string>;
+}
+
+function normalizeNonceValue(nonce: JsonAny): string {
+  const value = typeof nonce === 'bigint' || typeof nonce === 'number' ? String(nonce) : nonce;
+  if (typeof value !== 'string' || !NONCE_PATTERN.test(value)) {
+    throw new Error('Invalid nonce baseline');
+  }
+  return value;
+}
+
+function emptyNonceBaselines(): NonceBaselineIndex {
+  return { version: NONCE_BASELINE_VERSION, bySender: {} };
+}
+
+function requireNonceBaselines(chain: ChainState): NonceBaselineIndex {
+  const baselines = chain.nonceBaselines;
+  if (baselines === undefined) return emptyNonceBaselines();
+  if (
+    !isObject(baselines) ||
+    Object.keys(baselines).sort().join(',') !== 'bySender,version' ||
+    baselines.version !== NONCE_BASELINE_VERSION ||
+    !isObject(baselines.bySender)
+  ) {
+    throw new Error('Corrupt nonce baseline index');
+  }
+  for (const [sender, value] of Object.entries(baselines.bySender)) {
+    if (normalizeNonzeroAddress(sender, 'nonce baseline sender') !== sender || normalizeNonceValue(value) !== value) {
+      throw new Error('Corrupt nonce baseline index');
+    }
+  }
+  return baselines as unknown as NonceBaselineIndex;
+}
+
+function setNonceBaselineInChain(chain: ChainState, value: JsonAny): bigint {
+  if (!isObject(value)) throw new Error('Invalid nonce baseline');
+  const sender = normalizeNonzeroAddress(value.sender, 'nonce baseline sender');
+  const nonce = normalizeNonceValue(value.nonce);
+  const baselines = requireNonceBaselines(chain);
+  const existing = baselines.bySender[sender];
+  if (existing !== undefined) {
+    // A baseline is a monotone floor an operator declares once; an identical value is idempotent and
+    // any differing value is refused rather than silently rewinding or advancing the signer's count.
+    if (existing !== nonce) throw new Error('Nonce baseline conflict');
+    return BigInt(existing);
+  }
+  baselines.bySender[sender] = nonce;
+  chain.nonceBaselines = baselines;
+  return BigInt(nonce);
+}
+
+function resolveNonceBaselineInChain(chain: ChainState, sender: JsonAny): bigint | undefined {
+  const key = normalizeNonzeroAddress(sender, 'nonce baseline sender');
+  const value = requireNonceBaselines(chain).bySender[key];
+  return value === undefined ? undefined : BigInt(value);
+}
+
 class AddressMap {
   declare store: AddressMapStore;
   declare chainIdentity: string;
@@ -437,18 +510,32 @@ class AddressMap {
     const record = resolveArtifactSnapshotInChain(chain, normalized);
     return record === undefined ? undefined : structuredClone(record);
   }
+
+  setNonceBaseline(baseline: JsonAny): bigint {
+    return this.store.transaction(this.chainIdentity, chain => setNonceBaselineInChain(chain, baseline));
+  }
+
+  resolveNonceBaseline(sender: JsonAny): bigint | undefined {
+    const chain = this.store.readChain(this.chainIdentity);
+    if (chain === undefined) return undefined;
+    return resolveNonceBaselineInChain(chain, sender);
+  }
 }
 
 export {
   ADDRESS_MAP_VERSION,
   ARTIFACT_SNAPSHOT_VERSION,
   CONTRACT_METADATA_VERSION,
+  NONCE_BASELINE_VERSION,
   AddressMap,
   requireArtifactSnapshots,
   requireIndexes,
+  requireNonceBaselines,
   resolveArtifactSnapshotInChain,
   resolveContractMetadataInChain,
+  resolveNonceBaselineInChain,
   setArtifactSnapshotInChain,
   setContractMetadataInChain,
   setMappingInChain,
+  setNonceBaselineInChain,
 };
