@@ -15,8 +15,8 @@ import { UpstreamRpcError } from './upstream.js';
 // JSON-RPC requests, upstream responses, decoded transactions, journal records, and the injectable
 // dependency surface this module handles are external, dynamically-shaped data with no canonical
 // type in this codebase (the dependency layer — rewriter, artifacts, tron-client — is itself typed
-// with the same `any` convention). `any` is used deliberately for that content, matching the
-// original untyped JS handling.
+// with the same `any` convention). `any` is used deliberately for that content, so this alias
+// marks the deliberately untyped seam; values are validated at runtime before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 
@@ -57,12 +57,10 @@ class RpcError extends Error {
   declare code: number;
   declare data?: unknown;
 
-  // FIXME(strict): the original `.cjs` constructor accepts only (code, message, data); the
-  // `normalizeEvmAddress` call site passes a 4th `{ cause }` argument that JS silently drops. The
-  // unused `_options` parameter preserves that call-site arity and its drop-the-cause behavior under
-  // strict TS — the cause is intentionally not forwarded to `super`, exactly as before. It carries a
-  // default value so it is excluded from `Function.length`, keeping `RpcError.length === 3` as in the
-  // `.cjs` original (a bare `_options?` would emit a plain param and bump the arity to 4).
+  // The constructor accepts and intentionally ignores a trailing options argument, so call sites
+  // may pass `{ cause }` without it being forwarded to `super`. The parameter carries a default
+  // value so it is excluded from `Function.length`, keeping `RpcError.length === 3` for callers
+  // that reflect on the constructor's arity.
   constructor(code: number, message: string, data?: unknown, _options: ErrorOptions | undefined = undefined) {
     super(message);
     this.name = 'RpcError';

@@ -10,7 +10,8 @@ const ZERO_BLOOM = `0x${'00'.repeat(256)}`;
 // canonical type in this codebase (its shape also varies between deployment/call receipts, and
 // the consumer-supplied internal-transaction-like fixtures accepted by `internalCreateAttempts`/
 // `internalCreateTransactions`). `any` is used deliberately throughout this module for that
-// content, matching its original untyped JS handling.
+// content, so this alias marks the deliberately untyped seam; values are validated at runtime
+// before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

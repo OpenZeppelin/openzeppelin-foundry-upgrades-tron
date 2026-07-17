@@ -10,7 +10,8 @@ const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 // Address mappings, contract metadata, and caller-supplied identifiers this module validates are
 // external, dynamically-shaped data with no canonical type in this codebase (mirrors the
 // convention in rpc-src/receipts.ts). `any` is used deliberately throughout this module for that
-// content, matching its original untyped JS handling.
+// content, so this alias marks the deliberately untyped seam; values are validated at runtime
+// before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

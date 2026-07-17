@@ -36,7 +36,8 @@ type LinkReferences = Record<string, Record<string, Array<{ start: number; lengt
 // The parsed contents of a Foundry/Hardhat build artifact or a solc build-info file are
 // external, dynamically-shaped JSON with no canonical type in this codebase (the shape also
 // differs between legacy and Hardhat-3 `hh3-artifact-1` artifacts). `any` is used deliberately
-// throughout this module for this content, matching its original untyped JS handling.
+// throughout this module for this content, so this alias marks the deliberately untyped seam;
+// values are validated at runtime before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

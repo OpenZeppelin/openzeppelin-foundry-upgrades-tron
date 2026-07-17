@@ -25,7 +25,8 @@ const SIMULATION_PROBE_INITCODE = '6000600053600160006000f0506460006000fd6000526
 // Native TRON node responses, signed/built transaction JSON, and caller-supplied options this
 // module validates at runtime are external, dynamically-shaped data with no canonical type in
 // this codebase (mirrors the convention in rpc-src/receipts.ts). `any` is used deliberately
-// throughout this module for that content, matching its original untyped JS handling.
+// throughout this module for that content, so this alias marks the deliberately untyped seam;
+// values are validated at runtime before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

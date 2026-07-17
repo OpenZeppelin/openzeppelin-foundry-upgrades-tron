@@ -7,7 +7,8 @@ const HEX_BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
 // ABI JSON, ABI-decoded values, and the dependency-injected artifact/deployment-match objects
 // this module rewrites are external, dynamically-shaped data with no canonical type in this
 // codebase (mirrors the convention in rpc-src/artifacts.ts). `any` is used deliberately
-// throughout this module for that content, matching its original untyped JS handling.
+// throughout this module for that content, so this alias marks the deliberately untyped seam;
+// values are validated at runtime before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

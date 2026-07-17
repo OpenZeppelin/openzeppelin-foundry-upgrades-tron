@@ -39,13 +39,14 @@ const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 // Simulation results, confirmed receipts, and raw persisted state this module validates at runtime
 // are external, dynamically-shaped data with no canonical type in this codebase (mirrors the
 // convention in rpc-src/receipts.ts). `any` is used deliberately throughout this module for that
-// content, matching its original untyped JS handling.
+// content, so this alias marks the deliberately untyped seam; values are validated at runtime
+// before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 
-// Equivalent to rpc-src/store.ts's `ChainState`; this module has no other reason to import
-// store.js (the original .cjs does not require it either), so the opaque per-chain record shape
-// is restated locally rather than adding a new sibling dependency.
+// Equivalent to rpc-src/store.ts's `ChainState`; this module stays decoupled from store.js, so
+// the per-chain record is treated as an opaque, validated shape restated locally rather than
+// adding a new sibling dependency.
 type Chain = Record<string, unknown>;
 
 /** The subset of a {@link TransactionJournal}'s API used by {@link CreateReconciler}. */

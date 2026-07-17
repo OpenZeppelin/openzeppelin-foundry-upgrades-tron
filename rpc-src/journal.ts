@@ -19,8 +19,8 @@ const SIMULATION_MODES = new Set(['exact-signed', 'constant-create', 'constant-c
 
 // Native transactions, receipts, and persisted journal records this module validates are external,
 // dynamically-shaped data with no canonical type in this codebase (mirrors the convention in
-// rpc-src/receipts.ts). `any` is used deliberately throughout this module for that content,
-// matching its original untyped JS handling.
+// rpc-src/receipts.ts). `any` is used deliberately throughout this module for that content, so
+// this alias marks the deliberately untyped seam; values are validated at runtime before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 

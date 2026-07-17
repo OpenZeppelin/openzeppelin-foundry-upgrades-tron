@@ -28,7 +28,8 @@ TRON endpoints, private keys, state paths, chain identity, and Foundry output ar
 // The `parseConfig`/`runtimeFactory` composition seam accepts and returns a caller-supplied
 // configuration and adapter runtime object whose exact shape tests replace with partial fakes; it
 // has no canonical type in this codebase (mirrors the convention in rpc-src/receipts.ts). `any` is
-// used deliberately here for that content, matching this module's original untyped JS handling.
+// used deliberately here for that content, so this alias marks the deliberately untyped, pluggable
+// seam; values are validated at the call sites before use.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type JsonAny = any;
 
@@ -261,8 +262,9 @@ async function assertUpstreamChainId(upstream: unknown, expectedChainId: bigint)
     throw new Error('Adapter runtime cannot verify the upstream chain ID');
   }
   // `isObject` only proves `upstream.request` is present, not the concrete client shape
-  // `createUpstreamClient` always returns in production; the double cast documents that gap,
-  // matching this module's original untyped duck-typing of the pluggable upstream client.
+  // `createUpstreamClient` always returns in production; the double cast documents that gap. The
+  // upstream client is a pluggable, duck-typed dependency by design — tests inject partial fakes —
+  // so its shape is validated at the call sites rather than enforced by the type.
   const client = upstream as unknown as UpstreamClient;
   const value = await client.request('eth_chainId', []);
   if (typeof value !== 'string' || !/^0x(?:0|[1-9a-f][0-9a-f]*)$/i.test(value)) {
@@ -284,8 +286,9 @@ async function startCommand(parsed: StartArguments, context: ResolvedRunContext)
     throw new Error('Adapter runtime did not provide a server and native client');
   }
   // `isObject` narrows `runtime` to `Record<string, unknown>`; the `server`/`nativeClient` fields
-  // are runtime-checked for their required methods immediately below, so a loose cast here is safe
-  // and matches this module's original untyped duck-typing of the pluggable adapter runtime.
+  // are runtime-checked for their required methods immediately below, so a loose cast here is safe.
+  // The adapter runtime is a pluggable, duck-typed dependency by design — tests inject partial
+  // fakes — so its shape is validated at those call sites rather than enforced by the type.
   const { server, nativeClient } = runtime as { server: JsonAny; nativeClient: JsonAny };
   if (typeof server.start !== 'function' || typeof server.stop !== 'function') {
     throw new Error('Adapter runtime server is invalid');
@@ -354,10 +357,10 @@ function escapeRegExp(value: string): string {
 }
 
 function sanitizedMessage(error: unknown, environment: NodeJS.ProcessEnv): string {
-  // `isObject` would exclude arrays and functions, but the original `error?.message` reads
-  // `.message` off *any* non-null/undefined thrown value (arrays and functions can carry
-  // arbitrary properties too); cast instead of narrowing so exotic thrown values keep matching
-  // the original's byte-for-byte behavior.
+  // `isObject` would exclude arrays and functions, but a thrown value can be any non-null/
+  // undefined type — arrays and functions can carry a `.message` property too. Casting instead of
+  // narrowing reads `.message` off *any* such value, so exotic thrown values still surface their
+  // message; a plain `isObject` narrowing helper would silently drop them.
   const candidate = (error as { message?: unknown } | null | undefined)?.message;
   let message = typeof candidate === 'string' && candidate.length > 0 ? candidate : 'Command failed';
   for (const key of ['TRON_PRIVATE_KEY', 'TRON_RPC_URL']) {

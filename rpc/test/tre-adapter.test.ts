@@ -16,8 +16,8 @@ import type { AdapterRuntime } from '../../dist/rpc/cli.js';
 import { DEFAULT_CHAIN_ID, DEFAULT_TRE_PRIVATE_KEY, parseConfig } from '../../dist/rpc/config.js';
 import type { Config } from '../../dist/rpc/config.js';
 
-// These two helper scripts are not part of the rpc-src TypeScript migration (they stay `.cjs`), so
-// they are required directly rather than imported.
+// These two helper scripts are plain Node programs, so they are loaded directly with require
+// rather than imported.
 const { startTre, TRE_ENVIRONMENT } = require('../../scripts/start-tre.cjs');
 const { waitForTre } = require('../../scripts/wait-for-tre.cjs');
 

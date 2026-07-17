@@ -231,10 +231,7 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
         artifact: { abi: [{ type: 'constructor', inputs: [] }] },
         creationBytecode: '0x6000',
         constructorData: '0x',
-        // FIXME(strict): the original fixture also set `contractName: 'Box'` immediately before the
-        // `...ARTIFACT_IDENTITY` spread, whose `contractName` (also 'Box') overwrites it. Strict TS
-        // flags the dead duplicate key (TS2783); dropping the provably-overwritten literal preserves
-        // the fixture's exact resulting shape and value.
+        // `contractName` is supplied by the `...ARTIFACT_IDENTITY` spread below.
         ...ARTIFACT_IDENTITY,
         provenanceHash: `0x${'55'.repeat(32)}`,
         requiresLinking: false,

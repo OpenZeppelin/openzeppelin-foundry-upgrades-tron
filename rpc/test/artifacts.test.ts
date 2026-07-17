@@ -16,7 +16,7 @@ const provenanceFixtures = path.join(root, 'test/fixtures/provenance');
 const resultTypes = ['uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'string', 'string', 'bytes32', 'bytes32'];
 
 // `assert.throws`'s predicate receives `unknown`; these narrow the thrown ArtifactProvenanceError
-// shape without importing the class itself (kept identical to the original duck-typed checks).
+// shape without importing the class itself.
 function provenanceErrorCode(error: unknown): string | undefined {
   return (error as { code?: string }).code;
 }
