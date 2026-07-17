@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import { Interface, Transaction, Wallet, getCreateAddress, keccak256, toBeHex } from 'ethers';
+import { Interface, Transaction, Wallet, getCreateAddress, keccak256, toBeHex, toUtf8Bytes } from 'ethers';
 
 import { AddressMap } from '../../dist/rpc/address-map.js';
 import { contractKindForArtifact, createRpcHandlers, nativeContractAddress } from '../../dist/rpc/handlers.js';
@@ -1247,6 +1247,35 @@ test('persists an immutable artifact snapshot for a confirmed deployment', async
     abi: [{ type: 'constructor', inputs: [] }],
     creationBytecodeHash: keccak256('0x6000'),
     runtimeBytecodeHash: keccak256('0x6001'),
+  });
+});
+
+// A deployment whose runtime bytecode still carries unresolved external-library link placeholders
+// (__$...$__) — a shape artifact provenance explicitly permits — snapshots successfully by hashing
+// the raw runtime template rather than demanding fully linked pure hex.
+test('snapshots a linked-library deployment whose runtime bytecode carries link placeholders', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const linkedRuntime = `0x6001__$${'a'.repeat(34)}$__6002`;
+  const result = fixture(t, {
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: { abi: [{ type: 'constructor', inputs: [] }], deployedBytecode: { object: linkedRuntime } },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: true,
+    }),
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+
+  assert.deepEqual(result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`), {
+    provenanceHash: `0x${'55'.repeat(32)}`,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'contract',
+    abi: [{ type: 'constructor', inputs: [] }],
+    creationBytecodeHash: keccak256('0x6000'),
+    runtimeBytecodeHash: keccak256(toUtf8Bytes(linkedRuntime.toLowerCase())),
   });
 });
 

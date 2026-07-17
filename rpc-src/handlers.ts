@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256 } from 'ethers';
+import { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256, toUtf8Bytes } from 'ethers';
 
 import { normalizeAddress, toEvmAddress } from './address-codec.js';
 import { canonicalTronFullyQualifiedName, derivedTronProxyAdminIdentity } from './artifact-identities.js';
@@ -137,6 +137,22 @@ function bytecodeHash(value: JsonAny, label: string): string {
     throw error;
   }
   return keccak256(hex.toLowerCase());
+}
+
+// The runtime bytecode template can carry unresolved external-library link placeholders
+// (__$...$__), a shape artifact provenance permits. The fully linked runtime bytes are not known
+// before broadcast, and this hash is stored only — never consulted during resolution — so it is
+// taken over the raw template string (placeholders included) rather than requiring pure hex. Pure
+// hex is still hashed over its byte value so unlinked artifacts keep an identical snapshot to before.
+function runtimeBytecodeTemplateHash(value: JsonAny, label: string): string {
+  const template = bytecodeObject(value);
+  if (typeof template !== 'string' || template.length === 0) {
+    const error: JsonAny = new Error(`Deployment artifact ${label} is unavailable`);
+    error.code = 'INVALID_ARTIFACT';
+    throw error;
+  }
+  const normalized = template.toLowerCase();
+  return /^0x(?:[0-9a-fA-F]{2})*$/.test(normalized) ? keccak256(normalized) : keccak256(toUtf8Bytes(normalized));
 }
 
 function contractKindForArtifact(identity: JsonAny): string {
@@ -722,7 +738,7 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
           contractKind: operationContext.contractKind,
           abi: rewritten.abi ?? rewritten.artifact?.abi,
           creationBytecodeHash: bytecodeHash(match.creationBytecode, 'creation bytecode'),
-          runtimeBytecodeHash: bytecodeHash(match.artifact?.deployedBytecode, 'runtime bytecode'),
+          runtimeBytecodeHash: runtimeBytecodeTemplateHash(match.artifact?.deployedBytecode, 'runtime bytecode'),
         };
       } else {
         const context = await resolveCallContext(decoded.to);

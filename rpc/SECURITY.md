@@ -17,9 +17,9 @@ Startup and HTTP errors are sanitized, but process owners can still inspect
 environment variables and memory.
 
 The state file contains address provenance, transaction journals, exact signed
-native transaction bytes, confirmed receipts, and the immutable verified artifact
-snapshots captured at deployment. It does not contain the private key. The
-`init` command creates the file explicitly at mode `0600` and refuses to
+native transaction bytes, confirmed receipts, and the immutable verified
+artifact snapshots captured at deployment. It does not contain the private key.
+The `init` command creates the file explicitly at mode `0600` and refuses to
 overwrite an existing one; every state-opening command (`start`, `resolve`,
 `mappings`, `adopt`) refuses to run against a missing state file rather than
 silently starting from an empty deployment history. Initialize the file once,
@@ -46,14 +46,14 @@ configured sender and chain are accepted. Typed transaction envelopes,
 unprotected signatures, malformed RLP, `CREATE2`, and ambiguous opaque address
 payloads fail before native broadcast. Opaque bytes are rejected when they
 contain a known predicted address in packed 20-byte, fixed-bytes, or padded ABI
-form. A mapped contract's ABI comes only from the artifact verified at that
-contract's deployment: the live on-disk artifact when its current provenance
-still matches the deployment, or the immutable snapshot captured at deployment
-when the on-disk artifact is missing or has been replaced in place. A changed
-disk artifact is never adopted as the deployed one, and a legacy deployment with
-no snapshot still fails closed when its on-disk provenance no longer matches.
-Derived ProxyAdmin metadata is additionally bound through its parent transparent
-proxy deployment.
+form. A mapped contract's ABI comes from a verified deployment artifact and
+nothing else: the live on-disk artifact when its current provenance still
+matches the deployment, or the immutable snapshot captured at deployment when
+the on-disk artifact is missing or has been replaced in place. A changed disk
+artifact is never adopted as the deployed one, and a legacy deployment with no
+snapshot still fails closed when its on-disk provenance no longer matches. A
+derived ProxyAdmin is the one exception: it has no deployment of its own, so
+its metadata is bound instead through its parent transparent proxy's deployment.
 
 Stock TRE does not serve historical state for numbered block tags. The adapter
 retries numbered balance, code, storage, and call reads against `latest` only

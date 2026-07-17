@@ -63,6 +63,9 @@ export interface ArtifactSnapshotRecord {
   contractKind: string;
   abi: JsonAny[];
   creationBytecodeHash: string;
+  // A stored-only 32-byte hash, never consulted during resolution. For a linked-library artifact
+  // whose runtime bytecode still carries __$...$__ placeholders it hashes the raw runtime template
+  // (placeholders included) rather than the — unavailable — fully linked runtime bytes.
   runtimeBytecodeHash: string;
 }
 
