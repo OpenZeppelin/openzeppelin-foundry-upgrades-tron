@@ -1,0 +1,52 @@
+{
+  "name": "@openzeppelin/foundry-upgrades-tron",
+  "version": "0.1.0",
+  "description": "Foundry library for deploying and managing upgradeable contracts on TRON",
+  "license": "MIT",
+  "files": [
+    "src/**/*",
+    "rpc/*.cjs",
+    "rpc/SECURITY.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades-tron.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "openzeppelin-foundry-upgrades-tron": "rpc/cli.cjs"
+  },
+  "scripts": {
+    "compile": "forge build",
+    "test": "npm run test:package && npm run test:solidity && npm run test:rpc",
+    "test:package": "node scripts/test-package.cjs",
+    "test:solidity": "node scripts/test-solidity.cjs",
+    "test:validation": "FOUNDRY_OUT=out FOUNDRY_PROFILE=default forge test --match-path test/Validation.t.sol -vvv --ffi --force",
+    "test:reference-builds": "bash scripts/test-reference-builds.sh",
+    "test:rpc": "node scripts/test-rpc.cjs",
+    "test:rpc:tre": "RUN_TRE_E2E=1 node --test rpc/test/tre-adapter.test.cjs",
+    "lint": "node scripts/lint.cjs",
+    "lint:fix": "node scripts/lint.cjs --write",
+    "rpc": "node rpc/cli.cjs",
+    "rpc:start": "node rpc/cli.cjs start",
+    "rpc:resolve": "node rpc/cli.cjs resolve",
+    "rpc:mappings": "node rpc/cli.cjs mappings",
+    "prepack": "node scripts/require-package-contents.cjs"
+  },
+  "dependencies": {
+    "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
+    "ethers": "6.17.0",
+    "tronweb": "6.4.0"
+  },
+  "devDependencies": {
+    "@openzeppelin/upgrades-core": "1.46.0",
+    "prettier": "3.9.5",
+    "prettier-plugin-solidity": "2.3.1",
+    "solhint": "6.2.3"
+  },
+  "peerDependencies": {
+    "@openzeppelin/upgrades-core": "^1.46.0"
+  }
+}

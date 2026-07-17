@@ -1,0 +1,6 @@
+{
+  "_format": "hh3-artifact-1", "contractName": "Widget", "sourceName": "contracts/Widget.sol",
+  "inputSourceName": "project/contracts/Widget.sol", "buildInfoId": "solc-0_8_22-expected",
+  "ast": {"absolutePath": "project/contracts/Widget.sol"}, "bytecode": "0x6001600055",
+  "metadata": {"compiler": {"version": "0.8.22+commit.4fc1097e"}, "sources": {"project/contracts/Widget.sol": {"keccak256": "0xe6d94a5da9fc80f4f65ce5851cd4be0091f7e773bce34524b632c227e7b9758e"}}}
+}

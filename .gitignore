@@ -1,7 +1,30 @@
-node_modules/
-out/
+# Compiler files
 cache/
-lib/
+cache-prelinked/
+cache-unlinked/
+out/
+out-prelinked/
+out-unlinked/
+test_artifacts*/
+
+# Development broadcast logs
+broadcast/
+
+# Local RPC adapter state
+.openzeppelin-upgrades/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Node modules
+node_modules/
+
+# NPM package files
+*.tgz
+
+# Operating system files
 .DS_Store
 
 # local agent instructions (never commit)

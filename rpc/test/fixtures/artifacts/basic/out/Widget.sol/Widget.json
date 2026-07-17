@@ -1,0 +1,30 @@
+{
+  "abi": [
+    {
+      "inputs": [{ "internalType": "uint256", "name": "initialValue", "type": "uint256" }],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    }
+  ],
+  "ast": {
+    "absolutePath": "contracts/Widget.sol",
+    "license": "MIT"
+  },
+  "bytecode": {
+    "object": "0x6001600055",
+    "linkReferences": {}
+  },
+  "metadata": {
+    "compiler": {
+      "version": "0.8.22+commit.4fc1097e"
+    },
+    "sources": {
+      "contracts/Lib.sol": {
+        "keccak256": "0x2ab68ba00579ecbe526b910c583e635808b4799e726964378569f71ca263e5be"
+      },
+      "contracts/Widget.sol": {
+        "keccak256": "0xd158ab0191a666b0960b6a2adaa3cea4763ccbc3de48ffb73a4ec8b835c74232"
+      }
+    }
+  }
+}

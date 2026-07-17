@@ -1,0 +1,5 @@
+{
+  "ast": {"absolutePath": "contracts/Widget.sol"},
+  "bytecode": {"object": "0x6001600055"},
+  "metadata": {"compiler": {"version": "0.8.22+commit.4fc1097e"}, "sources": {"contracts/Widget.sol": {"keccak256": "0xe6d94a5da9fc80f4f65ce5851cd4be0091f7e773bce34524b632c227e7b9758e"}}}
+}

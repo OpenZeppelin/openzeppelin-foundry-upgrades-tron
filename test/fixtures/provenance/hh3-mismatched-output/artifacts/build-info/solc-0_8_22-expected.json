@@ -1,0 +1,5 @@
+{
+  "_format": "hh3-sol-build-info-1", "id": "solc-0_8_22-expected", "solcVersion": "0.8.22",
+  "input": {"sources": {"project/contracts/Widget.sol": {"content": "contract Widget {}"}}},
+  "userSourceNameMap": {"contracts/Widget.sol": "project/contracts/Widget.sol"}
+}

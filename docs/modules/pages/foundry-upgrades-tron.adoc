@@ -1,0 +1,135 @@
+= Using Foundry Upgrades with TRON
+
+OpenZeppelin Foundry Upgrades for TRON combines a validated Solidity library
+with a local JSON-RPC adapter. The library follows the modern non-Defender API
+of Foundry Upgrades v0.4.1. The adapter translates Forge's signed legacy
+transactions into native TRON transactions and records the actual TVM address.
+
+== Installation
+
+Install the source tree and its Node dependencies:
+
+[source,console]
+----
+forge install OpenZeppelin/openzeppelin-foundry-upgrades-tron
+(cd lib/openzeppelin-foundry-upgrades-tron && npm install)
+----
+
+[source,text]
+----
+openzeppelin-foundry-upgrades-tron/=lib/openzeppelin-foundry-upgrades-tron/src/
+openzeppelin-tron-solidity/=lib/openzeppelin-foundry-upgrades-tron/lib/openzeppelin-tron-solidity/
+----
+
+An npm consumer instead maps
+`openzeppelin-foundry-upgrades-tron/` to
+`node_modules/@openzeppelin/foundry-upgrades-tron/src/` and installs pinned
+OpenZeppelin Contracts for TRON and forge-std sources separately.
+
+Node.js 20+, Bash, and forge-std 1.9.5+ are required. Windows users set
+`OPENZEPPELIN_BASH_PATH` to a trusted Bash executable.
+
+== Foundry configuration
+
+[source,toml]
+----
+[profile.default]
+ffi = true
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "./" }]
+----
+
+Use `--force` or clean before validation. If the output directory is not
+`out`, grant it read access and set `FOUNDRY_OUT` to the same path.
+
+== Modern proxy workflows
+
+Import `Upgrades` for validated scripts or `UnsafeUpgrades` for local tests that
+already deploy their implementations. Modern UUPS, transparent, and beacon
+proxies from OpenZeppelin Contracts for TRON v5 are supported.
+
+[source,solidity]
+----
+import {Upgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
+import {Options} from "openzeppelin-foundry-upgrades-tron/Options.sol";
+
+address proxy = Upgrades.deployUUPSProxy(
+    "Box.sol:Box",
+    abi.encodeCall(Box.initialize, (owner, 1))
+);
+
+Options memory opts;
+opts.referenceContract = "Box.sol:Box";
+Upgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
+----
+
+UUPS and transparent TRC1967 proxies require a non-empty initializer during
+deployment. Beacon proxies allow empty initialization data. `constructorData`
+belongs to the implementation constructor and is distinct from proxy
+initializer data.
+
+Upgrade validation uses `referenceContract` or the
+`@custom:oz-upgrades-from` annotation. A historical
+`referenceBuildInfoDir` is trusted release input and uses its unique directory
+name as a reference prefix.
+
+Unlinked bytecode uses exact, case-sensitive `LinkedLibrary` source name,
+library name, and deployed code address records. Duplicate, missing, unused,
+zero, and codeless mappings are rejected.
+
+=== Existing OpenZeppelin Contracts v4 upgrades
+
+`LegacyUpgrades.sol` exports validated and unsafe upgrade-only helpers for
+existing deployments built from upstream OpenZeppelin Contracts v4 sources. It
+does not deploy proxies, beacons, or standalone implementations. New
+deployments use `Upgrades.sol` with OpenZeppelin Contracts for TRON v5.
+
+The dispatcher supports the v4 UUPS `upgradeTo` and ProxyAdmin
+`upgrade`/`upgradeAndCall` paths while retaining strict v5 interface-version
+dispatch. External stock-TRE coverage deploys genuine pinned
+`@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6` UUPS, transparent, and beacon
+fixtures, upgrades them through the legacy API, and independently verifies
+their state and ERC-1967 slots. These are upstream v4 packages, not a
+TRON-branded v4 release.
+
+== Compiler provenance and FFI security
+
+The implementation artifact and build-info must come from the same compiler
+pipeline. Compiler provenance binds the exact compiler build, source hashes,
+creation bytecode, linker references, output directory, and artifact snapshot
+before and after upgrades-core validation.
+
+The FFI security boundary includes trusted Bash, Node.js,
+`@openzeppelin/upgrades-core@1.46.0`, remappings, artifacts, historical
+references, and package files. A validation rejection or provenance mismatch
+fails before a native chain write. `unsafeSkipAllChecks` removes that guarantee
+and should be a last resort.
+
+== Adapter and actual addresses
+
+Start the adapter with `npm run rpc:start` and point Forge to its loopback RPC
+URL. Forge uses a predicted Ethereum-style address during the script. After a
+confirmed receipt, the adapter persists its one-to-one mapping to the actual
+TRON/TVM address. Use `npm run rpc:resolve -- <address>` before handing the
+deployment to TronWeb, Hardhat, or an explorer.
+
+Public-network use requires an explicit endpoint and key. Read
+`rpc/SECURITY.md` before treating the adapter as a signing service.
+
+== Intentional divergences
+
+OpenZeppelin Defender is not supported or included. Ethereum source
+verification is not translated and is unsupported. Foundry forking is not
+supported. Typed Ethereum transactions, generic CREATE2, Hardhat manifest
+imports, implementation reuse, kind inference, and `forceImport` are outside
+the Solidity API.
+
+The upgrade-only legacy entrypoint is backed by external v4.9.6 lifecycle
+evidence as described above. Local interface mocks remain focused dispatch
+tests rather than acceptance evidence for upstream v4 bytecode on TVM.
+
+See xref:api-foundry-upgrades-tron.adoc[the Solidity API reference] for
+contract-name formats, options, and every modern overload.

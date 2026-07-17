@@ -1,0 +1,3 @@
+openzeppelin-foundry-upgrades-tron/=src/
+openzeppelin-tron-solidity/=lib/openzeppelin-tron-solidity/
+forge-std/=lib/forge-std/src/

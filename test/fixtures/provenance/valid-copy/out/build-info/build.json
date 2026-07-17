@@ -1,0 +1,7 @@
+{
+  "id": "valid-build",
+  "solcVersion": "0.8.22",
+  "solcLongVersion": "0.8.22",
+  "input": {"sources": {"contracts/Widget.sol": {"content": "contract Widget {}"}}},
+  "output": {"contracts": {"contracts/Widget.sol": {"Widget": {"metadata": "{\"compiler\":{\"version\":\"0.8.22+commit.4fc1097e\"}}", "evm": {"bytecode": {"object": "6001600055"}}}}}}
+}
