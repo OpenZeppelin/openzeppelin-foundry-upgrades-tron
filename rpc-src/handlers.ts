@@ -9,6 +9,7 @@ import { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } 
 import { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } from './rewriter.js';
 import { assertStateLockHeld } from './state-lock.js';
 import { decodeLegacyTransaction } from './transactions.js';
+import { NonceOrderedQueue } from './transaction-queue.js';
 import { retryableTransportError } from './tron-client.js';
 import { UpstreamRpcError } from './upstream.js';
 
@@ -21,6 +22,9 @@ import { UpstreamRpcError } from './upstream.js';
 type JsonAny = any;
 
 const JSON_RPC_VERSION = '2.0';
+// The deadline a signer's transaction waits for a strictly-lower missing nonce before it is failed
+// deterministically, rather than racing ahead of (or hanging on) an absent predecessor.
+const DEFAULT_NONCE_GAP_DEADLINE_MS = 30_000;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
@@ -395,6 +399,17 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   const rewriteContractCall = options.rewriteCall ?? rewriteCall;
   const opaqueSafety = options.assertOpaqueBytesSafe ?? assertOpaqueBytesSafe;
   const inFlight = new Map<string, Promise<JsonAny>>();
+  const gapDeadlineMs = options.nonceGapDeadlineMs ?? DEFAULT_NONCE_GAP_DEADLINE_MS;
+  const queue = new NonceOrderedQueue({
+    // The signer's next expected nonce is the durable virtual latest count: the number of its
+    // confirmed (or reverted-with-receipt) source transactions, which advances only when a
+    // transaction reaches a solid receipt and its address mappings are published.
+    expectedNonce: (signer: JsonAny) =>
+      BigInt(virtualTransactionCount(journal, config.expectedSender, signer, 'latest', decode, config.chainId)),
+    gapDeadlineMs,
+    ...(options.scheduleTimeout === undefined ? {} : { scheduleTimeout: options.scheduleTimeout }),
+    ...(options.cancelTimeout === undefined ? {} : { cancelTimeout: options.cancelTimeout }),
+  });
 
   function mappedAddress(address: JsonAny): string {
     const normalized = normalizeEvmAddress(address);
@@ -671,13 +686,28 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return promise;
   }
 
+  // Admit a fresh or retried source build through the per-signer nonce-ordered queue, which releases
+  // it only when it is the signer's next expected nonce. A transaction that cannot be decoded has no
+  // orderable nonce, so it bypasses the queue and processes immediately, recording the same
+  // deterministic decode failure it would have before.
+  function enqueueBuild(rawTransaction: JsonAny, hash: JsonAny): Promise<JsonAny> {
+    let routing;
+    try {
+      routing = decode(rawTransaction, { expectedSender: config.expectedSender, expectedChainId: config.chainId });
+    } catch {
+      return runTracked(hash, () => processClaimed(rawTransaction, hash));
+    }
+    return queue.enqueue(routing.from, BigInt(routing.nonce), hash, () =>
+      runTracked(hash, () => processClaimed(rawTransaction, hash)),
+    );
+  }
+
   async function sendRawTransaction(raw: JsonAny): Promise<JsonAny> {
     if (typeof raw !== 'string') throw new RpcError(-32602, 'Invalid signed transaction bytes');
     const received = journal.receive(raw);
     const hash = received.record.sourceTransactionHash;
-    if (received.shouldBuild)
-      return runTracked(hash, () => processClaimed(received.record.signedEthereumTransaction, hash));
-    const active = inFlight.get(hash);
+    if (received.shouldBuild) return enqueueBuild(received.record.signedEthereumTransaction, hash);
+    const active = queue.get(hash) ?? inFlight.get(hash);
     if (active !== undefined) return active;
     const record = journal.get(hash);
     if (record.state === 'confirmed') return hash;
@@ -685,7 +715,7 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       throw Object.assign(new Error(record.failure.message), { code: record.failure.code });
     if (record.state === 'received') {
       if (record.buildClaimOwner === journal.ownerId) {
-        return runTracked(hash, () => processClaimed(record.signedEthereumTransaction, hash));
+        return enqueueBuild(record.signedEthereumTransaction, hash);
       }
       const error: JsonAny = new Error('Source transaction native build is owned by another live handler');
       error.code = 'TRANSACTION_IN_PROGRESS';
@@ -819,6 +849,23 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return responses.length === 0 ? undefined : responses;
   }
 
+  // The ascending recovery-ordering key for a persisted record: its native operation nonce when a
+  // preparation is present, else the decoded source nonce, else a sentinel that sorts undecodable
+  // records last.
+  function recoveryNonce(record: JsonAny): bigint {
+    if (record.operationContext !== undefined) return BigInt(record.operationContext.nonce);
+    try {
+      return BigInt(
+        decode(record.signedEthereumTransaction, {
+          expectedSender: config.expectedSender,
+          expectedChainId: config.chainId,
+        }).nonce,
+      );
+    } catch {
+      return BigInt(Number.MAX_SAFE_INTEGER);
+    }
+  }
+
   async function recoverStartup(capability: JsonAny): Promise<string[]> {
     assertStateLockHeld(capability, config.stateFile);
     // From here on, every durable state mutation re-asserts that this exclusive lock is still
@@ -827,8 +874,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       journal.store.bindLockAssertion(() => assertStateLockHeld(capability, config.stateFile));
     }
     const recovered = [];
-    for (const persisted of journal.list()) {
-      if (persisted.state === 'confirmed' || persisted.state === 'failed') continue;
+    // Replay interrupted work in ascending source-nonce order so a dependent transaction is never
+    // reprocessed before the predecessor whose address mapping it relies on, mirroring the live
+    // per-signer nonce ordering. Records whose nonce cannot be recovered sort last, where they fail
+    // deterministically on reprocessing as they would in the live path.
+    const pending = journal
+      .list()
+      .filter((record: JsonAny) => record.state !== 'confirmed' && record.state !== 'failed')
+      .map((record: JsonAny) => ({ record, nonce: recoveryNonce(record) }))
+      .sort((left: JsonAny, right: JsonAny) => (left.nonce < right.nonce ? -1 : left.nonce > right.nonce ? 1 : 0));
+    for (const { record: persisted } of pending) {
       const hash = persisted.sourceTransactionHash;
       if (persisted.state === 'received') {
         const claimed = journal.recoverReceived(hash, persisted.buildClaimOwner);

@@ -600,6 +600,78 @@ test('joins concurrent source retries and never invokes a second native builder'
   assert.equal(result.calls.filter((call: JsonAny) => call.type === 'broadcast').length, 1);
 });
 
+test('processes a dependent call at its nonce order against the prior deployment mapping despite reversed concurrent arrival', async (t: TestContext) => {
+  const rawDeploy = await signedTransaction({ to: null, nonce: 0, data: '0x6000' });
+  const deployHash = keccak256(rawDeploy);
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 0 }).toLowerCase();
+  const rawCall = await signedTransaction({ to: predicted, nonce: 1, data: '0x1234' });
+  const callHash = keccak256(rawCall);
+
+  let result: JsonAny;
+  // The real default resolve-call-context and call rewrite depend on the durable address map; this
+  // models that dependency without the artifact-verification machinery — a call target resolves to
+  // its actual native address only once the deployment that produced it has published its mapping.
+  const reconciler = {
+    recordPreparedNative(sourceHash: JsonAny, native: JsonAny, simulation: JsonAny, operationContext: JsonAny) {
+      result.calls.push({ type: 'prepared', sourceHash, operationContext });
+      return result.journal.recordNativeBuilt(sourceHash, native, {
+        operationContext,
+        childCreatePlan: {
+          version: 1,
+          mode: simulation.mode,
+          sender: operationContext.from,
+          simulationRootAddress: simulation.simulationRootAddress,
+          attempts: [],
+          counterBases: {},
+          counterFinals: {},
+        },
+      });
+    },
+    reconcile(sourceHash: JsonAny, receipt: JsonAny) {
+      const context = result.journal.get(sourceHash).operationContext;
+      if (context.kind === 'deployment') {
+        result.addressMap.set({
+          predicted: context.predictedContractAddress,
+          actual: context.actualTarget,
+          creator: context.from,
+          sender: context.from,
+          sourceTransaction: sourceHash,
+        });
+      }
+      result.calls.push({ type: 'reconcile', sourceHash });
+      return result.journal.recordConfirmed(sourceHash, receipt);
+    },
+  };
+  result = fixture(t, {
+    reconciler,
+    resolveCallContext: async (target: JsonAny) =>
+      result.addressMap.resolvePredicted(target) === undefined
+        ? undefined
+        : {
+            targetKind: 'contract',
+            abi: ['function ping()'],
+            artifactIdentity: ARTIFACT_IDENTITY,
+            provenanceHash: null,
+          },
+    async rewriteCall(decoded: JsonAny) {
+      return { ...decoded, to: result.addressMap.toActual(decoded.to) ?? decoded.to };
+    },
+  });
+
+  // Reversed arrival: the dependent call (nonce 1) is submitted before the deployment (nonce 0),
+  // reproducing the out-of-order race a non-`--slow` Forge broadcast creates when its dependent
+  // sends reach the gateway as separate concurrent requests.
+  const callResponse = send(result.handlers, rawCall, 1);
+  const deployResponse = send(result.handlers, rawDeploy, 2);
+  assert.equal((await deployResponse).result, deployHash);
+  assert.equal((await callResponse).result, callHash);
+
+  const callBuild = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  // On real Ethereum nonce 1 cannot execute before nonce 0; the gateway must likewise resolve the
+  // call against the deployment's published actual address, not the untranslated predicted address.
+  assert.equal(callBuild.value.contractAddress, ACTUAL_TARGET);
+});
+
 test('same-owner retries resume a transient builder failure without concurrent duplicate work', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 30 });
   const sourceHash = keccak256(raw);
@@ -809,6 +881,29 @@ test('startup recovery requires an authentic held state lock and explicitly CAS-
   assert.deepEqual(recovered, [keccak256(raw)]);
   assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate').length, 1);
   assert.equal(result.journal.get(keccak256(raw)).state, 'confirmed');
+});
+
+test('replays interrupted received builds in ascending nonce order, not journal storage order', async (t: TestContext) => {
+  // nonce 2 has a higher source hash than nonce 4, so hash-ordered replay would process nonce 4
+  // first; recovery must instead replay the lower nonce first to preserve dependent ordering.
+  const lower = await signedTransaction({ to: null, nonce: 2, data: '0x6000' });
+  const higher = await signedTransaction({ to: null, nonce: 4, data: '0x6000' });
+  assert.equal(keccak256(lower) > keccak256(higher), true);
+
+  const result = fixture(t, { ownerId: 'boot-new', allowRecovery: true });
+  const oldJournal = new TransactionJournal(result.store, CHAIN, { ownerId: 'boot-old' });
+  oldJournal.receive(higher);
+  oldJournal.receive(lower);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  const recovered = await result.handlers.recoverStartup(capability);
+
+  assert.deepEqual(recovered, [keccak256(lower), keccak256(higher)]);
+  assert.deepEqual(
+    result.calls.filter((call: JsonAny) => call.type === 'prepared').map((call: JsonAny) => call.operationContext.nonce),
+    ['2', '4'],
+  );
 });
 
 test('replays durable receipts and Ethereum transactions after restart', async (t: TestContext) => {
