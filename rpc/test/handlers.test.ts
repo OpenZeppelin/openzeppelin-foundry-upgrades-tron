@@ -1279,6 +1279,103 @@ test('persists an immutable artifact snapshot for a confirmed deployment', async
   });
 });
 
+// The prepared-native journal record and the artifact snapshot are written in two separate store
+// transactions, so a crash between them leaves a prepared deployment with no snapshot. Recovery
+// reconstructs the missing snapshot from the on-disk artifact when its fresh provenance still matches.
+function seedPreparedWithoutSnapshot(result: JsonAny, raw: JsonAny, provenanceHash: JsonAny) {
+  const sourceHash = keccak256(raw);
+  const nonce = Transaction.from(raw).nonce;
+  result.journal.receive(raw);
+  result.journal.recordNativeBuilt(
+    sourceHash,
+    { signedNativeTransaction: NATIVE_BYTES, nativeTransactionId: NATIVE_TXID },
+    {
+      operationContext: {
+        kind: 'deployment',
+        from: WALLET.address,
+        to: null,
+        nonce: String(nonce),
+        predictedContractAddress: getCreateAddress({ from: WALLET.address, nonce }),
+        actualTarget: ACTUAL_TARGET,
+        contractKind: 'contract',
+        artifactIdentity: ARTIFACT_IDENTITY,
+        provenanceHash,
+      },
+      childCreatePlan: {
+        version: 1,
+        mode: 'exact-signed',
+        sender: WALLET.address,
+        simulationRootAddress: ACTUAL_TARGET,
+        attempts: [],
+        counterBases: {},
+        counterFinals: {},
+      },
+    },
+  );
+  return sourceHash;
+}
+
+function diskArtifact(provenanceHash: JsonAny) {
+  return {
+    artifact: {
+      abi: [{ type: 'constructor', inputs: [] }],
+      bytecode: { object: '0x6000' },
+      deployedBytecode: { object: '0x6001' },
+    },
+    artifactPath: '/out/Box.sol/Box.json',
+    sourceName: ARTIFACT_IDENTITY.sourceName,
+    contractName: ARTIFACT_IDENTITY.contractName,
+    fullyQualifiedName: ARTIFACT_IDENTITY.fullyQualifiedName,
+    provenanceHash,
+  };
+}
+
+test('reconstructs a prepared deployment artifact snapshot lost to a crash when the on-disk artifact still matches', async (t: TestContext) => {
+  const provenanceHash = `0x${'55'.repeat(32)}`;
+  const raw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    findArtifactPaths: () => ['/out/Box.sol/Box.json'],
+    verifyArtifactProvenance: () => diskArtifact(provenanceHash),
+  });
+  const sourceHash = seedPreparedWithoutSnapshot(result, raw, provenanceHash);
+  assert.equal(result.addressMap.resolveArtifactSnapshot(provenanceHash), undefined);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  await result.handlers.recoverStartup(capability);
+
+  const snapshot = result.addressMap.resolveArtifactSnapshot(provenanceHash);
+  assert.equal(snapshot?.provenanceHash, provenanceHash);
+  assert.equal(snapshot?.artifactIdentity.fullyQualifiedName, ARTIFACT_IDENTITY.fullyQualifiedName);
+  assert.deepEqual(snapshot?.abi, [{ type: 'constructor', inputs: [] }]);
+  assert.equal(result.journal.get(sourceHash).state, 'confirmed');
+});
+
+test('leaves the crash-lost snapshot absent when the on-disk artifact provenance no longer matches', async (t: TestContext) => {
+  const journaledHash = `0x${'55'.repeat(32)}`;
+  const replacedHash = `0x${'66'.repeat(32)}`;
+  const raw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    findArtifactPaths: () => ['/out/Box.sol/Box.json'],
+    verifyArtifactProvenance: () => diskArtifact(replacedHash),
+  });
+  const sourceHash = seedPreparedWithoutSnapshot(result, raw, journaledHash);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  await result.handlers.recoverStartup(capability);
+
+  // Recovery proceeds and confirms the deployment, but the mismatched disk artifact is never bound as
+  // this deployment's snapshot; a later resolution keeps the legacy no-snapshot failure behavior.
+  assert.equal(result.journal.get(sourceHash).state, 'confirmed');
+  assert.equal(result.addressMap.resolveArtifactSnapshot(journaledHash), undefined);
+  assert.equal(result.addressMap.resolveArtifactSnapshot(replacedHash), undefined);
+});
+
 // A deployment whose runtime bytecode still carries unresolved external-library link placeholders
 // (__$...$__) — a shape artifact provenance explicitly permits — snapshots successfully by hashing
 // the raw runtime template rather than demanding fully linked pure hex.

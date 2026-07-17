@@ -861,7 +861,44 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return reconciler.reconcile(record.sourceTransactionHash, receipt).receipt;
   }
 
+  // The prepared-native journal record and its artifact snapshot are persisted in two separate store
+  // transactions, so a crash between them leaves a prepared deployment with no snapshot. Rebuild the
+  // missing envelope from the on-disk artifact before the resumed transaction is broadcast, but only
+  // when the freshly re-resolved artifact's provenance still matches the journaled one. A changed or
+  // unresolvable artifact leaves the legacy no-snapshot behavior, which refuses a later resolution
+  // rather than binding a mismatched artifact to this deployment.
+  function reconstructMissingSnapshot(record: JsonAny): void {
+    const operation = record?.operationContext;
+    if (
+      operation === undefined ||
+      operation.kind !== 'deployment' ||
+      operation.artifactIdentity === null ||
+      operation.artifactIdentity === undefined ||
+      operation.provenanceHash === null ||
+      operation.provenanceHash === undefined
+    ) {
+      return;
+    }
+    if (addressMap.resolveArtifactSnapshot(operation.provenanceHash) !== undefined) return;
+    let verified;
+    try {
+      verified = verifiedArtifactForIdentity(operation.artifactIdentity);
+    } catch {
+      return;
+    }
+    if (verified.provenanceHash?.toLowerCase() !== operation.provenanceHash) return;
+    addressMap.setArtifactSnapshot({
+      provenanceHash: operation.provenanceHash,
+      artifactIdentity: operation.artifactIdentity,
+      contractKind: operation.contractKind,
+      abi: verified.artifact?.abi,
+      creationBytecodeHash: bytecodeHash(verified.artifact?.bytecode, 'creation bytecode'),
+      runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
+    });
+  }
+
   async function resumePrepared(record: JsonAny): Promise<JsonAny> {
+    reconstructMissingSnapshot(record);
     const snapshot = await nativeClient.getTransaction(record.nativeTransactionId);
     if (snapshot === null) {
       await nativeClient.broadcastSigned(record.signedNativeTransaction, record.nativeTransactionId);
