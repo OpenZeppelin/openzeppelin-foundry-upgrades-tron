@@ -67,6 +67,31 @@ test('releases a signer batch strictly in ascending nonce order despite reversed
   assert.deepEqual(order, [0n, 1n, 2n]);
 });
 
+test('waits at the durable expected nonce for a lower nonce arriving a full event-loop turn later', async () => {
+  // Reproduces the cross-tick race: the durable expected nonce is 0, nonce 1 is enqueued first, an
+  // entire macrotask elapses, then nonce 0 arrives. The cursor must stay pinned to the durable
+  // expectation (0) so nonce 1 waits rather than releasing early and rejecting nonce 0 as too low.
+  const { queue, order, run } = harness();
+  const one = queue.enqueue('A', 1n, '0xa1', async () => run('A', 1n));
+  await flush();
+  const zero = queue.enqueue('A', 0n, '0xa0', async () => run('A', 0n));
+  assert.deepEqual(await Promise.all([zero, one]), [0n, 1n]);
+  assert.deepEqual(order, [0n, 1n]);
+});
+
+test('holds a lone future nonce for the gap deadline instead of releasing ahead of the durable expectation', async () => {
+  // A single transaction whose nonce sits above the signer's durable expected nonce is a gap, not a
+  // releasable head: it must wait for the missing predecessors (or the gap deadline) rather than
+  // release immediately, which was the cross-tick defect's cousin.
+  const { queue, order, fireDeadline, timers } = harness();
+  const future = queue.enqueue('A', 5n, '0xa5', async () => 5n);
+  await flush();
+  assert.deepEqual(order, []);
+  assert.equal(timers.some((timer: JsonAny) => !timer.cancelled), true);
+  fireDeadline();
+  await assert.rejects(future, (error: JsonAny) => error.code === 'NONCE_GAP_TIMEOUT');
+});
+
 test('serializes one transaction per signer at a time', async () => {
   const { queue, order, nextExpected } = harness();
   const first = deferred();

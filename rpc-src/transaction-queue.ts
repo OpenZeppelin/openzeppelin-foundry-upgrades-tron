@@ -41,14 +41,6 @@ function queueError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
-function minNonce(pending: Map<string, QueueEntry>): bigint | undefined {
-  let smallest: bigint | undefined;
-  for (const entry of pending.values()) {
-    if (smallest === undefined || entry.nonce < smallest) smallest = entry.nonce;
-  }
-  return smallest;
-}
-
 class NonceOrderedQueue {
   declare private expectedNonce: (signer: string) => bigint;
   declare private gapDeadlineMs: number;
@@ -146,13 +138,15 @@ class NonceOrderedQueue {
     if (state === undefined || state.active) return;
 
     if (state.cursor === undefined) {
-      const smallest = minNonce(state.pending);
-      if (smallest === undefined) {
+      if (state.pending.size === 0) {
         this._clearDeadline(state);
         this.signers.delete(signer);
         return;
       }
-      state.cursor = smallest;
+      // Pin the cursor to the signer's durable expected nonce at first enqueue so a transaction that
+      // arrives ahead of the expectation waits for its missing predecessors instead of releasing
+      // early and rejecting a lower nonce that is still in flight one event-loop turn behind it.
+      state.cursor = this.expectedNonce(signer);
     }
     // Advance the cursor to the durable next expected nonce so consumed nonces (confirmed, or
     // reverted-with-receipt) are never re-released and their now-stale duplicates are rejected.

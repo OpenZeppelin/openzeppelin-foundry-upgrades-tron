@@ -141,6 +141,13 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
       allowRecovery: overrides.allowRecovery ?? false,
     });
   const addressMap = overrides.addressMap ?? new AddressMap(store, CHAIN);
+  // The nonce-ordered send queue releases a source transaction only when its nonce equals the
+  // signer's durable expected nonce. A lone transaction fixture whose nonce sits above zero models a
+  // signer whose earlier nonces are already consumed on-chain, so seed the matching durable baseline
+  // to reflect that expectation instead of leaving a spurious gap below the transaction.
+  if (overrides.nonceBaseline !== undefined) {
+    addressMap.setNonceBaseline({ sender: WALLET.address, nonce: BigInt(overrides.nonceBaseline) });
+  }
   const calls: JsonAny[] = [];
   const upstream = overrides.upstream ?? {
     async request(method: JsonAny, params: JsonAny) {
@@ -298,7 +305,7 @@ test('reports chain ID and serves a virtual source nonce while forwarding gas qu
 });
 
 test('derives latest and pending source nonces from durable journal state without upstream support', async (t: TestContext) => {
-  const raw = await signedTransaction({ nonce: 3 });
+  const raw = await signedTransaction({ nonce: 0 });
   const result = fixture(t, { sourceHash: keccak256(raw) });
   result.journal.receive(raw);
   const wrongChain = await signedTransaction({ chainId: 1, nonce: 99 });
@@ -312,7 +319,7 @@ test('derives latest and pending source nonces from durable journal state withou
       params: [WALLET.address, block],
     });
   assert.equal((await count('latest')).result, '0x0');
-  assert.equal((await count('pending')).result, '0x4');
+  assert.equal((await count('pending')).result, '0x1');
   assert.equal(
     (
       await result.handlers.handle({
@@ -341,8 +348,8 @@ test('derives latest and pending source nonces from durable journal state withou
   );
 
   await result.handlers.dispatch('eth_sendRawTransaction', [raw]);
-  assert.equal((await count('latest')).result, '0x4');
-  assert.equal((await count('pending')).result, '0x4');
+  assert.equal((await count('latest')).result, '0x1');
+  assert.equal((await count('pending')).result, '0x1');
   assert.equal(
     result.calls.some((call: JsonAny) => call.type === 'upstream'),
     false,
@@ -358,7 +365,7 @@ test('derives latest and pending source nonces from durable journal state withou
 });
 
 test('derives historical source nonces from confirmed journal receipts at canonical block quantities', async (t: TestContext) => {
-  const raw = await signedTransaction({ nonce: 3 });
+  const raw = await signedTransaction({ nonce: 0 });
   const result = fixture(t, { sourceHash: keccak256(raw) });
   await result.handlers.dispatch('eth_sendRawTransaction', [raw]);
 
@@ -374,8 +381,8 @@ test('derives historical source nonces from confirmed journal receipts at canoni
 
   assert.equal(await count('0x0'), '0x0');
   assert.equal(await count('0x29'), '0x0');
-  assert.equal(await count('0x2a'), '0x4');
-  assert.equal(await count('0x2b'), '0x4');
+  assert.equal(await count('0x2a'), '0x1');
+  assert.equal(await count('0x2b'), '0x1');
   assert.equal(await count('0x2a', TARGET), '0x0');
   assert.equal(
     result.calls.some((call: JsonAny) => call.type === 'upstream'),
@@ -582,7 +589,7 @@ test('rejects malformed or provenance-mismatched deployment estimates before ups
 test('composes deployment decode, provenance, rewrite, exact simulation, durable prepare, broadcast, wait, and reconcile', async (t: TestContext) => {
   const raw = await signedTransaction();
   const sourceHash = keccak256(raw);
-  const result = fixture(t, { sourceHash });
+  const result = fixture(t, { sourceHash, nonceBaseline: 3 });
   const response = await send(result.handlers, raw);
 
   assert.deepEqual(response, { jsonrpc: '2.0', id: 1, result: sourceHash });
@@ -606,7 +613,7 @@ test('joins concurrent source retries and never invokes a second native builder'
   const raw = await signedTransaction();
   let release!: (value?: unknown) => void;
   const gate = new Promise(resolve => (release = resolve));
-  const result = fixture(t);
+  const result = fixture(t, { nonceBaseline: 3 });
   const wait = result.nativeClient.waitForReceipt;
   result.nativeClient.waitForReceipt = async (...args: JsonAny[]) => {
     await gate;
@@ -698,7 +705,7 @@ test('processes a dependent call at its nonce order against the prior deployment
 test('same-owner retries resume a transient builder failure without concurrent duplicate work', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 30 });
   const sourceHash = keccak256(raw);
-  const result = fixture(t, { sourceHash });
+  const result = fixture(t, { sourceHash, nonceBaseline: 30 });
   const originalBuild = result.nativeClient.buildCreate.bind(result.nativeClient);
   const firstBuild = deferred();
   let buildAttempts = 0;
@@ -733,7 +740,7 @@ test('same-owner retries resume a transient builder failure without concurrent d
 test('same-owner retries rebuild after a transient exact-simulation transport failure', async (t: TestContext) => {
   const raw = await signedTransaction({ nonce: 31 });
   const sourceHash = keccak256(raw);
-  const result = fixture(t, { sourceHash });
+  const result = fixture(t, { sourceHash, nonceBaseline: 31 });
   const originalSimulation = result.nativeClient.simulateSigned.bind(result.nativeClient);
   let simulationAttempts = 0;
   result.nativeClient.simulateSigned = async (...args: JsonAny[]) => {
@@ -779,7 +786,7 @@ test('ordinary send retries cannot take over a received claim owned by another b
 test('rewrites and builds a native call once with durable target metadata', async (t: TestContext) => {
   const raw = await signedTransaction({ to: TARGET, nonce: 7, data: '0x1234' });
   const sourceHash = keccak256(raw);
-  const result = fixture(t, { sourceHash });
+  const result = fixture(t, { sourceHash, nonceBaseline: 7 });
 
   const response = await send(result.handlers, raw);
   assert.equal(response.result, sourceHash);
@@ -798,7 +805,7 @@ test('presents a confirmed call target in the same predicted or actual domain si
     await t.test(index === 0 ? 'predicted source target' : 'actual source target', async (t: TestContext) => {
       const raw = await signedTransaction({ to: sourceTarget, nonce: 40 + index, data: '0x1234' });
       const sourceHash = keccak256(raw);
-      const result = fixture(t, { sourceHash });
+      const result = fixture(t, { sourceHash, nonceBaseline: 40 + index });
       result.addressMap.set({
         predicted: TARGET,
         actual: TARGET_ACTUAL,
@@ -932,7 +939,7 @@ test('replays interrupted received builds in ascending nonce order, not journal 
 test('replays durable receipts and Ethereum transactions after restart', async (t: TestContext) => {
   const raw = await signedTransaction();
   const sourceHash = keccak256(raw);
-  const first = fixture(t, { sourceHash });
+  const first = fixture(t, { sourceHash, nonceBaseline: 3 });
   await send(first.handlers, raw);
 
   const restartedJournal = new TransactionJournal(new JsonStore(first.statePath), CHAIN, { ownerId: 'boot-restart' });
@@ -1207,6 +1214,7 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
       'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
   };
   const result = fixture(t, {
+    nonceBaseline: 15,
     useDefaultResolveCallContext: true,
     findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
       if (reference === transparentIdentity.fullyQualifiedName) {
@@ -1258,7 +1266,7 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
 // cannot orphan the original deployment's ABI.
 test('persists an immutable artifact snapshot for a confirmed deployment', async (t: TestContext) => {
   const raw = await signedTransaction();
-  const result = fixture(t);
+  const result = fixture(t, { nonceBaseline: 3 });
   assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
 
   assert.deepEqual(result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`), {
@@ -1278,6 +1286,7 @@ test('snapshots a linked-library deployment whose runtime bytecode carries link 
   const raw = await signedTransaction();
   const linkedRuntime = `0x6001__$${'a'.repeat(34)}$__6002`;
   const result = fixture(t, {
+    nonceBaseline: 3,
     matchDeploymentArtifact: () => ({
       abi: [{ type: 'constructor', inputs: [] }],
       artifact: { abi: [{ type: 'constructor', inputs: [] }], deployedBytecode: { object: linkedRuntime } },
@@ -1305,6 +1314,7 @@ test('snapshots a linked-library deployment whose runtime bytecode carries link 
 test('resolves a same-FQN contract via its snapshot after the on-disk artifact provenance changes', async (t: TestContext) => {
   const pingData = new Interface(['function ping()']).encodeFunctionData('ping', []);
   const result = fixture(t, {
+    nonceBaseline: 16,
     useDefaultResolveCallContext: true,
     rewriteCall: realRewriteCall,
     findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
@@ -1349,6 +1359,7 @@ test('resolves a same-FQN contract via its snapshot after the on-disk artifact p
 // provenance) keeps the byte-identical ARTIFACT_PROVENANCE_CHANGED failure.
 test('preserves ARTIFACT_PROVENANCE_CHANGED when a changed artifact has no snapshot fallback', async (t: TestContext) => {
   const result = fixture(t, {
+    nonceBaseline: 16,
     useDefaultResolveCallContext: true,
     findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
       assert.equal(reference, ARTIFACT_IDENTITY.fullyQualifiedName);
@@ -1769,6 +1780,7 @@ test('rejects an external upgrade selector whose embedded implementation is unkn
   const unknownImplementation = `0x${'d4'.repeat(20)}`;
   const upstreamCalls: JsonAny[] = [];
   const result = fixture(t, {
+    nonceBaseline: 22,
     resolveCallContext: async () => undefined,
     upstream: {
       async request(method: JsonAny, params: JsonAny) {
@@ -1803,6 +1815,7 @@ test('rejects a non-matching selector that embeds a known predicted address as b
   const targetExternal = `0x${'c1'.repeat(20)}`;
   const upstreamCalls: JsonAny[] = [];
   const result = fixture(t, {
+    nonceBaseline: 22,
     resolveCallContext: async () => undefined,
     upstream: {
       async request(method: JsonAny, params: JsonAny) {
@@ -2060,6 +2073,7 @@ test('turns deterministic prebuild failures into durable terminal failures and n
   const raw = await signedTransaction({ nonce: 12 });
   const sourceHash = keccak256(raw);
   const result = fixture(t, {
+    nonceBaseline: 12,
     sourceHash,
     matchDeploymentArtifact() {
       const error: JsonAny = new Error('artifact mismatch');
