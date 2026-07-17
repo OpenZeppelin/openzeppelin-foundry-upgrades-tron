@@ -9,7 +9,7 @@ import { createRpcHandlers } from './handlers.js';
 import { TransactionJournal } from './journal.js';
 import { createRpcServer } from './server.js';
 import type { RpcServer, RpcServerHandlers } from './server.js';
-import { JsonStore } from './store.js';
+import { JsonStore, createStateFile } from './store.js';
 import { TronClient } from './tron-client.js';
 import { createUpstreamClient } from './upstream.js';
 import type { UpstreamClient } from './upstream.js';
@@ -18,9 +18,14 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8_545;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const USAGE = `Usage:
+  openzeppelin-foundry-upgrades-tron init
   openzeppelin-foundry-upgrades-tron start [--host HOST] [--port PORT] [--allow-non-loopback]
   openzeppelin-foundry-upgrades-tron resolve ADDRESS
   openzeppelin-foundry-upgrades-tron mappings
+
+Run init once to create the state file, then back it up like a keystore. Every
+other command refuses to run against a missing state file rather than presenting
+an empty deployment history.
 
 TRON endpoints, private keys, state paths, chain identity, and Foundry output are configured through the environment.
 `;
@@ -79,6 +84,11 @@ export interface HelpArguments {
   command: 'help';
 }
 
+/** The parsed `init` invocation. */
+export interface InitArguments {
+  command: 'init';
+}
+
 /** The parsed `start` invocation. */
 export interface StartArguments {
   command: 'start';
@@ -98,7 +108,12 @@ export interface MappingsArguments {
 }
 
 /** The result of {@link parseArguments}, discriminated by `command`. */
-export type ParsedArguments = HelpArguments | StartArguments | ResolveArguments | MappingsArguments;
+export type ParsedArguments =
+  | HelpArguments
+  | InitArguments
+  | StartArguments
+  | ResolveArguments
+  | MappingsArguments;
 
 /** Options accepted by {@link run}. */
 export interface RunOptions {
@@ -181,6 +196,10 @@ function parseArguments(argv: string[]): ParsedArguments {
   if (!Array.isArray(argv) || argv.some(value => typeof value !== 'string')) throw new Error('Invalid CLI arguments');
   if (argv.length === 1 && (argv[0] === '--help' || argv[0] === 'help')) return { command: 'help' };
   const [command, ...args] = argv;
+  if (command === 'init') {
+    if (args.length !== 0) throw new Error('The init command does not accept operands');
+    return { command };
+  }
   if (command === 'start') return parseStartArguments(args);
   if (command === 'resolve') {
     if (args.length !== 1) throw new Error('The resolve command requires exactly one address');
@@ -212,7 +231,9 @@ function buildRuntime(config: Config, options: BuildRuntimeOptions = {}): Adapte
   // `isObject` narrows `options` to `Record<string, unknown>`, which would otherwise discard the
   // specific `host`/`port`/`fetch` field types; re-assert the declared option shape here.
   const resolvedOptions = options as BuildRuntimeOptions;
-  const store = new JsonStore(config.stateFile);
+  // Every CLI entry opens durable state in refuse-on-missing mode, so a lost or mispointed state
+  // path fails loudly here instead of silently starting from an empty deployment history.
+  const store = new JsonStore(config.stateFile, { createIfMissing: false });
   const addressMap = new AddressMap(store, config.chainIdentity);
   const journal = new TransactionJournal(store, config.chainIdentity, { allowRecovery: true });
   const reconciler = new CreateReconciler(journal, addressMap);
@@ -348,7 +369,7 @@ function readOnlyMap(
   parseReadOnlyConfig: (environment: NodeJS.ProcessEnv) => StateConfig = parseStateConfig,
 ): { config: StateConfig; addressMap: AddressMap } {
   const config = parseReadOnlyConfig(environment);
-  const store = new JsonStore(config.stateFile);
+  const store = new JsonStore(config.stateFile, { createIfMissing: false });
   return { config, addressMap: new AddressMap(store, config.chainIdentity) };
 }
 
@@ -387,6 +408,10 @@ async function run(argv: string[] = process.argv.slice(2), options: RunOptions =
     const parsed = parseArguments(argv);
     if (parsed.command === 'help') {
       context.stdout.write(USAGE);
+    } else if (parsed.command === 'init') {
+      const config = context.parseStateConfig(context.environment);
+      const stateFile = createStateFile(config.stateFile);
+      writeJson(context.stdout, { status: 'initialized', chainIdentity: config.chainIdentity, stateFile });
     } else if (parsed.command === 'start') {
       await startCommand(parsed, context);
     } else {

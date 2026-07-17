@@ -18,10 +18,16 @@ environment variables and memory.
 
 The state file contains address provenance, transaction journals, exact signed
 native transaction bytes, confirmed receipts, and the immutable verified artifact
-snapshots captured at deployment. It does not contain the private key. Atomic state-file creation uses mode `0600`; protect its parent
-directory and backups with equivalent permissions. The default
-`.openzeppelin-upgrades/` directory and all `.env` variants except the example
-are ignored by Git. Never commit either one.
+snapshots captured at deployment. It does not contain the private key. The
+`init` command creates the file explicitly at mode `0600` and refuses to
+overwrite an existing one; every state-opening command (`start`, `resolve`,
+`mappings`, `adopt`) refuses to run against a missing state file rather than
+silently starting from an empty deployment history. Initialize the file once,
+protect its parent directory and backups with equivalent permissions, and treat
+it like a keystore: losing it loses every mapping for its chain, recoverable
+only by restoring a backup or re-registering deployments with `adopt`. The
+default `.openzeppelin-upgrades/` directory and all `.env` variants except the
+example are ignored by Git. Never commit either one.
 
 A single advisory lock protects each canonical (realpath) state path. It is a
 loopback TCP reservation, local to the host's network namespace — not a

@@ -31,6 +31,7 @@
     "lint": "node scripts/lint.cjs",
     "lint:fix": "node scripts/lint.cjs --write",
     "rpc": "node dist/rpc/cli.js",
+    "rpc:init": "node dist/rpc/cli.js init",
     "rpc:start": "node dist/rpc/cli.js start",
     "rpc:resolve": "node dist/rpc/cli.js resolve",
     "rpc:mappings": "node dist/rpc/cli.js mappings",

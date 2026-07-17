@@ -217,8 +217,18 @@ from source, build the adapter first; `npm run build:rpc` emits `dist/rpc/`:
 ```sh
 npm install
 npm run build:rpc
+npm run rpc:init
 npm run rpc:start
 ```
+
+Create the state file once with `init` before the first start. `init` writes an
+empty state file at `TRON_STATE_FILE` with mode `0600` and refuses to overwrite
+an existing one. Back the file up like a keystore: it is the only record of the
+predicted-to-actual address mappings and verified artifact snapshots for its
+chain. `start`, `resolve`, and `mappings` refuse to run against a missing state
+file rather than presenting an empty deployment history, so a lost or mispointed
+path fails loudly. Recover a lost state file by restoring a backup, or
+re-register individual on-chain deployments with `adopt`.
 
 The adapter listens on `127.0.0.1:8545` by default. Point Forge at
 `http://127.0.0.1:8545` for broadcasts. Startup acquires an exclusive lock for

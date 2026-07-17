@@ -20,7 +20,16 @@ export interface StoreState {
 /** Options accepted by the {@link JsonStore} constructor. */
 export interface JsonStoreOptions {
   fileSystem?: typeof fs;
+  createIfMissing?: boolean;
 }
+
+/** Options accepted by {@link createStateFile}. */
+export interface CreateStateFileOptions {
+  fileSystem?: typeof fs;
+}
+
+const MISSING_STATE_HINT =
+  'Initialize it with "openzeppelin-foundry-upgrades-tron init" or restore it from a backup';
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -65,6 +74,7 @@ class JsonStore {
   declare filePath: string;
   declare canonicalPath: string;
   declare fs: typeof fs;
+  declare createIfMissing: boolean;
   declare assertWritable: (() => void) | undefined;
 
   constructor(filePath: string, options: JsonStoreOptions = {}) {
@@ -82,8 +92,12 @@ class JsonStore {
     // separate file, or replace the symlink with a fresh regular file on atomic rename).
     this.canonicalPath = canonicalStatePath(filePath);
     // `isObject` narrows `options` to `Record<string, unknown>`, which would otherwise
-    // discard the specific `fileSystem` field type; re-assert the declared option shape here.
+    // discard the specific `fileSystem`/`createIfMissing` field types; re-assert the declared
+    // option shape here.
     this.fs = (options as JsonStoreOptions).fileSystem ?? fs;
+    // When false, a missing state file is a hard error rather than a silently fresh state, so a
+    // lost or mispointed path can never present an empty deployment history as if it were durable.
+    this.createIfMissing = (options as JsonStoreOptions).createIfMissing ?? true;
     this.assertWritable = undefined;
     this._readState();
   }
@@ -140,6 +154,9 @@ class JsonStore {
 
   private _readState(): StoreState {
     if (!this.fs.existsSync(this.canonicalPath)) {
+      if (!this.createIfMissing) {
+        throw new Error(`State file not found: ${this.filePath}. ${MISSING_STATE_HINT}`);
+      }
       return { version: STORE_VERSION, chains: {} };
     }
 
@@ -184,21 +201,61 @@ class JsonStore {
   }
 
   private _syncDirectory(directory: string): void {
-    let descriptor: number | undefined;
-    try {
-      descriptor = this.fs.openSync(directory, 'r');
-      this.fs.fsyncSync(descriptor);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR') {
-        throw error;
-      }
-    } finally {
-      if (descriptor !== undefined) {
-        this.fs.closeSync(descriptor);
-      }
+    syncDirectory(this.fs, directory);
+  }
+}
+
+function syncDirectory(fileSystem: typeof fs, directory: string): void {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fileSystem.openSync(directory, 'r');
+    fileSystem.fsyncSync(descriptor);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR') {
+      throw error;
+    }
+  } finally {
+    if (descriptor !== undefined) {
+      fileSystem.closeSync(descriptor);
     }
   }
 }
 
-export { JsonStore, STORE_VERSION, validateChainIdentity };
+// Create the durable state file explicitly, refusing to overwrite an existing one. The file is
+// created atomically with an exclusive open at mode 0600, matching the durable store's write
+// discipline, so an operator commits to one state file per gateway rather than accreting empty
+// state on a lost or mispointed path.
+function createStateFile(filePath: string, options: CreateStateFileOptions = {}): string {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    throw new Error('State file path is required');
+  }
+  if (!isObject(options)) {
+    throw new Error('Invalid store options');
+  }
+  const fileSystem = (options as CreateStateFileOptions).fileSystem ?? fs;
+  const canonicalPath = canonicalStatePath(filePath);
+  const directory = path.dirname(canonicalPath);
+  const contents = `${JSON.stringify({ version: STORE_VERSION, chains: {} }, null, 2)}\n`;
+
+  fileSystem.mkdirSync(directory, { recursive: true });
+  let descriptor: number;
+  try {
+    descriptor = fileSystem.openSync(canonicalPath, 'wx', 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`State file already exists: ${path.resolve(filePath)}`);
+    }
+    throw error;
+  }
+  try {
+    fileSystem.writeFileSync(descriptor, contents, 'utf8');
+    fileSystem.fsyncSync(descriptor);
+  } finally {
+    fileSystem.closeSync(descriptor);
+  }
+  syncDirectory(fileSystem, directory);
+  return path.resolve(filePath);
+}
+
+export { JsonStore, STORE_VERSION, createStateFile, validateChainIdentity };
