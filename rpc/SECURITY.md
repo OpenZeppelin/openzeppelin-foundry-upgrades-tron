@@ -17,8 +17,8 @@ Startup and HTTP errors are sanitized, but process owners can still inspect
 environment variables and memory.
 
 The state file contains address provenance, transaction journals, exact signed
-native transaction bytes, and confirmed receipts. It does not contain the
-private key. Atomic state-file creation uses mode `0600`; protect its parent
+native transaction bytes, confirmed receipts, and the immutable verified artifact
+snapshots captured at deployment. It does not contain the private key. Atomic state-file creation uses mode `0600`; protect its parent
 directory and backups with equivalent permissions. The default
 `.openzeppelin-upgrades/` directory and all `.env` variants except the example
 are ignored by Git. Never commit either one.
@@ -40,10 +40,14 @@ configured sender and chain are accepted. Typed transaction envelopes,
 unprotected signatures, malformed RLP, `CREATE2`, and ambiguous opaque address
 payloads fail before native broadcast. Opaque bytes are rejected when they
 contain a known predicted address in packed 20-byte, fixed-bytes, or padded ABI
-form. Before a mapped contract ABI is reused, its current artifact provenance
-must still match the provenance recorded for its confirmed deployment; derived
-ProxyAdmin metadata is additionally bound through its parent transparent proxy
-deployment.
+form. A mapped contract's ABI comes only from the artifact verified at that
+contract's deployment: the live on-disk artifact when its current provenance
+still matches the deployment, or the immutable snapshot captured at deployment
+when the on-disk artifact is missing or has been replaced in place. A changed
+disk artifact is never adopted as the deployed one, and a legacy deployment with
+no snapshot still fails closed when its on-disk provenance no longer matches.
+Derived ProxyAdmin metadata is additionally bound through its parent transparent
+proxy deployment.
 
 Stock TRE does not serve historical state for numbered block tags. The adapter
 retries numbered balance, code, storage, and call reads against `latest` only
