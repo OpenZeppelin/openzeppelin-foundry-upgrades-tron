@@ -125,6 +125,20 @@ function artifactIdentity(match: JsonAny): ArtifactIdentity {
   return identity;
 }
 
+function bytecodeObject(value: JsonAny): JsonAny {
+  return typeof value === 'string' ? value : value?.object;
+}
+
+function bytecodeHash(value: JsonAny, label: string): string {
+  const hex = bytecodeObject(value);
+  if (typeof hex !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(hex)) {
+    const error: JsonAny = new Error(`Deployment artifact ${label} is unavailable`);
+    error.code = 'INVALID_ARTIFACT';
+    throw error;
+  }
+  return keccak256(hex.toLowerCase());
+}
+
 function contractKindForArtifact(identity: JsonAny): string {
   if (
     !isObject(identity) ||
@@ -168,7 +182,16 @@ function validateDependencies(options: JsonAny): JsonAny {
     [
       'address map',
       options.addressMap,
-      ['toActual', 'toPredicted', 'resolvePredicted', 'resolveActual', 'resolveContractMetadata', 'list'],
+      [
+        'toActual',
+        'toPredicted',
+        'resolvePredicted',
+        'resolveActual',
+        'resolveContractMetadata',
+        'resolveArtifactSnapshot',
+        'setArtifactSnapshot',
+        'list',
+      ],
     ],
     ['reconciler', options.reconciler, ['recordPreparedNative', 'reconcile']],
     [
@@ -462,6 +485,38 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return error;
   }
 
+  // Resolve the confirmed deployment's own verified artifact, bound to the provenance hash recorded
+  // at deployment. The fast path re-resolves and re-verifies the current on-disk artifact and keeps
+  // it only when its fresh provenance still matches. When the disk artifact is missing or its
+  // provenance no longer matches, the immutable snapshot captured at deployment is used instead, so
+  // a replaced-in-place disk artifact is never adopted as the deployed one. With neither a
+  // disk-provenance match nor a snapshot (legacy pre-snapshot deployments), the original resolution
+  // error is preserved unchanged.
+  function deploymentArtifactForProvenance(operation: JsonAny): JsonAny {
+    let disk;
+    let diskError;
+    try {
+      disk = verifiedArtifactForIdentity(operation.artifactIdentity);
+    } catch (error) {
+      diskError = error;
+    }
+    if (disk !== undefined && disk.provenanceHash?.toLowerCase() === operation.provenanceHash) {
+      return disk;
+    }
+    const snapshot = addressMap.resolveArtifactSnapshot(operation.provenanceHash);
+    if (snapshot !== undefined) {
+      return {
+        abi: snapshot.abi,
+        provenanceHash: snapshot.provenanceHash,
+        fullyQualifiedName: snapshot.artifactIdentity.fullyQualifiedName,
+        artifactIdentity: snapshot.artifactIdentity,
+        fromSnapshot: true,
+      };
+    }
+    if (diskError !== undefined) throw diskError;
+    throw provenanceFailure('Deployment artifact provenance changed after the contract was mapped');
+  }
+
   function verifiedArtifactForMetadata(metadata: JsonAny): JsonAny {
     const source = journal.get(metadata.sourceTransaction);
     const operation = source?.operationContext;
@@ -476,10 +531,9 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         'UNBOUND_ARTIFACT_METADATA',
       );
     }
-    const deploymentArtifact = verifiedArtifactForIdentity(operation.artifactIdentity);
-    if (deploymentArtifact.provenanceHash?.toLowerCase() !== operation.provenanceHash) {
-      throw provenanceFailure('Deployment artifact provenance changed after the contract was mapped');
-    }
+    // The parent deployment's provenance is validated (against live disk or its immutable snapshot)
+    // before any metadata is honored, including the derived-ProxyAdmin branch below.
+    const deploymentArtifact = deploymentArtifactForProvenance(operation);
     if (sameArtifactIdentity(metadata.artifactIdentity, operation.artifactIdentity)) return deploymentArtifact;
 
     const derivedProxyAdmin = derivedTronProxyAdminIdentity(operation.artifactIdentity);
@@ -599,6 +653,7 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       const decoded = decode(raw, { expectedSender: config.expectedSender, expectedChainId: config.chainId });
       let built;
       let operationContext;
+      let artifactSnapshot;
       if (decoded.kind === 'deployment') {
         const match = matchArtifact({ outputDirectory: config.foundryOut, initcode: decoded.data });
         const rewritten = await rewriteDeploy(match, rewriteDependencies);
@@ -621,6 +676,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
           contractKind: contractKindForArtifact(identity),
           artifactIdentity: identity,
           provenanceHash: rewritten.provenanceHash,
+        };
+        // Capture the verified artifact envelope from this just-verified deployment match, so a later
+        // in-place replacement of the same-named on-disk artifact cannot orphan this deployment's ABI.
+        artifactSnapshot = {
+          provenanceHash: operationContext.provenanceHash,
+          artifactIdentity: identity,
+          contractKind: operationContext.contractKind,
+          abi: rewritten.abi ?? rewritten.artifact?.abi,
+          creationBytecodeHash: bytecodeHash(match.creationBytecode, 'creation bytecode'),
+          runtimeBytecodeHash: bytecodeHash(match.artifact?.deployedBytecode, 'runtime bytecode'),
         };
       } else {
         const context = await resolveCallContext(decoded.to);
@@ -660,6 +725,10 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         built.transaction,
       );
       const prepared = reconciler.recordPreparedNative(sourceHash, native, simulation, operationContext);
+      // Persist the deployment's immutable artifact envelope once its native transaction is durably
+      // prepared. The snapshot is keyed by provenance hash and never overwritten, so a re-prepared or
+      // recovered deployment reuses the identical envelope.
+      if (artifactSnapshot !== undefined) addressMap.setArtifactSnapshot(artifactSnapshot);
       await nativeClient.broadcastSigned(prepared.signedNativeTransaction, prepared.nativeTransactionId);
       const broadcast = journal.recordBroadcast(sourceHash);
       await waitAndReconcile(broadcast);

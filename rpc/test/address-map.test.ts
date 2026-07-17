@@ -40,6 +40,27 @@ function mapping(overrides: Record<string, JsonAny> = {}) {
   };
 }
 
+const PROVENANCE_HASH = `0x${'77'.repeat(32)}`;
+const CREATION_HASH = `0x${'88'.repeat(32)}`;
+const RUNTIME_HASH = `0x${'99'.repeat(32)}`;
+const SNAPSHOT_IDENTITY = {
+  sourceName: 'contracts/Box.sol',
+  contractName: 'Box',
+  fullyQualifiedName: 'contracts/Box.sol:Box',
+};
+
+function snapshot(overrides: Record<string, JsonAny> = {}) {
+  return {
+    provenanceHash: PROVENANCE_HASH,
+    artifactIdentity: SNAPSHOT_IDENTITY,
+    contractKind: 'contract',
+    abi: [{ type: 'function', name: 'ping', inputs: [], outputs: [], stateMutability: 'nonpayable' }],
+    creationBytecodeHash: CREATION_HASH,
+    runtimeBytecodeHash: RUNTIME_HASH,
+    ...overrides,
+  };
+}
+
 test('stores global predicted-to-actual and reverse mappings with provenance', t => {
   const { addressMap } = fixture(t);
   const stored = addressMap.set(mapping());
@@ -142,4 +163,71 @@ test('refuses orphaned persisted contract metadata even when the queried address
 
   const restarted = new AddressMap(new JsonStore(statePath), 'tre:728126428');
   assert.throws(() => restarted.resolveContractMetadata(OTHER_PREDICTED), /corrupt.*contract metadata/i);
+});
+
+test('stores and resolves an immutable artifact snapshot keyed by provenance hash', t => {
+  const { addressMap, statePath } = fixture(t);
+  const stored = addressMap.setArtifactSnapshot(snapshot());
+
+  assert.deepEqual(stored, snapshot());
+  assert.deepEqual(addressMap.resolveArtifactSnapshot(PROVENANCE_HASH), snapshot());
+  assert.deepEqual(
+    addressMap.resolveArtifactSnapshot(PROVENANCE_HASH.toUpperCase().replace('0X', '0x')),
+    snapshot(),
+  );
+  assert.equal(addressMap.resolveArtifactSnapshot(`0x${'00'.repeat(32)}`), undefined);
+
+  const restarted = new AddressMap(new JsonStore(statePath), 'tre:728126428');
+  assert.deepEqual(restarted.resolveArtifactSnapshot(PROVENANCE_HASH), snapshot());
+});
+
+test('accepts an identical snapshot retry but refuses overwriting a snapshot in place', t => {
+  const { addressMap } = fixture(t);
+  addressMap.setArtifactSnapshot(snapshot());
+
+  assert.deepEqual(addressMap.setArtifactSnapshot(snapshot()), snapshot());
+  assert.throws(
+    () => addressMap.setArtifactSnapshot(snapshot({ abi: [{ type: 'function', name: 'pong', inputs: [] }] })),
+    /snapshot.*conflict/i,
+  );
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ contractKind: 'uups-proxy' })), /snapshot.*conflict/i);
+});
+
+test('validates snapshot identity, kind, abi, and hashes before writing', t => {
+  const { addressMap } = fixture(t);
+
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ provenanceHash: '0x1234' })), /provenance/i);
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ creationBytecodeHash: '0xdead' })), /snapshot/i);
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ runtimeBytecodeHash: 'nope' })), /snapshot/i);
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ contractKind: 'Not-A-Kind' })), /snapshot/i);
+  assert.throws(() => addressMap.setArtifactSnapshot(snapshot({ abi: 'not-an-array' })), /snapshot/i);
+  assert.throws(
+    () =>
+      addressMap.setArtifactSnapshot(
+        snapshot({ artifactIdentity: { sourceName: 'contracts/Box.sol', contractName: 'Box', fullyQualifiedName: 'x' } }),
+      ),
+    /identity/i,
+  );
+});
+
+test('fails closed on a corrupt persisted artifact snapshot record', t => {
+  const { addressMap, statePath } = fixture(t);
+  addressMap.setArtifactSnapshot(snapshot());
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  state.chains['tre:728126428'].artifactSnapshots.byProvenanceHash[PROVENANCE_HASH].creationBytecodeHash = '0xdead';
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  assert.throws(() => addressMap.resolveArtifactSnapshot(PROVENANCE_HASH), /corrupt.*artifact snapshot/i);
+});
+
+test('fails closed when a persisted artifact snapshot is keyed by the wrong provenance hash', t => {
+  const { addressMap, statePath } = fixture(t);
+  addressMap.setArtifactSnapshot(snapshot());
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const snapshots = state.chains['tre:728126428'].artifactSnapshots.byProvenanceHash;
+  snapshots[`0x${'00'.repeat(32)}`] = snapshots[PROVENANCE_HASH];
+  delete snapshots[PROVENANCE_HASH];
+  fs.writeFileSync(statePath, JSON.stringify(state));
+
+  assert.throws(() => addressMap.resolveArtifactSnapshot(`0x${'00'.repeat(32)}`), /corrupt.*artifact snapshot/i);
 });

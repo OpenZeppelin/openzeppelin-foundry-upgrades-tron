@@ -4,7 +4,9 @@ import { validateChainIdentity, type ChainState } from './store.js';
 
 const ADDRESS_MAP_VERSION = 1;
 const CONTRACT_METADATA_VERSION = 1;
+const ARTIFACT_SNAPSHOT_VERSION = 1;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
+const CONTRACT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 
 // Address mappings, contract metadata, and caller-supplied identifiers this module validates are
@@ -43,6 +45,26 @@ export interface ContractMetadataRecord {
 export interface ContractMetadataIndex {
   version: number;
   byPredicted: Record<string, ContractMetadataRecord>;
+}
+
+/**
+ * One immutable, verified artifact envelope captured at deployment. It carries everything the
+ * gateway needs to interpret and rewrite later calls to the deployment when the on-disk artifact is
+ * gone or has been replaced in place, keyed by the provenance hash recorded for that deployment.
+ */
+export interface ArtifactSnapshotRecord {
+  provenanceHash: string;
+  artifactIdentity: ArtifactIdentity;
+  contractKind: string;
+  abi: JsonAny[];
+  creationBytecodeHash: string;
+  runtimeBytecodeHash: string;
+}
+
+/** The durable artifact-snapshot index for one chain, keyed by provenance hash. */
+export interface ArtifactSnapshotIndex {
+  version: number;
+  byProvenanceHash: Record<string, ArtifactSnapshotRecord>;
 }
 
 /** The subset of a durable store's API used by {@link AddressMap}. */
@@ -261,6 +283,83 @@ function resolveContractMetadataInChain(chain: ChainState, address: JsonAny): Co
   return metadata.byPredicted[predicted];
 }
 
+function normalizeHash32(value: JsonAny, field: string): string {
+  if (typeof value !== 'string' || !TRANSACTION_HASH_PATTERN.test(value)) {
+    throw new Error(`Invalid artifact snapshot ${field}`);
+  }
+  return value.toLowerCase();
+}
+
+function normalizeArtifactSnapshot(snapshot: JsonAny): ArtifactSnapshotRecord {
+  if (
+    !isObject(snapshot) ||
+    Object.keys(snapshot).sort().join(',') !==
+      'abi,artifactIdentity,contractKind,creationBytecodeHash,provenanceHash,runtimeBytecodeHash' ||
+    typeof snapshot.contractKind !== 'string' ||
+    !CONTRACT_KIND_PATTERN.test(snapshot.contractKind) ||
+    !Array.isArray(snapshot.abi)
+  ) {
+    throw new Error('Invalid artifact snapshot');
+  }
+  return {
+    provenanceHash: normalizeHash32(snapshot.provenanceHash, 'provenance hash'),
+    artifactIdentity: normalizeArtifactIdentity(snapshot.artifactIdentity),
+    contractKind: snapshot.contractKind,
+    abi: structuredClone(snapshot.abi),
+    creationBytecodeHash: normalizeHash32(snapshot.creationBytecodeHash, 'creation bytecode hash'),
+    runtimeBytecodeHash: normalizeHash32(snapshot.runtimeBytecodeHash, 'runtime bytecode hash'),
+  };
+}
+
+function emptyArtifactSnapshots(): ArtifactSnapshotIndex {
+  return { version: ARTIFACT_SNAPSHOT_VERSION, byProvenanceHash: {} };
+}
+
+function requireArtifactSnapshots(chain: ChainState): ArtifactSnapshotIndex {
+  const snapshots = chain.artifactSnapshots;
+  if (snapshots === undefined) return emptyArtifactSnapshots();
+  if (
+    !isObject(snapshots) ||
+    Object.keys(snapshots).sort().join(',') !== 'byProvenanceHash,version' ||
+    snapshots.version !== ARTIFACT_SNAPSHOT_VERSION ||
+    !isObject(snapshots.byProvenanceHash)
+  ) {
+    throw new Error('Corrupt artifact snapshot index');
+  }
+  for (const [provenanceHash, rawRecord] of Object.entries(snapshots.byProvenanceHash)) {
+    let record: ArtifactSnapshotRecord;
+    try {
+      record = normalizeArtifactSnapshot(rawRecord);
+    } catch (error) {
+      throw new Error('Corrupt artifact snapshot record', { cause: error });
+    }
+    if (provenanceHash !== record.provenanceHash || JSON.stringify(rawRecord) !== JSON.stringify(record)) {
+      throw new Error('Corrupt artifact snapshot index');
+    }
+  }
+  return snapshots as unknown as ArtifactSnapshotIndex;
+}
+
+function setArtifactSnapshotInChain(chain: ChainState, value: JsonAny): ArtifactSnapshotRecord {
+  const record = normalizeArtifactSnapshot(value);
+  const snapshots = requireArtifactSnapshots(chain);
+  const existing = snapshots.byProvenanceHash[record.provenanceHash];
+  if (existing !== undefined) {
+    // A provenance hash cryptographically binds one artifact, so an identical re-store is an
+    // idempotent retry; any differing envelope for the same hash is refused and never overwritten.
+    if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('Artifact snapshot conflict');
+    return existing;
+  }
+  snapshots.byProvenanceHash[record.provenanceHash] = record;
+  chain.artifactSnapshots = snapshots;
+  return record;
+}
+
+function resolveArtifactSnapshotInChain(chain: ChainState, provenanceHash: JsonAny): ArtifactSnapshotRecord | undefined {
+  const normalized = normalizeHash32(provenanceHash, 'provenance hash');
+  return requireArtifactSnapshots(chain).byProvenanceHash[normalized];
+}
+
 class AddressMap {
   declare store: AddressMapStore;
   declare chainIdentity: string;
@@ -326,14 +425,30 @@ class AddressMap {
     const record = resolveContractMetadataInChain(chain, normalized);
     return record === undefined ? undefined : structuredClone(record);
   }
+
+  setArtifactSnapshot(snapshot: JsonAny): ArtifactSnapshotRecord {
+    return this.store.transaction(this.chainIdentity, chain => setArtifactSnapshotInChain(chain, snapshot));
+  }
+
+  resolveArtifactSnapshot(provenanceHash: JsonAny): ArtifactSnapshotRecord | undefined {
+    const normalized = normalizeHash32(provenanceHash, 'provenance hash');
+    const chain = this.store.readChain(this.chainIdentity);
+    if (chain === undefined) return undefined;
+    const record = resolveArtifactSnapshotInChain(chain, normalized);
+    return record === undefined ? undefined : structuredClone(record);
+  }
 }
 
 export {
   ADDRESS_MAP_VERSION,
+  ARTIFACT_SNAPSHOT_VERSION,
   CONTRACT_METADATA_VERSION,
   AddressMap,
+  requireArtifactSnapshots,
   requireIndexes,
+  resolveArtifactSnapshotInChain,
   resolveContractMetadataInChain,
+  setArtifactSnapshotInChain,
   setContractMetadataInChain,
   setMappingInChain,
 };

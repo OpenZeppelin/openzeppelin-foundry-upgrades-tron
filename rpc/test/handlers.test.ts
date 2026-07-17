@@ -4,10 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import { Transaction, Wallet, getCreateAddress, keccak256, toBeHex } from 'ethers';
+import { Interface, Transaction, Wallet, getCreateAddress, keccak256, toBeHex } from 'ethers';
 
 import { AddressMap } from '../../dist/rpc/address-map.js';
 import { contractKindForArtifact, createRpcHandlers, nativeContractAddress } from '../../dist/rpc/handlers.js';
+import { rewriteCall as realRewriteCall } from '../../dist/rpc/rewriter.js';
 import { TransactionJournal, recordRetainedFailureInChain } from '../../dist/rpc/journal.js';
 import { acquireStateLock } from '../../dist/rpc/state-lock.js';
 import { JsonStore } from '../../dist/rpc/store.js';
@@ -62,15 +63,16 @@ async function seedConfirmedDeployment(
     provenanceHash = `0x${'55'.repeat(32)}`,
     predicted = TARGET,
     actual = TARGET_ACTUAL,
+    nonce = 12,
   }: JsonAny = {},
 ) {
-  const raw = await signedTransaction({ to: null, nonce: 12, data: '0x6000' });
+  const raw = await signedTransaction({ to: null, nonce, data: '0x6000' });
   const sourceHash = keccak256(raw);
   const operationContext = {
     kind: 'deployment',
     from: WALLET.address.toLowerCase(),
     to: null,
-    nonce: '12',
+    nonce: String(nonce),
     predictedContractAddress: predicted,
     actualTarget: actual,
     contractKind: contractKindForArtifact(identity),
@@ -228,7 +230,7 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
       overrides.matchDeploymentArtifact ??
       (() => ({
         abi: [{ type: 'constructor', inputs: [] }],
-        artifact: { abi: [{ type: 'constructor', inputs: [] }] },
+        artifact: { abi: [{ type: 'constructor', inputs: [] }], deployedBytecode: { object: '0x6001' } },
         creationBytecode: '0x6000',
         constructorData: '0x',
         // `contractName` is supplied by the `...ARTIFACT_IDENTITY` spread below.
@@ -1231,7 +1233,71 @@ test('resolves an internally-created ProxyAdmin ABI from durable metadata and ve
   });
 });
 
-test('rejects a same-name artifact whose provenance changed after deployment', async (t: TestContext) => {
+// A deployment persists its verified artifact envelope so a later same-FQN replacement on disk
+// cannot orphan the original deployment's ABI.
+test('persists an immutable artifact snapshot for a confirmed deployment', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const result = fixture(t);
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+
+  assert.deepEqual(result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`), {
+    provenanceHash: `0x${'55'.repeat(32)}`,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'contract',
+    abi: [{ type: 'constructor', inputs: [] }],
+    creationBytecodeHash: keccak256('0x6000'),
+    runtimeBytecodeHash: keccak256('0x6001'),
+  });
+});
+
+// Scenario (1): a same-FQN artifact replaced in place after deployment (fresh disk provenance no
+// longer matches) still resolves for call interpretation through the immutable snapshot.
+test('resolves a same-FQN contract via its snapshot after the on-disk artifact provenance changes', async (t: TestContext) => {
+  const pingData = new Interface(['function ping()']).encodeFunctionData('ping', []);
+  const result = fixture(t, {
+    useDefaultResolveCallContext: true,
+    rewriteCall: realRewriteCall,
+    findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
+      assert.equal(reference, ARTIFACT_IDENTITY.fullyQualifiedName);
+      return [path.join(outputDirectory, 'Box.sol', 'Box.json')];
+    },
+    verifyArtifactProvenance() {
+      return { abi: ['function ping()'], provenanceHash: `0x${'66'.repeat(32)}` };
+    },
+  });
+  const sourceTransaction = await seedConfirmedDeployment(result);
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction,
+  });
+  result.addressMap.setContractMetadata({
+    predicted: TARGET,
+    contractKind: 'contract',
+    artifactIdentity: ARTIFACT_IDENTITY,
+    sourceTransaction,
+  });
+  result.addressMap.setArtifactSnapshot({
+    provenanceHash: `0x${'55'.repeat(32)}`,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'contract',
+    abi: ['function ping()'],
+    creationBytecodeHash: keccak256('0x6000'),
+    runtimeBytecodeHash: keccak256('0x6001'),
+  });
+
+  const raw = await signedTransaction({ to: TARGET, nonce: 16, data: pingData });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  const built = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  assert.equal(built.value.contractAddress, TARGET_ACTUAL);
+  assert.equal(built.value.data, pingData);
+});
+
+// Scenario (5), legacy: a deployment journaled before snapshots exist (no snapshot for its
+// provenance) keeps the byte-identical ARTIFACT_PROVENANCE_CHANGED failure.
+test('preserves ARTIFACT_PROVENANCE_CHANGED when a changed artifact has no snapshot fallback', async (t: TestContext) => {
   const result = fixture(t, {
     useDefaultResolveCallContext: true,
     findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
@@ -1266,6 +1332,214 @@ test('rejects a same-name artifact whose provenance changed after deployment', a
     false,
   );
 });
+
+const UUPS_IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+const BEACON_STORAGE_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
+const BEACON_IMPLEMENTATION_SELECTOR = '0x5c60da1b';
+
+function slotWord(address: JsonAny) {
+  return `0x${'00'.repeat(12)}${address.slice(2)}`;
+}
+
+// Scenario (2): the UUPS upgrade call itself — previously impossible once the implementation's
+// on-disk artifact was replaced in place — now succeeds by resolving the implementation ABI from
+// the immutable snapshot captured at the implementation's deployment.
+test('rewrites a UUPS upgradeToAndCall through a proxy whose implementation artifact was replaced', async (t: TestContext) => {
+  const proxyIdentity = {
+    sourceName: 'openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol',
+    contractName: 'TRC1967Proxy',
+    fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/TRC1967/TRC1967Proxy.sol:TRC1967Proxy',
+  };
+  const proxyPredicted = `0x${'11'.repeat(20)}`;
+  const proxyActual = `0x${'b1'.repeat(20)}`;
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const newImplementation = `0x${'33'.repeat(20)}`;
+  const proxyProvenance = `0x${'55'.repeat(32)}`;
+  const implProvenance = `0x${'aa'.repeat(32)}`;
+  const implAbi = ['function upgradeToAndCall(address newImplementation, bytes data)', 'function value() view returns (uint256)'];
+
+  const result = fixture(t, {
+    useDefaultResolveCallContext: true,
+    rewriteCall: realRewriteCall,
+    findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
+      return reference === proxyIdentity.fullyQualifiedName
+        ? [path.join(outputDirectory, 'TRC1967Proxy.sol', 'TRC1967Proxy.json')]
+        : [path.join(outputDirectory, 'Box.sol', 'Box.json')];
+    },
+    verifyArtifactProvenance({ artifactPath }: JsonAny) {
+      // The implementation's disk artifact was replaced in place: its fresh provenance no longer
+      // matches what was recorded at deployment, forcing the snapshot fallback.
+      return artifactPath.includes('TRC1967Proxy')
+        ? { abi: [], provenanceHash: proxyProvenance }
+        : { abi: implAbi, provenanceHash: `0x${'ee'.repeat(32)}` };
+    },
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getStorageAt' && params[1] === UUPS_IMPLEMENTATION_SLOT) return slotWord(implActual);
+        return `${method}:result`;
+      },
+    },
+  });
+
+  const proxySource = await seedConfirmedDeployment(result, {
+    identity: proxyIdentity,
+    provenanceHash: proxyProvenance,
+    predicted: proxyPredicted,
+    actual: proxyActual,
+    nonce: 20,
+  });
+  const implSource = await seedConfirmedDeployment(result, {
+    identity: ARTIFACT_IDENTITY,
+    provenanceHash: implProvenance,
+    predicted: implPredicted,
+    actual: implActual,
+    nonce: 21,
+  });
+  for (const [predicted, actual, sourceTransaction] of [
+    [proxyPredicted, proxyActual, proxySource],
+    [implPredicted, implActual, implSource],
+  ] as JsonAny[]) {
+    result.addressMap.set({ predicted, actual, creator: WALLET.address, sender: WALLET.address, sourceTransaction });
+  }
+  result.addressMap.setContractMetadata({
+    predicted: proxyPredicted,
+    contractKind: 'uups-proxy',
+    artifactIdentity: proxyIdentity,
+    sourceTransaction: proxySource,
+  });
+  result.addressMap.setContractMetadata({
+    predicted: implPredicted,
+    contractKind: 'contract',
+    artifactIdentity: ARTIFACT_IDENTITY,
+    sourceTransaction: implSource,
+  });
+  result.addressMap.setArtifactSnapshot({
+    provenanceHash: implProvenance,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'contract',
+    abi: implAbi,
+    creationBytecodeHash: keccak256('0x6000'),
+    runtimeBytecodeHash: keccak256('0x6001'),
+  });
+
+  const upgradeData = new Interface([
+    'function upgradeToAndCall(address newImplementation, bytes data)',
+  ]).encodeFunctionData('upgradeToAndCall', [newImplementation, '0x']);
+  const raw = await signedTransaction({ to: proxyPredicted, nonce: 22, data: upgradeData });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  const built = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  assert.equal(built.value.contractAddress, proxyActual);
+  assert.equal(built.value.data, upgradeData);
+});
+
+// Scenario (3): transparent-proxy and beacon-proxy equivalents of the snapshot fallback — a normal
+// call through the proxy resolves the replaced implementation's ABI from the snapshot.
+for (const kind of ['transparent-proxy', 'beacon-proxy'] as const) {
+  test(`resolves a ${kind} implementation ABI via snapshot after the implementation artifact changes`, async (t: TestContext) => {
+    const proxyIdentity =
+      kind === 'transparent-proxy'
+        ? {
+            sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+            contractName: 'TransparentUpgradeableProxy',
+            fullyQualifiedName:
+              'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+          }
+        : {
+            sourceName: 'openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol',
+            contractName: 'BeaconProxy',
+            fullyQualifiedName: 'openzeppelin-tron-solidity/contracts/proxy/beacon/BeaconProxy.sol:BeaconProxy',
+          };
+    const proxyPredicted = `0x${'11'.repeat(20)}`;
+    const proxyActual = `0x${'b1'.repeat(20)}`;
+    const beaconActual = `0x${'bc'.repeat(20)}`;
+    const implPredicted = `0x${'22'.repeat(20)}`;
+    const implActual = `0x${'b2'.repeat(20)}`;
+    const proxyProvenance = `0x${'55'.repeat(32)}`;
+    const implProvenance = `0x${'aa'.repeat(32)}`;
+    const implAbi = ['function value() view returns (uint256)'];
+    const callData = new Interface(implAbi).encodeFunctionData('value', []);
+    const upstreamCalls: JsonAny[] = [];
+
+    const result = fixture(t, {
+      useDefaultResolveCallContext: true,
+      rewriteCall: realRewriteCall,
+      findArtifactPaths(outputDirectory: JsonAny, reference: JsonAny) {
+        return reference === proxyIdentity.fullyQualifiedName
+          ? [path.join(outputDirectory, 'Proxy.sol', 'Proxy.json')]
+          : [path.join(outputDirectory, 'Box.sol', 'Box.json')];
+      },
+      verifyArtifactProvenance({ artifactPath }: JsonAny) {
+        return artifactPath.includes('Proxy')
+          ? { abi: [], provenanceHash: proxyProvenance }
+          : { abi: implAbi, provenanceHash: `0x${'ee'.repeat(32)}` };
+      },
+      upstream: {
+        async request(method: JsonAny, params: JsonAny) {
+          upstreamCalls.push({ method, params });
+          if (method === 'eth_getStorageAt' && params[1] === UUPS_IMPLEMENTATION_SLOT) return slotWord(implActual);
+          if (method === 'eth_getStorageAt' && params[1] === BEACON_STORAGE_SLOT) return slotWord(beaconActual);
+          if (method === 'eth_call' && params[0]?.data === BEACON_IMPLEMENTATION_SELECTOR) return slotWord(implActual);
+          return `${method}:result`;
+        },
+      },
+    });
+
+    const proxySource = await seedConfirmedDeployment(result, {
+      identity: proxyIdentity,
+      provenanceHash: proxyProvenance,
+      predicted: proxyPredicted,
+      actual: proxyActual,
+      nonce: 20,
+    });
+    const implSource = await seedConfirmedDeployment(result, {
+      identity: ARTIFACT_IDENTITY,
+      provenanceHash: implProvenance,
+      predicted: implPredicted,
+      actual: implActual,
+      nonce: 21,
+    });
+    for (const [predicted, actual, sourceTransaction] of [
+      [proxyPredicted, proxyActual, proxySource],
+      [implPredicted, implActual, implSource],
+    ] as JsonAny[]) {
+      result.addressMap.set({ predicted, actual, creator: WALLET.address, sender: WALLET.address, sourceTransaction });
+    }
+    result.addressMap.setContractMetadata({
+      predicted: proxyPredicted,
+      contractKind: kind,
+      artifactIdentity: proxyIdentity,
+      sourceTransaction: proxySource,
+    });
+    result.addressMap.setContractMetadata({
+      predicted: implPredicted,
+      contractKind: 'contract',
+      artifactIdentity: ARTIFACT_IDENTITY,
+      sourceTransaction: implSource,
+    });
+    result.addressMap.setArtifactSnapshot({
+      provenanceHash: implProvenance,
+      artifactIdentity: ARTIFACT_IDENTITY,
+      contractKind: 'contract',
+      abi: implAbi,
+      creationBytecodeHash: keccak256('0x6000'),
+      runtimeBytecodeHash: keccak256('0x6001'),
+    });
+
+    const response = await result.handlers.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_call',
+      params: [{ to: proxyPredicted, data: callData }, 'latest'],
+    });
+    assert.equal(response.result, 'eth_call:result');
+    const forwarded = upstreamCalls.filter(
+      (call: JsonAny) => call.method === 'eth_call' && call.params[0]?.data !== BEACON_IMPLEMENTATION_SELECTOR,
+    );
+    assert.equal(forwarded.at(-1).params[0].to, proxyActual);
+    assert.equal(forwarded.at(-1).params[0].data, callData);
+  });
+}
 
 test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async (t: TestContext) => {
   const error = new UpstreamRpcError(-32042, 'upstream reverted', { reason: 'boom' }, true);
