@@ -2,7 +2,7 @@
 
 const { TronWeb } = require('tronweb');
 
-const { DEFAULT_TRE_PRIVATE_KEY } = require('../rpc/config.cjs');
+const { DEFAULT_TRE_PRIVATE_KEY } = require('../dist/rpc/config.js');
 
 function positiveInteger(value, label, fallback) {
   const actual = value ?? fallback;

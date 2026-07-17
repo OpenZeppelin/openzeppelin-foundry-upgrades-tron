@@ -1,0 +1,1238 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { concat, dataSlice, keccak256 } from 'ethers';
+import { TronWeb, utils } from 'tronweb';
+
+import {
+  TronClient,
+  nativeTxIdFromSignedBytes,
+  retryableTransportError,
+  serializeSignedTransaction,
+  type TronTransport,
+} from '../../dist/rpc/tron-client.js';
+import { translateReceipt } from '../../dist/rpc/receipts.js';
+
+// Test-local fixtures (native TRON transaction/response payloads, including deliberately invalid
+// overrides) are deliberately loosely shaped, the same way the real caller-supplied input
+// rpc-src/tron-client.ts validates at runtime is. `any` is used deliberately throughout this file
+// for that content, matching rpc-src/tron-client.ts's own handling.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonAny = any;
+
+const PRIVATE_KEY = 'dd23ca549a97cb330b011aebb674730df8b14acaee42d211ab45692699ab8ba5';
+const OWNER = `41${'11'.repeat(20)}`;
+const CONTRACT = `41${'22'.repeat(20)}`;
+
+function unsignedTransaction(): JsonAny {
+  const transaction: JsonAny = {
+    visible: false,
+    txID: '',
+    raw_data_hex: '',
+    raw_data: {
+      contract: [
+        {
+          parameter: {
+            value: { owner_address: OWNER, contract_address: CONTRACT, data: 'aabb' },
+            type_url: 'type.googleapis.com/protocol.TriggerSmartContract',
+          },
+          type: 'TriggerSmartContract',
+        },
+      ],
+      ref_block_bytes: '1234',
+      ref_block_hash: '0102030405060708',
+      expiration: 1_700_000_060_000,
+      timestamp: 1_700_000_000_000,
+      fee_limit: 1_000_000_000,
+    },
+  };
+  const protobuf = utils.transaction.txJsonToPb(transaction);
+  transaction.txID = utils.transaction.txPbToTxID(protobuf).replace(/^0x/, '');
+  transaction.raw_data_hex = utils.transaction.txPbToRawDataHex(protobuf).toLowerCase();
+  return transaction;
+}
+
+function unsignedCreateTransaction(bytecode = '6000'): JsonAny {
+  const transaction: JsonAny = {
+    visible: false,
+    txID: '',
+    raw_data_hex: '',
+    raw_data: {
+      contract: [
+        {
+          parameter: {
+            value: {
+              owner_address: OWNER,
+              new_contract: { bytecode, call_value: 7, name: 'Probe', origin_address: OWNER },
+            },
+            type_url: 'type.googleapis.com/protocol.CreateSmartContract',
+          },
+          type: 'CreateSmartContract',
+        },
+      ],
+      ref_block_bytes: '1234',
+      ref_block_hash: '0102030405060708',
+      expiration: 1_700_000_060_000,
+      timestamp: 1_700_000_000_000,
+      fee_limit: 1_000_000_000,
+    },
+  };
+  const protobuf = utils.transaction.txJsonToPb(transaction);
+  transaction.txID = utils.transaction.txPbToTxID(protobuf).replace(/^0x/, '');
+  transaction.raw_data_hex = utils.transaction.txPbToRawDataHex(protobuf).toLowerCase();
+  return transaction;
+}
+
+function constantEcho(body: JsonAny, overrides: JsonAny = {}): JsonAny {
+  const transaction = unsignedTransaction();
+  transaction.raw_data.contract[0].parameter.value = {
+    owner_address: body.owner_address,
+    contract_address: body.contract_address,
+    data: body.data,
+    call_value: body.call_value,
+  };
+  const protobuf = utils.transaction.txJsonToPb(transaction);
+  transaction.txID = utils.transaction.txPbToTxID(protobuf).replace(/^0x/, '');
+  transaction.raw_data_hex = utils.transaction.txPbToRawDataHex(protobuf).toLowerCase();
+  return { ...transaction, ...overrides };
+}
+
+function constantCreateEcho(body: JsonAny, overrides: JsonAny = {}): JsonAny {
+  const transaction = unsignedCreateTransaction(body.data);
+  transaction.raw_data.contract[0].parameter.value.owner_address = body.owner_address;
+  transaction.raw_data.contract[0].parameter.value.new_contract.origin_address = body.owner_address;
+  transaction.raw_data.contract[0].parameter.value.new_contract.call_value = body.call_value;
+  const protobuf = utils.transaction.txJsonToPb(transaction);
+  transaction.txID = utils.transaction.txPbToTxID(protobuf).replace(/^0x/, '');
+  transaction.raw_data_hex = utils.transaction.txPbToRawDataHex(protobuf).toLowerCase();
+  const synthetic = dataSlice(
+    keccak256(concat([`0x${transaction.txID}`, `0x${body.owner_address.toLowerCase()}`])),
+    12,
+  );
+  return {
+    ...transaction,
+    ret: [{}],
+    contract_address: `41${synthetic.slice(2)}`,
+    ...overrides,
+  };
+}
+
+function signedFixture() {
+  return utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
+}
+
+function encodeVarint(value: number): Buffer {
+  let remaining = BigInt(value);
+  const bytes: number[] = [];
+  do {
+    let byte = Number(remaining & 0x7fn);
+    remaining >>= 7n;
+    if (remaining !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining !== 0n);
+  return Buffer.from(bytes);
+}
+
+function readTestVarint(bytes: Buffer, offset: number): { value: number; offset: number } {
+  let value = 0;
+  let shift = 0;
+  for (;;) {
+    const byte = bytes[offset];
+    value |= (byte & 0x7f) << shift;
+    offset += 1;
+    if ((byte & 0x80) === 0) return { value, offset };
+    shift += 7;
+  }
+}
+
+function signedWrapperParts() {
+  const bytes = Buffer.from(serializeSignedTransaction(signedFixture()), 'hex');
+  assert.equal(bytes[0], 0x0a);
+  const rawLength = readTestVarint(bytes, 1);
+  const rawEnd = rawLength.offset + rawLength.value;
+  assert.equal(bytes[rawEnd], 0x12);
+  const signatureLength = readTestVarint(bytes, rawEnd + 1);
+  const signatureEnd = signatureLength.offset + signatureLength.value;
+  assert.equal(signatureEnd, bytes.length);
+  return {
+    rawField: bytes.subarray(0, rawEnd),
+    rawPayload: bytes.subarray(rawLength.offset, rawEnd),
+    signatureField: bytes.subarray(rawEnd),
+    signaturePayload: bytes.subarray(signatureLength.offset, signatureEnd),
+  };
+}
+
+interface FixtureOverrides {
+  config?: JsonAny;
+  tronWeb?: JsonAny;
+  transport?: TronTransport;
+  now?: () => number;
+  sleep?: (delay: number) => Promise<unknown>;
+  pollIntervalMs?: number;
+  receiptTimeoutMs?: number;
+  maxBroadcastAttempts?: number;
+  simulationReadinessTimeoutMs?: number;
+}
+
+function fixture(overrides: FixtureOverrides = {}) {
+  const calls: JsonAny[] = [];
+  const tronWeb = {
+    defaultAddress: { hex: OWNER },
+    transactionBuilder: {
+      async createSmartContract(options: JsonAny, issuerAddress: JsonAny) {
+        calls.push({ method: 'createSmartContract', options, issuerAddress });
+        return unsignedTransaction();
+      },
+      async triggerSmartContract(
+        address: JsonAny,
+        selector: JsonAny,
+        options: JsonAny,
+        parameters: JsonAny,
+        issuerAddress: JsonAny,
+      ) {
+        calls.push({ method: 'triggerSmartContract', address, selector, options, parameters, issuerAddress });
+        return { result: { result: true }, transaction: unsignedTransaction() };
+      },
+    },
+    trx: {
+      async sign(transaction: JsonAny, privateKey: JsonAny) {
+        calls.push({ method: 'sign', privateKey });
+        return utils.crypto.signTransaction(privateKey, structuredClone(transaction));
+      },
+    },
+  };
+  const transport = {
+    async request(path: JsonAny, body: JsonAny) {
+      calls.push({ method: 'request', path, body });
+      throw new Error(`Unexpected request: ${path}`);
+    },
+  };
+  return {
+    calls,
+    client: new TronClient({
+      config: {
+        privateKey: PRIVATE_KEY,
+        feeLimit: 1_000_000_000,
+        fullHost: 'http://127.0.0.1:9090',
+      },
+      tronWeb,
+      transport,
+      ...overrides,
+    }),
+    transport,
+    tronWeb,
+  };
+}
+
+test('classifies retryable transport failures recursively through wrapped causes', () => {
+  for (const cause of [
+    { status: 408 },
+    { statusCode: 429 },
+    { response: { status: 503 } },
+    { code: 'ECONNRESET' },
+    new Error('temporary network outage'),
+  ]) {
+    assert.equal(retryableTransportError(new Error('operation wrapper', { cause })), true);
+  }
+  assert.equal(
+    retryableTransportError(new Error('outer', { cause: new Error('middle', { cause: { code: 'UND_ERR_SOCKET' } }) })),
+    true,
+  );
+  assert.equal(retryableTransportError(Object.assign(new Error('forbidden'), { response: { status: 403 } })), false);
+  assert.equal(retryableTransportError(new Error('deterministic artifact mismatch')), false);
+});
+
+test('prebuilds and signs a native CreateSmartContract using normalized owner and exact constructor suffix', async () => {
+  const { calls, client } = fixture();
+  const abi = [{ type: 'constructor', inputs: [{ name: 'value', type: 'uint256' }] }];
+
+  const built = await client.buildCreate({
+    abi,
+    bytecode: '0x60006000',
+    constructorData: '0x'.concat('00'.repeat(31), '2a'),
+    ownerAddress: `0x${'11'.repeat(20)}`,
+    name: 'Box',
+    callValue: 7,
+  });
+
+  assert.deepEqual(calls[0], {
+    method: 'createSmartContract',
+    issuerAddress: OWNER,
+    options: {
+      abi,
+      bytecode: '60006000',
+      callValue: 7,
+      feeLimit: 1_000_000_000,
+      name: 'Box',
+      rawParameter: '00'.repeat(31).concat('2a'),
+    },
+  });
+  assert.equal(calls[1].method, 'sign');
+  assert.equal(calls[1].privateKey, PRIVATE_KEY);
+  assert.match(built.signedNativeTransaction, /^[0-9a-f]+$/);
+  assert.equal(built.nativeTransactionId, nativeTxIdFromSignedBytes(built.signedNativeTransaction));
+  assert.equal(built.nativeTransactionId, (built.transaction as JsonAny).txID);
+});
+
+test('prebuilds a raw TriggerSmartContract call without ABI re-encoding', async () => {
+  const { calls, client } = fixture();
+  const data = `0x12345678${'ab'.repeat(32)}`;
+
+  const built = await client.buildCall({
+    contractAddress: `0x${'22'.repeat(20)}`,
+    data,
+    ownerAddress: OWNER,
+    callValue: 11,
+  });
+
+  assert.deepEqual(calls[0], {
+    method: 'triggerSmartContract',
+    address: CONTRACT,
+    selector: '',
+    options: {
+      callValue: 11,
+      feeLimit: 1_000_000_000,
+      input: data.slice(2),
+      txLocal: true,
+    },
+    parameters: [],
+    issuerAddress: OWNER,
+  });
+  assert.equal(built.nativeTransactionId, nativeTxIdFromSignedBytes(built.signedNativeTransaction));
+});
+
+test('accepts exact safe call values from bigint, decimal string, and number and rejects lossy values', async t => {
+  const max = Number.MAX_SAFE_INTEGER;
+  for (const value of [BigInt(max), String(max), max]) {
+    await t.test(typeof value, async () => {
+      const { calls, client } = fixture();
+      await client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value });
+      assert.equal(calls[0].options.callValue, max);
+    });
+  }
+
+  for (const value of [BigInt(max) + 1n, String(BigInt(max) + 1n), -1, 1.5, '1e3', null]) {
+    await t.test(`rejects ${String(value)}`, async () => {
+      const { calls, client } = fixture();
+      await assert.rejects(
+        () => client.buildCall({ contractAddress: CONTRACT, data: '0x12', callValue: value } as JsonAny),
+        /call value/i,
+      );
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('uses TronWeb 6.4 to encode and sign the exact native create and trigger protobuf fields', async () => {
+  const tronWeb = new TronWeb({ fullHost: 'http://127.0.0.1:9090', privateKey: PRIVATE_KEY });
+  tronWeb.trx.getCurrentRefBlockParams = async () => ({
+    ref_block_bytes: '1234',
+    ref_block_hash: '0102030405060708',
+    expiration: 1_700_000_060_000,
+    timestamp: 1_700_000_000_000,
+  });
+  const client = new TronClient({
+    config: { privateKey: PRIVATE_KEY, feeLimit: 1_000_000_000, fullHost: 'http://127.0.0.1:9090' },
+    tronWeb,
+    transport: { request: async (path: string) => assert.fail(`Unexpected network request: ${path}`) },
+  });
+  const callValue = BigInt(Number.MAX_SAFE_INTEGER);
+  const abi = [{ type: 'constructor', inputs: [], stateMutability: 'payable' }];
+
+  const created = await client.buildCreate({
+    abi,
+    bytecode: '0x6000',
+    constructorData: '0x1234',
+    name: 'Exact',
+    callValue: callValue.toString(),
+  });
+  const createRaw = utils.deserializeTx.deserializeTransaction(
+    'CreateSmartContract',
+    (created.transaction as JsonAny).raw_data_hex,
+  );
+  const createContract = createRaw.contract[0];
+  assert.equal(createContract.type, 'CreateSmartContract');
+  assert.equal(createContract.parameter.value.new_contract.bytecode, '60001234');
+  assert.equal(createContract.parameter.value.new_contract.call_value, Number.MAX_SAFE_INTEGER);
+  assert.equal(createContract.parameter.value.new_contract.name, 'Exact');
+  assert.equal(created.nativeTransactionId, nativeTxIdFromSignedBytes(created.signedNativeTransaction));
+
+  const called = await client.buildCall({
+    contractAddress: CONTRACT,
+    data: '0x1234abcd',
+    callValue,
+  });
+  const callRaw = utils.deserializeTx.deserializeTransaction(
+    'TriggerSmartContract',
+    (called.transaction as JsonAny).raw_data_hex,
+  );
+  const callContract = callRaw.contract[0];
+  assert.equal(callContract.type, 'TriggerSmartContract');
+  assert.equal(callContract.parameter.value.contract_address.toLowerCase(), CONTRACT);
+  assert.equal(callContract.parameter.value.data, '1234ABCD');
+  assert.equal(callContract.parameter.value.call_value, Number.MAX_SAFE_INTEGER);
+  assert.equal(called.nativeTransactionId, nativeTxIdFromSignedBytes(called.signedNativeTransaction));
+});
+
+test('serializes the complete signed protobuf and derives a signature-independent stable transaction ID', () => {
+  const signed = signedFixture();
+  const serialized = serializeSignedTransaction(signed);
+  const withRepeatedSignature = structuredClone(signed);
+  withRepeatedSignature.signature.push(withRepeatedSignature.signature[0]);
+
+  assert.notEqual(serializeSignedTransaction(withRepeatedSignature), serialized);
+  assert.equal(nativeTxIdFromSignedBytes(serialized), signed.txID);
+  assert.equal(nativeTxIdFromSignedBytes(serializeSignedTransaction(withRepeatedSignature)), signed.txID);
+  assert.throws(() => nativeTxIdFromSignedBytes('00'), /raw_data|protobuf/i);
+});
+
+test('rejects noncanonical or structurally invalid durable TRON transaction protobuf wrappers', async t => {
+  const { rawField, rawPayload, signatureField, signaturePayload } = signedWrapperParts();
+  const malformed = {
+    unsigned: rawField,
+    'duplicate raw_data': Buffer.concat([rawField, rawField, signatureField]),
+    'signature before raw_data': Buffer.concat([signatureField, rawField]),
+    'wrong signature size': Buffer.concat([rawField, Buffer.from([0x12, 0x40]), signaturePayload.subarray(0, 64)]),
+    'unknown top-level field': Buffer.concat([rawField, signatureField, Buffer.from([0x1a, 0x00])]),
+    'nonminimal signature tag': Buffer.concat([
+      rawField,
+      Buffer.from([0x92, 0x00]),
+      encodeVarint(signaturePayload.length),
+      signaturePayload,
+    ]),
+    'nonminimal raw length': Buffer.concat([
+      Buffer.from([
+        0x0a,
+        ...encodeVarint(rawPayload.length).map((byte, index, values) =>
+          index === values.length - 1 ? byte | 0x80 : byte,
+        ),
+        0x00,
+      ]),
+      rawPayload,
+      signatureField,
+    ]),
+    'overlong tag': Buffer.concat([Buffer.alloc(10, 0x80), rawField, signatureField]),
+    'empty signature': Buffer.concat([rawField, Buffer.from([0x12, 0x00])]),
+  };
+
+  for (const [name, bytes] of Object.entries(malformed)) {
+    await t.test(name, () => {
+      assert.throws(() => nativeTxIdFromSignedBytes(bytes.toString('hex')), /signed|protobuf|signature|raw_data/i);
+    });
+  }
+});
+
+test('rejects unsigned and malformed-signature bytes before simulation or broadcast transport calls', async () => {
+  const { rawField, signaturePayload } = signedWrapperParts();
+  const invalid = [
+    rawField.toString('hex'),
+    Buffer.concat([rawField, Buffer.from([0x12, 0x40]), signaturePayload.subarray(0, 64)]).toString('hex'),
+  ];
+  let requests = 0;
+  const { client } = fixture({
+    transport: {
+      async request() {
+        requests += 1;
+        throw new Error('must not be called');
+      },
+    },
+  });
+
+  for (const bytes of invalid) {
+    await assert.rejects(() => client.simulateSigned(bytes), /signed|signature/i);
+    await assert.rejects(() => client.broadcastSigned(bytes), /signed|signature/i);
+  }
+  assert.equal(requests, 0);
+});
+
+test('simulates the exact signed transaction and returns a complete ordered child-attempt trace', async () => {
+  const built = signedFixture();
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const requests: JsonAny[] = [];
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        requests.push({ path, body });
+        return {
+          result: { result: true },
+          txid,
+          trace_complete: true,
+          energy_used: 901,
+          child_create_attempts: [
+            { caller_address: OWNER, created_address: CONTRACT, success: true },
+            { caller_address: CONTRACT, created_address: `0x${'00'.repeat(20)}`, success: false },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(await client.simulateSigned(signedBytes, txid, built), {
+    mode: 'exact-signed',
+    nativeTransactionId: txid,
+    simulationRootAddress: `0x${'22'.repeat(20)}`,
+    energyUsed: 901,
+    traceComplete: true,
+    childCreateAttempts: [
+      {
+        index: 0,
+        callerAddress: `0x${'11'.repeat(20)}`,
+        createdAddress: `0x${'22'.repeat(20)}`,
+        success: true,
+      },
+      {
+        index: 1,
+        callerAddress: `0x${'22'.repeat(20)}`,
+        createdAddress: `0x${'00'.repeat(20)}`,
+        success: false,
+      },
+    ],
+  });
+  assert.deepEqual(requests, [
+    {
+      path: 'wallet/simulatesignedtransaction',
+      body: { transaction: signedBytes },
+    },
+  ]);
+});
+
+test('preserves an attempt kind reported by the exact simulation trace', async () => {
+  const built = signedFixture();
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const { client } = fixture({
+    transport: {
+      async request() {
+        return {
+          result: { result: true },
+          txid,
+          trace_complete: true,
+          energy_used: 5,
+          child_create_attempts: [{ caller_address: OWNER, created_address: CONTRACT, success: true, kind: 'create2' }],
+        };
+      },
+    },
+  });
+
+  const simulation = await client.simulateSigned(signedBytes, txid, built);
+  assert.equal(simulation.childCreateAttempts[0].kind, 'CREATE2');
+});
+
+test('falls back only after explicit exact-endpoint absence and validates the signed JSON payload echo', async () => {
+  const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const requests: JsonAny[] = [];
+  const syntheticChild = `41${'33'.repeat(20)}`;
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        requests.push({ path, body });
+        if (path === 'wallet/simulatesignedtransaction') {
+          throw Object.assign(new Error('method not found'), { status: 405 });
+        }
+        return {
+          result: { result: true },
+          energy_used: 123,
+          transaction: constantEcho(body),
+          internal_transactions: [
+            {
+              caller_address: CONTRACT,
+              transferTo_address: syntheticChild,
+              note: Buffer.from('create').toString('hex'),
+              rejected: false,
+            },
+            {
+              caller_address: syntheticChild,
+              transferTo_address: `41${'44'.repeat(20)}`,
+              note: Buffer.from('create').toString('hex'),
+              rejected: true,
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(await client.simulateSigned(signedBytes, txid, built), {
+    mode: 'constant-call',
+    nativeTransactionId: txid,
+    simulationRootAddress: `0x${'22'.repeat(20)}`,
+    energyUsed: 123,
+    traceComplete: true,
+    childCreateAttempts: [
+      {
+        index: 0,
+        callerAddress: `0x${'22'.repeat(20)}`,
+        createdAddress: `0x${'33'.repeat(20)}`,
+        success: true,
+      },
+      {
+        index: 1,
+        callerAddress: `0x${'33'.repeat(20)}`,
+        createdAddress: `0x${'44'.repeat(20)}`,
+        success: false,
+      },
+    ],
+  });
+  assert.deepEqual(
+    requests.map(request => request.path),
+    ['wallet/simulatesignedtransaction', 'wallet/triggerconstantcontract'],
+  );
+  assert.deepEqual(requests[1].body, {
+    owner_address: OWNER,
+    contract_address: CONTRACT,
+    data: 'aabb',
+    call_value: 0,
+    visible: false,
+  });
+});
+
+test('derives constant-create fallback only from the byte-identical signed transaction JSON', async () => {
+  const built: JsonAny = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction('60006000f3'));
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const requests: JsonAny[] = [];
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        requests.push({ path, body });
+        if (path === 'wallet/simulatesignedtransaction') {
+          throw Object.assign(new Error('not found'), { status: 404 });
+        }
+        return {
+          result: { result: true },
+          energy_used: 1,
+          transaction: constantCreateEcho(body),
+          internal_transactions: [],
+        };
+      },
+    },
+  });
+
+  const result = await client.simulateSigned(signedBytes, txid, built);
+  assert.equal(result.mode, 'constant-create');
+  assert.equal(result.simulationRootAddress, `0x${constantCreateEcho(requests[1].body).contract_address.slice(2)}`);
+  assert.deepEqual(requests[1].body, {
+    owner_address: OWNER,
+    contract_address: '',
+    data: '60006000f3',
+    call_value: 7,
+    visible: false,
+  });
+
+  const changed = structuredClone(built);
+  changed.raw_data.contract[0].parameter.value.new_contract.bytecode = '6001';
+  await assert.rejects(() => client.simulateSigned(signedBytes, txid, changed), /exact signed.*JSON|byte/i);
+});
+
+test('requires the ordered stock trace probe before accepting omitted zero-child traces', async () => {
+  const probeBytecode = '6000600053600160006000f0506460006000fd6000526005601b6000f05060006000f3';
+  const probeBuilt = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction(probeBytecode));
+  const ordinaryBuilt = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction('60006000f3'));
+  let createBuilds = 0;
+  let constantRequests = 0;
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        if (path === 'wallet/simulatesignedtransaction') {
+          throw Object.assign(new Error('method not found'), { status: 405 });
+        }
+        constantRequests += 1;
+        const transaction = constantCreateEcho(body);
+        if (body.data === probeBytecode) {
+          const root = transaction.contract_address;
+          return {
+            result: { result: true },
+            energy_used: 32_027,
+            transaction,
+            internal_transactions: [
+              { caller_address: root, note: '637265617465', transferTo_address: `41${'51'.repeat(20)}` },
+              {
+                caller_address: root,
+                note: '637265617465',
+                transferTo_address: `41${'52'.repeat(20)}`,
+                rejected: true,
+              },
+            ],
+          };
+        }
+        return { result: { result: true }, energy_used: 1, transaction };
+      },
+    },
+  });
+  client.buildCreate = async () => {
+    createBuilds += 1;
+    return {
+      transaction: probeBuilt,
+      signedNativeTransaction: serializeSignedTransaction(probeBuilt),
+      nativeTransactionId: probeBuilt.txID,
+    };
+  };
+
+  const ordinaryBytes = serializeSignedTransaction(ordinaryBuilt);
+  await assert.rejects(
+    () => client.simulateSigned(ordinaryBytes, ordinaryBuilt.txID, ordinaryBuilt),
+    /complete internal transaction trace/i,
+  );
+  assert.equal(await client.assertSimulationReady(), 'constant-create');
+  assert.equal(createBuilds, 1);
+  assert.equal(
+    (await client.simulateSigned(ordinaryBytes, ordinaryBuilt.txID, ordinaryBuilt)).childCreateAttempts.length,
+    0,
+  );
+  assert.equal(await client.assertSimulationReady(), 'constant-create');
+  assert.equal(createBuilds, 1);
+  assert.equal(constantRequests, 3);
+});
+
+test('does not fall back for ambiguous exact-simulation failures and rejects unsafe constant echoes', async t => {
+  const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedTransaction());
+  const signedBytes = serializeSignedTransaction(built);
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+
+  await t.test('ambiguous exact failure', async () => {
+    const paths: JsonAny[] = [];
+    const { client } = fixture({
+      transport: {
+        async request(path) {
+          paths.push(path);
+          throw Object.assign(new Error('gateway denied'), { status: 403 });
+        },
+      },
+    });
+    await assert.rejects(() => client.simulateSigned(signedBytes, txid, built), /exact.*unavailable/i);
+    assert.deepEqual(paths, ['wallet/simulatesignedtransaction']);
+  });
+
+  for (const [name, response] of [
+    ['transport message without status', Promise.reject(new Error('method not found'))],
+    [
+      'HTTP-200 capability-looking message',
+      Promise.resolve({ result: { result: false }, code: 'METHOD_NOT_FOUND', message: 'method not found' }),
+    ],
+  ] as [string, Promise<JsonAny>][]) {
+    await t.test(name, async () => {
+      const paths: JsonAny[] = [];
+      const { client } = fixture({
+        transport: {
+          async request(path) {
+            paths.push(path);
+            return response;
+          },
+        },
+      });
+      await assert.rejects(() => client.simulateSigned(signedBytes, txid, built), /exact.*simulation/i);
+      assert.deepEqual(paths, ['wallet/simulatesignedtransaction']);
+    });
+  }
+
+  for (const [name, mutate, pattern] of [
+    [
+      'payload mismatch',
+      (transaction: JsonAny) => (transaction.raw_data.contract[0].parameter.value.data = 'ffff'),
+      /echo.*payload/i,
+    ],
+    [
+      'contract revert',
+      (transaction: JsonAny) => (transaction.ret = [{ contractRet: 'REVERT' }]),
+      /revert|contract result/i,
+    ],
+  ] as [string, (transaction: JsonAny) => void, RegExp][]) {
+    await t.test(name, async () => {
+      const { client } = fixture({
+        transport: {
+          async request(path, body) {
+            if (path === 'wallet/simulatesignedtransaction') {
+              throw Object.assign(new Error('not implemented'), { status: 501 });
+            }
+            const transaction = constantEcho(body);
+            mutate(transaction);
+            return { result: { result: true }, energy_used: 1, transaction, internal_transactions: [] };
+          },
+        },
+      });
+      await assert.rejects(() => client.simulateSigned(signedBytes, txid, built), pattern);
+    });
+  }
+});
+
+test('bounds readiness with an adapter-owned timer and aborts stalled simulation transport cleanly', async () => {
+  const built = utils.crypto.signTransaction(PRIVATE_KEY, unsignedCreateTransaction());
+  let observedSignal: AbortSignal | undefined;
+  const { client } = fixture({
+    simulationReadinessTimeoutMs: 25,
+    transport: {
+      request(_path, _body, options) {
+        observedSignal = options!.signal;
+        return new Promise(() => {});
+      },
+    },
+  });
+  client.buildCreate = async () => ({
+    transaction: built,
+    signedNativeTransaction: serializeSignedTransaction(built),
+    nativeTransactionId: built.txID,
+  });
+
+  const started = Date.now();
+  await assert.rejects(() => client.assertSimulationReady(), /readiness.*timed out/i);
+  assert.ok(Date.now() - started >= 15);
+  assert.ok(Date.now() - started < 500);
+  assert.equal(observedSignal!.aborted, true);
+});
+
+test('refuses exact simulation when the capability is unavailable, mismatched, or incomplete', async t => {
+  const signedBytes = serializeSignedTransaction(signedFixture());
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const cases: JsonAny[] = [
+    {
+      name: 'unavailable',
+      response: Promise.reject(Object.assign(new Error('404'), { status: 404 })),
+      pattern: /exact.*simulation.*unavailable/i,
+    },
+    {
+      name: 'wrong txid',
+      response: Promise.resolve({ result: { result: true }, txid: 'ff'.repeat(32), trace_complete: true }),
+      pattern: /transaction id/i,
+    },
+    {
+      name: 'no completeness marker',
+      response: Promise.resolve({ result: { result: true }, txid, child_create_attempts: [] }),
+      pattern: /complete.*trace/i,
+    },
+    {
+      name: 'malformed child attempt',
+      response: Promise.resolve({
+        result: { result: true },
+        txid,
+        trace_complete: true,
+        child_create_attempts: [{ caller_address: OWNER, success: true }],
+      }),
+      pattern: /child.*trace/i,
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const { client } = fixture({ transport: { request: () => item.response } });
+      await assert.rejects(() => client.simulateSigned(signedBytes, txid), item.pattern);
+    });
+  }
+});
+
+test('queries an existing native transaction and distinguishes unconfirmed and absent results', async () => {
+  const transaction = unsignedTransaction();
+  const txid = transaction.txID;
+  const responses: JsonAny[] = [transaction, {}, {}, {}];
+  const requests: JsonAny[] = [];
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        requests.push({ path, body });
+        return responses.shift();
+      },
+    },
+  });
+
+  assert.deepEqual(await client.getTransaction(`0x${txid.toUpperCase()}`), {
+    transaction,
+    info: null,
+    confirmed: false,
+  });
+  assert.equal(await client.getTransaction(txid), null);
+  assert.deepEqual(
+    requests.map(request => request.path),
+    [
+      'wallet/gettransactionbyid',
+      'walletsolidity/gettransactioninfobyid',
+      'wallet/gettransactionbyid',
+      'walletsolidity/gettransactioninfobyid',
+    ],
+  );
+  assert.ok(requests.every(request => request.body.value === txid));
+});
+
+test('rebroadcasts exact signed bytes, retries transient sends, and accepts a duplicate response', async () => {
+  const signedBytes = serializeSignedTransaction(signedFixture());
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const attempts: JsonAny[] = [];
+  const responses: JsonAny[] = [new Error('connection reset'), { result: true, txid }];
+  const { client } = fixture({
+    maxBroadcastAttempts: 3,
+    sleep: async () => {},
+    transport: {
+      async request(path, body) {
+        attempts.push({ path, body });
+        const response = responses.shift();
+        if (response instanceof Error) throw response;
+        return response;
+      },
+    },
+  });
+
+  assert.deepEqual(await client.broadcastSigned(signedBytes, txid), {
+    nativeTransactionId: txid,
+    duplicate: false,
+  });
+  assert.equal(attempts.length, 2);
+  assert.ok(attempts.every(attempt => attempt.body.transaction === signedBytes));
+
+  const duplicate = fixture({
+    transport: {
+      async request() {
+        return { result: false, code: 'DUP_TRANSACTION_ERROR', txid };
+      },
+    },
+  }).client;
+  assert.deepEqual(await duplicate.broadcastSigned(signedBytes, txid), {
+    nativeTransactionId: txid,
+    duplicate: true,
+  });
+});
+
+test('refuses a rebroadcast txid mismatch and stops after the configured retry count', async () => {
+  const signedBytes = serializeSignedTransaction(signedFixture());
+  const txid = nativeTxIdFromSignedBytes(signedBytes);
+  const mismatched = fixture({
+    transport: { request: async () => ({ result: true, txid: 'ff'.repeat(32) }) },
+  }).client;
+  await assert.rejects(() => mismatched.broadcastSigned(signedBytes, txid), /transaction id/i);
+
+  let attempts = 0;
+  const failing = fixture({
+    maxBroadcastAttempts: 2,
+    sleep: async () => {},
+    transport: {
+      async request() {
+        attempts += 1;
+        throw new Error('offline');
+      },
+    },
+  }).client;
+  await assert.rejects(() => failing.broadcastSigned(signedBytes, txid), /offline/);
+  assert.equal(attempts, 2);
+});
+
+test('polls unconfirmed transactions until a confirmed translated receipt exists', async () => {
+  const sourceHash = `0x${'ab'.repeat(32)}`;
+  const transaction = unsignedTransaction();
+  const txid = transaction.txID;
+  const snapshots: JsonAny[] = [
+    { transaction, info: null, confirmed: false },
+    {
+      transaction,
+      info: {
+        id: txid,
+        blockNumber: 42,
+        blockTimeStamp: 1_700_000_000_000,
+        blockHash: 'ef'.repeat(32),
+        transactionIndex: 0,
+        receipt: { result: 'SUCCESS', energy_usage_total: 50, energy_fee: 100 },
+        fee: 125,
+      },
+      confirmed: true,
+    },
+  ];
+  const sleeps: number[] = [];
+  const { client } = fixture({ sleep: async delay => sleeps.push(delay), pollIntervalMs: 7 });
+  client.getTransaction = async () => snapshots.shift();
+
+  const receipt = await client.waitForReceipt(txid, { sourceTransactionHash: sourceHash });
+
+  assert.equal(receipt.transactionHash, sourceHash);
+  assert.equal(receipt.blockNumber, '0x2a');
+  assert.equal(receipt.status, '0x1');
+  assert.deepEqual(sleeps, [7]);
+});
+
+test('loads the confirmed block hash while querying a native receipt', async () => {
+  const transaction = unsignedTransaction();
+  const txid = transaction.txID;
+  const before = { txID: 'aa'.repeat(32) };
+  const after = { txID: 'bb'.repeat(32) };
+  const requests: JsonAny[] = [];
+  const { client } = fixture({
+    transport: {
+      async request(path, body) {
+        requests.push({ path, body });
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        if (path === 'walletsolidity/gettransactioninfobyid') {
+          return {
+            id: txid,
+            blockNumber: 7,
+            blockTimeStamp: 1_700_000_000_000,
+            receipt: { result: 'SUCCESS', energy_usage_total: 1 },
+            log: [{ address: CONTRACT.slice(2), topics: [], data: '' }],
+          };
+        }
+        if (path === 'walletsolidity/getblockbynum') {
+          return {
+            blockID: 'ef'.repeat(32),
+            block_header: { raw_data: { number: 7 } },
+            transactions: [before, transaction, after],
+          };
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    },
+  });
+
+  const snapshot = await client.getTransaction(txid);
+
+  assert.equal(snapshot!.confirmed, true);
+  assert.equal(snapshot!.info.blockHash, 'ef'.repeat(32));
+  assert.equal(snapshot!.info.transactionIndex, 1);
+  const translated = translateReceipt(snapshot, {
+    sourceTransactionHash: `0x${'ab'.repeat(32)}`,
+  });
+  assert.equal(translated.transactionIndex, '0x1');
+  assert.equal(translated.logs[0].transactionIndex, '0x1');
+  assert.deepEqual(requests.at(-1), { path: 'walletsolidity/getblockbynum', body: { num: 7 } });
+});
+
+test('rejects confirmed solid blocks that cannot uniquely bind the transaction, block, and index', async t => {
+  const transaction = unsignedTransaction();
+  const txid = transaction.txID;
+  const cases: JsonAny[] = [
+    {
+      name: 'transaction absent',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: { blockID: 'ef'.repeat(32), block_header: { raw_data: { number: 7 } }, transactions: [] },
+      pattern: /transaction.*block/i,
+    },
+    {
+      name: 'transaction duplicated',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 7 } },
+        transactions: [transaction, transaction],
+      },
+      pattern: /transaction.*block/i,
+    },
+    {
+      name: 'block number mismatch',
+      info: { id: txid, blockNumber: 7, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 8 } },
+        transactions: [transaction],
+      },
+      pattern: /block number/i,
+    },
+    {
+      name: 'invalid negative block number',
+      info: { id: txid, blockNumber: -1, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: -1 } },
+        transactions: [transaction],
+      },
+      pattern: /block number/i,
+    },
+    {
+      name: 'reported index mismatch',
+      info: { id: txid, blockNumber: 7, transactionIndex: 1, receipt: { result: 'SUCCESS' } },
+      block: {
+        blockID: 'ef'.repeat(32),
+        block_header: { raw_data: { number: 7 } },
+        transactions: [transaction],
+      },
+      pattern: /transaction index/i,
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const { client } = fixture({
+        transport: {
+          async request(path) {
+            if (path === 'wallet/gettransactionbyid') return transaction;
+            if (path === 'walletsolidity/gettransactioninfobyid') return item.info;
+            if (path === 'walletsolidity/getblockbynum') return item.block;
+            throw new Error(`Unexpected request: ${path}`);
+          },
+        },
+      });
+      await assert.rejects(() => client.getTransaction(txid), item.pattern);
+    });
+  }
+});
+
+test('does not confirm from full-node transaction inclusion without a solid receipt', async () => {
+  const transaction = unsignedTransaction();
+  let clock = 0;
+  const paths: JsonAny[] = [];
+  const { client } = fixture({
+    now: () => clock,
+    receiptTimeoutMs: 5,
+    pollIntervalMs: 5,
+    sleep: async delay => {
+      clock += delay;
+    },
+    transport: {
+      async request(path) {
+        paths.push(path);
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        if (path === 'walletsolidity/gettransactioninfobyid') return {};
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    /timed out/i,
+  );
+  assert.ok(paths.includes('walletsolidity/gettransactioninfobyid'));
+  assert.ok(!paths.includes('wallet/gettransactioninfobyid'));
+});
+
+test('retries transient solid-node query failures and then returns the confirmed receipt', async () => {
+  const transaction = unsignedTransaction();
+  let solidAttempts = 0;
+  const sleeps: number[] = [];
+  const { client } = fixture({
+    sleep: async delay => sleeps.push(delay),
+    transport: {
+      async request(path) {
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        if (path === 'walletsolidity/gettransactioninfobyid') {
+          solidAttempts += 1;
+          if (solidAttempts === 1) {
+            throw Object.assign(new Error('temporary solid-node outage'), { status: 503 });
+          }
+          return {
+            id: transaction.txID,
+            blockNumber: 7,
+            blockTimeStamp: 1_700_000_000_000,
+            receipt: { result: 'SUCCESS', energy_usage_total: 1 },
+          };
+        }
+        if (path === 'walletsolidity/getblockbynum') {
+          return {
+            blockID: 'ef'.repeat(32),
+            block_header: { raw_data: { number: 7 } },
+            transactions: [transaction],
+          };
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      },
+    },
+  });
+
+  const receipt = await client.waitForReceipt(transaction.txID, {
+    sourceTransactionHash: `0x${'ab'.repeat(32)}`,
+  });
+
+  assert.equal(receipt.status, '0x1');
+  assert.equal(solidAttempts, 2);
+  assert.deepEqual(sleeps, [500]);
+});
+
+test('does not retry permanent HTTP query failures reported through common status fields', async t => {
+  const transaction = unsignedTransaction();
+  const cases = [
+    { name: 'status 401', error: Object.assign(new Error('unauthorized'), { status: 401 }) },
+    { name: 'response status 404', error: Object.assign(new Error('not found'), { response: { status: 404 } }) },
+    { name: 'statusCode 403', error: Object.assign(new Error('forbidden'), { statusCode: 403 }) },
+    { name: 'code 400', error: Object.assign(new Error('bad request'), { code: 400 }) },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      let attempts = 0;
+      let sleeps = 0;
+      let clock = 0;
+      const { client } = fixture({
+        now: () => clock,
+        receiptTimeoutMs: 1,
+        pollIntervalMs: 1,
+        sleep: async delay => {
+          sleeps += 1;
+          clock += delay;
+        },
+        transport: {
+          async request(path) {
+            if (path === 'wallet/gettransactionbyid') return transaction;
+            attempts += 1;
+            throw item.error;
+          },
+        },
+      });
+
+      await assert.rejects(
+        () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+        error => error === item.error,
+      );
+      assert.equal(attempts, 1);
+      assert.equal(sleeps, 0);
+    });
+  }
+});
+
+test('times out repeated transient receipt queries with the last transport failure as cause', async () => {
+  const transaction = unsignedTransaction();
+  let clock = 0;
+  const { client } = fixture({
+    now: () => clock,
+    receiptTimeoutMs: 10,
+    pollIntervalMs: 5,
+    sleep: async delay => {
+      clock += delay;
+    },
+    transport: {
+      async request(path) {
+        if (path === 'wallet/gettransactionbyid') return transaction;
+        throw new Error(`offline at ${path}`);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    (error: JsonAny) => /timed out/i.test(error.message) && /offline.*walletsolidity/i.test(error.cause?.message ?? ''),
+  );
+});
+
+test('fails immediately on a permanent queried transaction ID mismatch', async () => {
+  const transaction = unsignedTransaction();
+  const wrong = { ...transaction, txID: 'ff'.repeat(32) };
+  let sleeps = 0;
+  const { client } = fixture({
+    sleep: async () => {
+      sleeps += 1;
+    },
+    transport: {
+      async request(path) {
+        return path === 'wallet/gettransactionbyid' ? wrong : {};
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => client.waitForReceipt(transaction.txID, { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    /different transaction id/i,
+  );
+  assert.equal(sleeps, 0);
+});
+
+test('times out receipt polling without treating an unconfirmed transaction as failure', async () => {
+  let clock = 0;
+  const { client } = fixture({
+    now: () => clock,
+    receiptTimeoutMs: 10,
+    pollIntervalMs: 5,
+    sleep: async delay => {
+      clock += delay;
+    },
+  });
+  client.getTransaction = async () => ({ transaction: unsignedTransaction(), info: null, confirmed: false });
+
+  await assert.rejects(
+    () => client.waitForReceipt('cd'.repeat(32), { sourceTransactionHash: `0x${'ab'.repeat(32)}` }),
+    /timed out/i,
+  );
+});

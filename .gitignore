@@ -29,3 +29,7 @@ node_modules/
 
 # local agent instructions (never commit)
 CLAUDE.local.md
+
+# TypeScript build output
+dist/
+*.tsbuildinfo

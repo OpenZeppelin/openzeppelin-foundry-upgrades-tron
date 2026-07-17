@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "description": "Foundry library for deploying and managing upgradeable contracts on TRON",
   "license": "MIT",
+  "type": "commonjs",
   "files": [
     "src/**/*",
-    "rpc/*.cjs",
+    "dist/rpc/**/*",
     "rpc/SECURITY.md"
   ],
   "repository": {
@@ -16,7 +17,7 @@
     "node": ">=22"
   },
   "bin": {
-    "openzeppelin-foundry-upgrades-tron": "rpc/cli.cjs"
+    "openzeppelin-foundry-upgrades-tron": "dist/rpc/cli.js"
   },
   "scripts": {
     "compile": "forge build",
@@ -26,14 +27,16 @@
     "test:validation": "FOUNDRY_OUT=out FOUNDRY_PROFILE=default forge test --match-path test/Validation.t.sol -vvv --ffi --force",
     "test:reference-builds": "bash scripts/test-reference-builds.sh",
     "test:rpc": "node scripts/test-rpc.cjs",
-    "test:rpc:tre": "RUN_TRE_E2E=1 node --test rpc/test/tre-adapter.test.cjs",
+    "test:rpc:tre": "RUN_TRE_E2E=1 node --import tsx --test rpc/test/tre-adapter.test.ts",
     "lint": "node scripts/lint.cjs",
     "lint:fix": "node scripts/lint.cjs --write",
-    "rpc": "node rpc/cli.cjs",
-    "rpc:start": "node rpc/cli.cjs start",
-    "rpc:resolve": "node rpc/cli.cjs resolve",
-    "rpc:mappings": "node rpc/cli.cjs mappings",
-    "prepack": "node scripts/require-package-contents.cjs"
+    "rpc": "node dist/rpc/cli.js",
+    "rpc:start": "node dist/rpc/cli.js start",
+    "rpc:resolve": "node dist/rpc/cli.js resolve",
+    "rpc:mappings": "node dist/rpc/cli.js mappings",
+    "build:rpc": "tsc -p tsconfig.build.json",
+    "typecheck:rpc": "tsc -p tsconfig.json",
+    "prepack": "npm run build:rpc && node scripts/require-package-contents.cjs"
   },
   "dependencies": {
     "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
@@ -42,9 +45,12 @@
   },
   "devDependencies": {
     "@openzeppelin/upgrades-core": "1.46.0",
+    "@types/node": "^22.20.1",
     "prettier": "3.9.5",
     "prettier-plugin-solidity": "2.3.1",
-    "solhint": "6.2.3"
+    "solhint": "6.2.3",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "@openzeppelin/upgrades-core": "^1.46.0"

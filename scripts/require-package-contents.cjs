@@ -8,8 +8,9 @@ const REQUIRED_PACKAGE_FILES = Object.freeze([
   'src/internal/Core.sol',
   'src/internal/artifact-provenance.cjs',
   'rpc/SECURITY.md',
-  'rpc/cli.cjs',
-  'rpc/handlers.cjs',
+  'dist/rpc/cli.js',
+  'dist/rpc/cli.d.ts',
+  'dist/rpc/handlers.js',
 ]);
 
 function assertPackageContents(root) {

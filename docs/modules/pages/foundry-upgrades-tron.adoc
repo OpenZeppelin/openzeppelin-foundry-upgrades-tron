@@ -110,8 +110,10 @@ and should be a last resort.
 
 == Adapter and actual addresses
 
-Start the adapter with `npm run rpc:start` and point Forge to its loopback RPC
-URL. Forge uses a predicted Ethereum-style address during the script. After a
+When running from source, build the adapter first with `npm run build:rpc`
+(emits `dist/rpc/`). Start the adapter with `npm run rpc:start` and point
+Forge to its loopback RPC URL. Forge uses a predicted Ethereum-style address
+during the script. After a
 confirmed receipt, the adapter persists its one-to-one mapping to the actual
 TRON/TVM address. Use `npm run rpc:resolve -- <address>` before handing the
 deployment to TronWeb, Hardhat, or an explorer.

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "rpc-src",
+    "outDir": "dist/rpc"
+  },
+  "include": ["rpc-src/**/*.ts"]
+}
