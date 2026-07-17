@@ -185,6 +185,31 @@ test('refuses adoption when on-chain runtime code does not match the artifact', 
   assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
 });
 
+test('refuses adoption when the artifact has no runtime bytecode', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(
+    adoptArgs(),
+    adoptOptions(context, { stderr: stderr.stream, node: { code: '0x' }, verification: { deployedBytecode: '0x' } }),
+  );
+  assert.equal(exitCode, 1);
+  const message = stderr.read();
+  assert.match(message, /has no runtime bytecode/i);
+  assert.ok(message.includes('contracts/Box.sol:Box'), message);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+test('refuses adoption when the on-chain address has no code', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(adoptArgs(), adoptOptions(context, { stderr: stderr.stream, node: { code: '0x' } }));
+  assert.equal(exitCode, 1);
+  const message = stderr.read();
+  assert.match(message, /no on-chain code found/i);
+  assert.ok(message.includes(ACTUAL), message);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
 test('refuses each proxy kind when its TRC-1967 slot disagrees with the declared address', async t => {
   const wrong = `0x${'99'.repeat(20)}`;
   const cases: Array<[string, string, string]> = [
@@ -204,6 +229,20 @@ test('refuses each proxy kind when its TRC-1967 slot disagrees with the declared
     assert.match(stderr.read(), /slot/i, kind);
     assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined, kind);
   }
+});
+
+test('refuses a reference flag that belongs to a different proxy kind', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  // --admin describes the transparent-proxy admin slot; it is irrelevant to a uups-proxy adoption
+  // and must be refused rather than silently ignored.
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'uups-proxy', '--admin': ADMIN }),
+    adoptOptions(context, { stderr: stderr.stream }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /--admin is not valid for a uups-proxy adoption/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
 });
 
 test('refuses adoption when artifact provenance verification fails', async t => {

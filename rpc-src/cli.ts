@@ -28,6 +28,10 @@ import type { UpstreamClient } from './upstream.js';
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8_545;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
+// The hash of zero-length code, shared by an artifact with no runtime bytecode (abstract contract
+// or interface) and a codeless on-chain address; adoption must refuse both explicitly rather than
+// let them compare equal to each other.
+const EMPTY_RUNTIME_CODE_HASH = keccak256('0x');
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
 const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
@@ -570,14 +574,26 @@ async function adoptCommand(parsed: AdoptArguments, context: ResolvedRunContext)
       fullyQualifiedName: verified.fullyQualifiedName,
     };
     const runtimeBytecodeHash = bytecodeHexHash(verified.artifact?.deployedBytecode, 'runtime bytecode');
+    // An abstract contract or interface artifact has no runtime bytecode; it can never be the code
+    // running at a live address, so refuse it by name rather than let its empty hash go on to compare
+    // equal to a codeless address below.
+    if (runtimeBytecodeHash === EMPTY_RUNTIME_CODE_HASH) {
+      throw new Error(`Artifact ${verified.fullyQualifiedName} has no runtime bytecode and cannot be adopted`);
+    }
     const creationBytecodeHash = bytecodeHexHash(verified.artifact?.bytecode, 'creation bytecode');
 
     const onchainCode = await upstream.request('eth_getCode', [actual, 'latest']);
-    if (
-      typeof onchainCode !== 'string' ||
-      !/^0x(?:[0-9a-f]{2})*$/i.test(onchainCode) ||
-      keccak256(onchainCode.toLowerCase()) !== runtimeBytecodeHash
-    ) {
+    if (typeof onchainCode !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(onchainCode)) {
+      throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
+    }
+    const onchainCodeHash = keccak256(onchainCode.toLowerCase());
+    // A codeless address (nothing deployed there, or the wrong address) must be refused by name
+    // rather than adopted as a match, which the empty-artifact check above guarantees can no longer
+    // happen by coincidental equality of two empty hashes.
+    if (onchainCodeHash === EMPTY_RUNTIME_CODE_HASH) {
+      throw new Error(`No on-chain code found at ${actual}`);
+    }
+    if (onchainCodeHash !== runtimeBytecodeHash) {
       throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
     }
 

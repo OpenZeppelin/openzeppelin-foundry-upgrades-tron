@@ -393,6 +393,27 @@ test('derives historical source nonces from confirmed journal receipts at canoni
   }
 });
 
+test('honors an adopted nonce-baseline floor for the configured sender and rejects a send below it', async (t: TestContext) => {
+  const result = fixture(t);
+  // Seed the durable floor directly through the address-map API, the way `adopt --nonce-baseline`
+  // populates state, without going through the CLI.
+  result.addressMap.setNonceBaseline({ sender: WALLET.address, nonce: 5n });
+
+  const count = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getTransactionCount',
+    params: [WALLET.address, 'latest'],
+  });
+  assert.equal(count.result, '0x5');
+
+  const stale = await signedTransaction({ nonce: 3 });
+  await assert.rejects(
+    result.handlers.dispatch('eth_sendRawTransaction', [stale]),
+    (error: JsonAny) => error.code === 'NONCE_TOO_LOW',
+  );
+});
+
 test('normalizes the stock TRE empty state root before Forge deserializes a block', async (t: TestContext) => {
   const hash = `0x${'12'.repeat(32)}`;
   const block = {

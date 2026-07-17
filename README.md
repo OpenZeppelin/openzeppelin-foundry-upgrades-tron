@@ -311,7 +311,9 @@ accepts Base58, `41`-hex, or `0x` TRON forms.
 deployment for ABI-aware operation going forward. Adopt a proxy's implementation
 alongside the proxy so calls that resolve through the implementation stay
 ABI-aware. Provide `--nonce-baseline` with the sender's already-consumed on-chain
-nonce count so Forge does not reuse a spent nonce after re-registration.
+nonce count so Forge does not reuse a spent nonce after re-registration. That
+floor also applies to `eth_getTransactionCount` for the configured sender, so
+the adapter never reports a nonce below it.
 
 ## Adapter behavior
 
