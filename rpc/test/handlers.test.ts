@@ -1850,6 +1850,135 @@ test('rejects a recognized external upgrade that smuggles a second predicted add
   );
 });
 
+// An eth_call return whose ABI declares an address output has any mapped actual address in that
+// output reverse-mapped to its predicted address, so a Forge script sees the deterministic addresses
+// it deployed against.
+test('translates mapped actual addresses in eth_call return data to their predicted addresses', async (t: TestContext) => {
+  const abi = ['function impl() view returns (address)'];
+  const retPredicted = `0x${'77'.repeat(20)}`;
+  const retActual = `0x${'c7'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => ({ targetKind: 'contract', abi, artifactIdentity: ARTIFACT_IDENTITY }),
+    rewriteCall: async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_call') return new Interface(abi).encodeFunctionResult('impl', [retActual]);
+        return `${method}:result`;
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: retPredicted,
+    actual: retActual,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const callData = new Interface(abi).encodeFunctionData('impl', []);
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_call',
+    params: [{ to: TARGET, data: callData }, 'latest'],
+  });
+  assert.equal(response.result, new Interface(abi).encodeFunctionResult('impl', [retPredicted]));
+});
+
+// An address returned by an eth_call that is not a known mapped actual is left byte-for-byte unchanged.
+test('leaves an unmapped address in eth_call return data unchanged', async (t: TestContext) => {
+  const abi = ['function impl() view returns (address)'];
+  const unknown = `0x${'d4'.repeat(20)}`;
+  const encoded = new Interface(abi).encodeFunctionResult('impl', [unknown]);
+  const result = fixture(t, {
+    resolveCallContext: async () => ({ targetKind: 'contract', abi, artifactIdentity: ARTIFACT_IDENTITY }),
+    rewriteCall: async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_call') return encoded;
+        return `${method}:result`;
+      },
+    },
+  });
+  const callData = new Interface(abi).encodeFunctionData('impl', []);
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_call',
+    params: [{ to: TARGET, data: callData }, 'latest'],
+  });
+  assert.equal(response.result, encoded);
+});
+
+// Reverse-mapping is strictly ABI-type driven: a uint256 return whose value numerically equals a
+// mapped actual address is never treated as an address and is left unchanged.
+test('leaves a uint256 eth_call return that looks like a mapped address unchanged', async (t: TestContext) => {
+  const abi = ['function n() view returns (uint256)'];
+  const retActual = `0x${'c7'.repeat(20)}`;
+  const encoded = new Interface(abi).encodeFunctionResult('n', [BigInt(retActual)]);
+  const result = fixture(t, {
+    resolveCallContext: async () => ({ targetKind: 'contract', abi, artifactIdentity: ARTIFACT_IDENTITY }),
+    rewriteCall: async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_call') return encoded;
+        return `${method}:result`;
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: `0x${'77'.repeat(20)}`,
+    actual: retActual,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const callData = new Interface(abi).encodeFunctionData('n', []);
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_call',
+    params: [{ to: TARGET, data: callData }, 'latest'],
+  });
+  assert.equal(response.result, encoded);
+});
+
+// eth_getStorageAt reverse-maps a stored actual address to its predicted address only for the three
+// TRC-1967 slots; every other slot is returned byte-for-byte.
+test('reverse-maps a TRC-1967 storage slot address while leaving other slots untouched', async (t: TestContext) => {
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const proxyExternal = `0x${'c1'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request() {
+        return slotWord(implActual);
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: implPredicted,
+    actual: implActual,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const storageAt = async (slot: JsonAny) =>
+    (
+      await result.handlers.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getStorageAt',
+        params: [proxyExternal, slot, 'latest'],
+      })
+    ).result;
+
+  for (const slot of [UUPS_IMPLEMENTATION_SLOT, ADMIN_STORAGE_SLOT, BEACON_STORAGE_SLOT]) {
+    assert.equal(await storageAt(slot), slotWord(implPredicted));
+  }
+  assert.equal(await storageAt('0x5'), slotWord(implActual));
+});
+
 test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async (t: TestContext) => {
   const error = new UpstreamRpcError(-32042, 'upstream reverted', { reason: 'boom' }, true);
   const { handlers } = fixture(t, {

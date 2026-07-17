@@ -29,6 +29,9 @@ const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
 const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
+// The three TRC-1967 slots whose stored value is an address the gateway may reverse-map in an
+// eth_getStorageAt response; every other slot is returned byte-for-byte.
+const TRC1967_SLOTS = new Set([IMPLEMENTATION_SLOT, ADMIN_SLOT, BEACON_SLOT]);
 const IMPLEMENTATION_SELECTOR = '0x5c60da1b';
 // The three externally-deployed proxy upgrade calls recognized on the opaque path: a UUPS proxy's
 // upgradeToAndCall, a ProxyAdmin's upgradeAndCall, and an UpgradeableBeacon's upgradeTo. Each names a
@@ -731,7 +734,94 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return finalData;
   }
 
-  async function rewriteReadTransaction(transaction: JsonAny, deploymentEstimate = false): Promise<JsonAny> {
+  // Reverse-map a single decoded value against its ABI type: an exact-width `address` whose value is a
+  // mapped actual address becomes its predicted address; arrays and tuples are walked structurally.
+  // Every other ABI type (including a uint256 that happens to look like an address) is left untouched,
+  // so translation is strictly type-driven and never a raw byte heuristic.
+  function reverseMapValue(param: JsonAny, value: JsonAny): { value: JsonAny; changed: boolean } {
+    if (param.baseType === 'address') {
+      let normalized;
+      try {
+        normalized = normalizeEvmAddress(value);
+      } catch {
+        return { value, changed: false };
+      }
+      const predicted = addressMap.toPredicted(normalized);
+      return predicted === undefined ? { value, changed: false } : { value: getAddress(predicted), changed: true };
+    }
+    const children =
+      param.baseType === 'array'
+        ? (value?.toArray?.() ?? (Array.isArray(value) ? value : undefined))
+        : undefined;
+    if (param.baseType === 'array' && children !== undefined) {
+      let changed = false;
+      const mapped = children.map((item: JsonAny) => {
+        const result = reverseMapValue(param.arrayChildren, item);
+        if (result.changed) changed = true;
+        return result.value;
+      });
+      return { value: mapped, changed };
+    }
+    if (param.baseType === 'tuple') {
+      const tuple = value?.toArray?.() ?? (Array.isArray(value) ? value : undefined);
+      if (tuple === undefined) return { value, changed: false };
+      let changed = false;
+      const mapped = (param.components as JsonAny[]).map((component, index) => {
+        const result = reverseMapValue(component, tuple[index]);
+        if (result.changed) changed = true;
+        return result.value;
+      });
+      return { value: mapped, changed };
+    }
+    return { value, changed: false };
+  }
+
+  // Reverse-map any mapped actual address in an eth_call return, decoding it through the resolved
+  // target ABI and re-encoding only if an address actually changed. On any decode/encode failure, or a
+  // target without metadata, the raw upstream bytes are returned unchanged.
+  function translateCallResult(context: JsonAny, callData: JsonAny, result: JsonAny): JsonAny {
+    if (context === undefined || !Array.isArray(context.abi)) return result;
+    if (typeof result !== 'string' || result === '0x' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(result)) return result;
+    if (typeof callData !== 'string' || callData.length < 10) return result;
+    try {
+      const iface = new Interface(context.abi);
+      const fragment = iface.getFunction(callData.slice(0, 10));
+      if (fragment === null) return result;
+      const values = iface.decodeFunctionResult(fragment, result).toArray();
+      let changed = false;
+      const mapped = (fragment.outputs as JsonAny[]).map((param, index) => {
+        const outcome = reverseMapValue(param, values[index]);
+        if (outcome.changed) changed = true;
+        return outcome.value;
+      });
+      return changed ? iface.encodeFunctionResult(fragment, mapped) : result;
+    } catch {
+      return result;
+    }
+  }
+
+  // Reverse-map a stored TRC-1967 slot value: a canonical address word (high 12 bytes zero) whose low
+  // 20 bytes are a mapped actual address is rewritten to its predicted address. Non-TRC-1967 slots and
+  // non-address words are returned byte-for-byte.
+  function translateStorageValue(slot: JsonAny, value: JsonAny): JsonAny {
+    if (typeof slot !== 'string' || !TRC1967_SLOTS.has(slot.toLowerCase())) return value;
+    if (typeof value !== 'string' || !/^0x0{24}[0-9a-fA-F]{40}$/.test(value)) return value;
+    let predicted;
+    try {
+      predicted = addressMap.toPredicted(normalizeEvmAddress(`0x${value.slice(-40)}`));
+    } catch {
+      return value;
+    }
+    return predicted === undefined ? value : `0x${'0'.repeat(24)}${normalizeEvmAddress(predicted).slice(2)}`;
+  }
+
+  // Rewrite a read transaction's addresses and calldata for the upstream node, returning the rewritten
+  // transaction alongside the resolved target context so an eth_call response can be translated through
+  // the same ABI without re-resolving (and re-reading) the target.
+  async function rewriteReadTransaction(
+    transaction: JsonAny,
+    deploymentEstimate = false,
+  ): Promise<{ transaction: JsonAny; context: JsonAny }> {
     if (!isObject(transaction)) throw new RpcError(-32602, 'Invalid transaction call object');
     if (own(transaction, 'data') && own(transaction, 'input') && transaction.data !== transaction.input) {
       throw new RpcError(-32602, 'Transaction data and input conflict');
@@ -739,13 +829,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     const dataKey = own(transaction, 'input') && !own(transaction, 'data') ? 'input' : 'data';
     const data = transaction[dataKey] ?? '0x';
     if (transaction.to === undefined || transaction.to === null) {
-      if (!deploymentEstimate) return { ...transaction };
+      if (!deploymentEstimate) return { transaction: { ...transaction }, context: undefined };
       const match = matchArtifact({ outputDirectory: config.foundryOut, initcode: data });
       const deployment = await rewriteDeploy(match, rewriteDependencies);
       return {
-        ...transaction,
-        ...(transaction.from === undefined ? {} : { from: mappedAddress(transaction.from) }),
-        [dataKey]: deployment.initcode,
+        transaction: {
+          ...transaction,
+          ...(transaction.from === undefined ? {} : { from: mappedAddress(transaction.from) }),
+          [dataKey]: deployment.initcode,
+        },
+        context: undefined,
       };
     }
     const target = normalizeEvmAddress(transaction.to, 'transaction target');
@@ -760,7 +853,7 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       if (dataKey === 'input') delete rewritten.data;
     }
     if (transaction.from !== undefined) rewritten.from = mappedAddress(transaction.from);
-    return rewritten;
+    return { transaction: rewritten, context };
   }
 
   async function waitAndReconcile(record: JsonAny): Promise<JsonAny> {
@@ -998,7 +1091,8 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       case 'eth_getStorageAt': {
         const [address, slot, block] = requirePositional(params, 2, 3);
         const rewritten = [mappedAddress(address), slot, ...(block === undefined ? [] : [block])];
-        return requestStockCompatibleRead(upstream, method, rewritten, block);
+        const value = await requestStockCompatibleRead(upstream, method, rewritten, block);
+        return translateStorageValue(slot, value);
       }
       case 'eth_getTransactionCount': {
         const [address, block] = requirePositional(params, 1, 2);
@@ -1015,11 +1109,14 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       case 'eth_call':
       case 'eth_estimateGas': {
         const [transaction, block] = requirePositional(params, 1, 2);
-        const rewritten = await rewriteReadTransaction(transaction, method === 'eth_estimateGas');
+        const { transaction: rewritten, context } = await rewriteReadTransaction(
+          transaction,
+          method === 'eth_estimateGas',
+        );
         const rewrittenParams = [rewritten, ...(block === undefined ? [] : [block])];
-        return method === 'eth_call'
-          ? requestStockCompatibleRead(upstream, method, rewrittenParams, block)
-          : upstream.request(method, rewrittenParams);
+        if (method === 'eth_estimateGas') return upstream.request(method, rewrittenParams);
+        const result = await requestStockCompatibleRead(upstream, method, rewrittenParams, block);
+        return translateCallResult(context, rewritten.data ?? rewritten.input, result);
       }
       case 'eth_gasPrice':
         requirePositional(params, 0);
