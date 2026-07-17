@@ -97,7 +97,10 @@ function verification(overrides: JsonAny = {}): JsonAny {
     artifact: {
       abi: overrides.abi ?? ABI,
       bytecode: { object: CREATION_HEX },
-      deployedBytecode: { object: overrides.deployedBytecode ?? RUNTIME_HEX },
+      deployedBytecode: {
+        object: overrides.deployedBytecode ?? RUNTIME_HEX,
+        ...(overrides.immutableReferences === undefined ? {} : { immutableReferences: overrides.immutableReferences }),
+      },
     },
     artifactPath: `${sourceName}:${contractName}`,
     sourceName,
@@ -171,6 +174,46 @@ test('adopts each proxy kind only when its TRC-1967 slot matches the declared ad
     const metadata = freshMap(context.stateFile).resolveContractMetadata(PREDICTED);
     assert.equal(metadata?.contractKind, kind, kind);
   }
+});
+
+// A transparent-proxy-style runtime whose only immutable is the constructor-set ProxyAdmin address:
+// the artifact template carries a zeroed 32-byte immutable word (bytes 2..33), while the live code
+// carries the admin in that word's low 20 bytes. An exact hash comparison could never match them.
+const PROXY_IMMUTABLE_REFERENCES = { '77': [{ start: 2, length: 32 }] };
+const PROXY_TEMPLATE = `0x6080${'00'.repeat(32)}6000`;
+const PROXY_ONCHAIN = `0x6080${'00'.repeat(12)}${'d4'.repeat(20)}6000`;
+
+test('adopts a proxy whose constructor-set immutable admin is baked into the runtime code', async t => {
+  const context = fixture(t);
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN }),
+    adoptOptions(context, {
+      node: { code: PROXY_ONCHAIN },
+      verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+    }),
+  );
+  assert.equal(exitCode, 0);
+  const metadata = freshMap(context.stateFile).resolveContractMetadata(PREDICTED);
+  assert.equal(metadata?.contractKind, 'transparent-proxy');
+});
+
+test('refuses adoption when the on-chain immutable admin does not match --admin', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const wrongAdmin = `0x${'ee'.repeat(20)}`;
+  // Point the admin slot at the mismatched flag so the slot check would pass; the on-chain immutable
+  // (ADMIN) still disagrees with --admin, isolating the immutable-value verification.
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': wrongAdmin }),
+    adoptOptions(context, {
+      stderr: stderr.stream,
+      node: { code: PROXY_ONCHAIN, slots: { [ADMIN_SLOT]: slotWord(wrongAdmin) } },
+      verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+    }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /immutable/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
 });
 
 test('refuses adoption when on-chain runtime code does not match the artifact', async t => {

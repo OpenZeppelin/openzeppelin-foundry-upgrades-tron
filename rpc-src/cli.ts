@@ -504,6 +504,87 @@ function bytecodeHexHash(value: JsonAny, label: string): string {
   return keccak256(hex.toLowerCase());
 }
 
+interface ImmutableRange {
+  start: number;
+  length: number;
+}
+
+// The 0x-stripped, lowercased runtime hex of a verified artifact's deployed bytecode.
+function runtimeBytecodeHex(value: JsonAny): string {
+  const hex = typeof value === 'string' ? value : value?.object;
+  if (typeof hex !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(hex)) {
+    throw new Error('Verified artifact runtime bytecode is unavailable');
+  }
+  return hex.slice(2).toLowerCase();
+}
+
+// The byte ranges of constructor-set immutables the compiler recorded for a deployed bytecode, keyed
+// in solc output by AST id. An artifact without immutable references yields an empty list, preserving
+// the byte-exact comparison for ordinary contracts.
+function immutableRanges(deployedBytecode: JsonAny): ImmutableRange[] {
+  const references =
+    typeof deployedBytecode === 'object' && deployedBytecode !== null
+      ? deployedBytecode.immutableReferences
+      : undefined;
+  if (references === undefined || references === null) return [];
+  if (typeof references !== 'object') throw new Error('Verified artifact immutable references are malformed');
+  const ranges: ImmutableRange[] = [];
+  for (const group of Object.values(references)) {
+    if (!Array.isArray(group)) throw new Error('Verified artifact immutable references are malformed');
+    for (const entry of group) {
+      const start = (entry as JsonAny)?.start;
+      const length = (entry as JsonAny)?.length;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length <= 0) {
+        throw new Error('Verified artifact immutable references are malformed');
+      }
+      ranges.push({ start, length });
+    }
+  }
+  return ranges;
+}
+
+// Zero the immutable byte ranges in a 0x-stripped hex string so constructor-set values do not defeat
+// a runtime-code comparison. Each byte occupies two hex characters.
+function maskImmutables(codeHex: string, ranges: ImmutableRange[]): string {
+  const characters = codeHex.split('');
+  for (const { start, length } of ranges) {
+    const to = (start + length) * 2;
+    if (to > characters.length) throw new Error('Verified artifact immutable reference is out of range');
+    for (let i = start * 2; i < to; i += 1) characters[i] = '0';
+  }
+  return characters.join('');
+}
+
+// The address stored in an immutable word, taken from its low 20 bytes as Solidity right-aligns it.
+function immutableRangeAddress(codeHex: string, range: ImmutableRange): string {
+  const region = codeHex.slice(range.start * 2, (range.start + range.length) * 2);
+  return toEvmAddress(`0x${region.slice(-40)}`);
+}
+
+// When a masked immutable range corresponds to a declared proxy relationship (--admin/--beacon), the
+// on-chain immutable value must equal that flag, so masking the range for the code comparison cannot
+// let a proxy pointing at a different admin or beacon be adopted.
+function assertImmutableRelationship(
+  kind: string,
+  actual: string,
+  references: AdoptReferences,
+  onchainHex: string,
+  ranges: ImmutableRange[],
+): void {
+  const requirement = PROXY_SLOTS.get(kind);
+  if (requirement === undefined) return;
+  const declared = references[requirement.flag];
+  if (declared === undefined) return;
+  const expected = requireNonzeroEvmAddress(declared, requirement.label);
+  for (const range of ranges) {
+    // Only a full 32-byte word can carry an address immutable; narrower immutables hold other data.
+    if (range.length < 20) continue;
+    if (immutableRangeAddress(onchainHex, range) !== expected) {
+      throw new Error(`The ${kind} ${requirement.label} immutable at ${actual} does not match --${requirement.flag}`);
+    }
+  }
+}
+
 async function readSlotAddress(upstream: UpstreamClient, target: string, slot: string): Promise<string> {
   const value = await upstream.request('eth_getStorageAt', [target, slot, 'latest']);
   if (typeof value !== 'string' || !/^0x[0-9a-f]{64}$/i.test(value)) {
@@ -593,8 +674,25 @@ async function adoptCommand(parsed: AdoptArguments, context: ResolvedRunContext)
     if (onchainCodeHash === EMPTY_RUNTIME_CODE_HASH) {
       throw new Error(`No on-chain code found at ${actual}`);
     }
-    if (onchainCodeHash !== runtimeBytecodeHash) {
-      throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
+    // Standard OZ v5 proxies bake constructor-set values (a TransparentUpgradeableProxy's ProxyAdmin,
+    // a BeaconProxy's beacon) into immutable byte ranges of their runtime code, so the live code can
+    // never hash-equal the artifact template. Mask those ranges on both sides before comparing; with
+    // no immutable references the comparison stays byte-exact.
+    const ranges = immutableRanges(verified.artifact?.deployedBytecode);
+    if (ranges.length === 0) {
+      if (onchainCodeHash !== runtimeBytecodeHash) {
+        throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
+      }
+    } else {
+      const template = runtimeBytecodeHex(verified.artifact?.deployedBytecode);
+      const onchainHex = onchainCode.slice(2).toLowerCase();
+      if (
+        onchainHex.length !== template.length ||
+        keccak256(`0x${maskImmutables(onchainHex, ranges)}`) !== keccak256(`0x${maskImmutables(template, ranges)}`)
+      ) {
+        throw new Error(`On-chain runtime code at ${actual} does not match artifact ${verified.fullyQualifiedName}`);
+      }
+      assertImmutableRelationship(kind, actual, references, onchainHex, ranges);
     }
 
     await assertProxyReferences(upstream, kind, actual, references);
