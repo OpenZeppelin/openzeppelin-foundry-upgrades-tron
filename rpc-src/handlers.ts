@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256, toUtf8Bytes } from 'ethers';
+import { Interface, Transaction, concat, dataSlice, getAddress, getCreateAddress, keccak256, toUtf8Bytes } from 'ethers';
 
 import { normalizeAddress, toEvmAddress } from './address-codec.js';
 import { canonicalTronFullyQualifiedName, derivedTronProxyAdminIdentity } from './artifact-identities.js';
@@ -27,8 +27,23 @@ const JSON_RPC_VERSION = '2.0';
 const DEFAULT_NONCE_GAP_DEADLINE_MS = 30_000;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
 const BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
 const IMPLEMENTATION_SELECTOR = '0x5c60da1b';
+// The three externally-deployed proxy upgrade calls recognized on the opaque path: a UUPS proxy's
+// upgradeToAndCall, a ProxyAdmin's upgradeAndCall, and an UpgradeableBeacon's upgradeTo. Each names a
+// single implementation-address argument that may embed a gateway predicted address; every other
+// argument is left byte-for-byte unchanged.
+const EXTERNAL_UPGRADE_INTERFACE = new Interface([
+  'function upgradeToAndCall(address newImplementation, bytes data)',
+  'function upgradeAndCall(address proxy, address implementation, bytes data)',
+  'function upgradeTo(address newImplementation)',
+]);
+const EXTERNAL_UPGRADE_DESCRIPTORS = new Map<string, { kind: string; implementationIndex: number; proxyIndex?: number }>([
+  ['upgradeToAndCall', { kind: 'uups', implementationIndex: 0 }],
+  ['upgradeAndCall', { kind: 'proxy-admin', implementationIndex: 1, proxyIndex: 0 }],
+  ['upgradeTo', { kind: 'beacon', implementationIndex: 0 }],
+]);
 const FORWARDED_METHODS = new Set([
   'eth_blockNumber',
   'eth_getBlockTransactionCountByHash',
@@ -652,6 +667,70 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   const resolveCallContext = options.resolveCallContext ?? defaultResolveCallContext;
   const rewriteDependencies = { addressMap, resolveArtifact, resolveBeaconImplementation };
 
+  // Verify, against live on-chain state, that an externally-deployed target actually has the topology
+  // the recognized upgrade selector implies. Any mismatch or read failure returns false, so the caller
+  // declines the rewrite and falls back to the existing fail-closed opaque rejection.
+  async function verifyExternalUpgradeTopology(descriptor: JsonAny, target: JsonAny, values: JsonAny[]): Promise<boolean> {
+    if (descriptor.kind === 'uups') {
+      return (await readStorageAddress(target, IMPLEMENTATION_SLOT)) !== ZERO_ADDRESS;
+    }
+    if (descriptor.kind === 'beacon') {
+      return (await resolveBeaconImplementation(target)) !== ZERO_ADDRESS;
+    }
+    // proxy-admin: the target must be the TRC-1967 admin recorded in the proxy argument's admin slot.
+    const admin = await readStorageAddress(values[descriptor.proxyIndex], ADMIN_SLOT);
+    return admin === normalizeEvmAddress(mappedAddress(target));
+  }
+
+  // Recognize an upgrade call to an externally-deployed proxy, ProxyAdmin, or beacon (a target with no
+  // gateway metadata) that embeds a gateway predicted implementation address. On a verified match this
+  // returns the calldata with only the implementation argument rewritten predicted -> actual; every
+  // other byte is preserved. It returns undefined for any non-matching shape, unknown implementation,
+  // intact-provenance failure, or topology mismatch, so the caller's opaque safety check produces the
+  // existing fail-closed rejection unchanged.
+  async function recognizeExternalUpgrade(target: JsonAny, data: JsonAny): Promise<string | undefined> {
+    if (typeof data !== 'string' || data.length < 10) return undefined;
+    let fragment;
+    let values: JsonAny[];
+    try {
+      fragment = EXTERNAL_UPGRADE_INTERFACE.getFunction(data.slice(0, 10));
+      if (fragment === null) return undefined;
+      const decoded = EXTERNAL_UPGRADE_INTERFACE.decodeFunctionData(fragment, data);
+      if (EXTERNAL_UPGRADE_INTERFACE.encodeFunctionData(fragment, decoded).toLowerCase() !== data.toLowerCase()) {
+        return undefined;
+      }
+      values = decoded.toArray();
+    } catch {
+      return undefined;
+    }
+    const descriptor = EXTERNAL_UPGRADE_DESCRIPTORS.get(fragment.name);
+    if (descriptor === undefined) return undefined;
+    // Only a gateway predicted implementation with a confirmed actual mapping is a rewrite candidate;
+    // anything else defers to opaque handling without probing the target.
+    const actualImplementation = addressMap.toActual(normalizeEvmAddress(values[descriptor.implementationIndex]));
+    if (actualImplementation === undefined) return undefined;
+    try {
+      // The implementation's provenance must be intact, resolved through the same verified-artifact
+      // machinery used for metadata-bearing targets, and the target's live topology must match.
+      if ((await resolveArtifact(actualImplementation)) === undefined) return undefined;
+      if (!(await verifyExternalUpgradeTopology(descriptor, target, values))) return undefined;
+    } catch {
+      return undefined;
+    }
+    values[descriptor.implementationIndex] = actualImplementation;
+    return EXTERNAL_UPGRADE_INTERFACE.encodeFunctionData(fragment, values);
+  }
+
+  // The opaque-path calldata gate: recognize an external upgrade and rewrite only its implementation
+  // argument, otherwise leave the bytes untouched. The final safety scan runs on the resulting bytes,
+  // so a rewritten implementation passes while any other embedded predicted address still fails closed.
+  async function opaqueCallData(target: JsonAny, data: JsonAny): Promise<JsonAny> {
+    const upgraded = await recognizeExternalUpgrade(target, data);
+    const finalData = upgraded ?? data;
+    await opaqueSafety(finalData, rewriteDependencies);
+    return finalData;
+  }
+
   async function rewriteReadTransaction(transaction: JsonAny, deploymentEstimate = false): Promise<JsonAny> {
     if (!isObject(transaction)) throw new RpcError(-32602, 'Invalid transaction call object');
     if (own(transaction, 'data') && own(transaction, 'input') && transaction.data !== transaction.input) {
@@ -673,8 +752,8 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     const context = await resolveCallContext(target);
     let rewritten;
     if (context === undefined) {
-      await opaqueSafety(data, rewriteDependencies);
-      rewritten = { ...transaction, to: mappedAddress(target), [dataKey]: data };
+      const finalData = await opaqueCallData(target, data);
+      rewritten = { ...transaction, to: mappedAddress(target), [dataKey]: finalData };
     } else {
       const call = await rewriteContractCall({ ...transaction, to: target, data }, context, rewriteDependencies);
       rewritten = { ...transaction, ...call, [dataKey]: call.data };
@@ -744,8 +823,8 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         const context = await resolveCallContext(decoded.to);
         let rewritten;
         if (context === undefined) {
-          await opaqueSafety(decoded.data, rewriteDependencies);
-          rewritten = { ...decoded, to: mappedAddress(decoded.to) };
+          const finalData = await opaqueCallData(decoded.to, decoded.data);
+          rewritten = { ...decoded, to: mappedAddress(decoded.to), data: finalData };
         } else {
           rewritten = await rewriteContractCall(decoded, context, rewriteDependencies);
         }

@@ -1570,6 +1570,286 @@ for (const kind of ['transparent-proxy', 'beacon-proxy'] as const) {
   });
 }
 
+const ADMIN_STORAGE_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
+const UUPS_UPGRADE_ABI = ['function upgradeToAndCall(address newImplementation, bytes data)'];
+const PROXY_ADMIN_UPGRADE_ABI = ['function upgradeAndCall(address proxy, address implementation, bytes data)'];
+const BEACON_UPGRADE_ABI = ['function upgradeTo(address newImplementation)'];
+
+// Register a gateway-deployed implementation with a confirmed predicted->actual mapping and an
+// immutable artifact snapshot, so its provenance resolves as intact through the normal machinery.
+async function seedGatewayImplementation(
+  result: JsonAny,
+  { predicted, actual, provenance, nonce, abi }: JsonAny,
+) {
+  const source = await seedConfirmedDeployment(result, {
+    identity: ARTIFACT_IDENTITY,
+    provenanceHash: provenance,
+    predicted,
+    actual,
+    nonce,
+  });
+  result.addressMap.set({ predicted, actual, creator: WALLET.address, sender: WALLET.address, sourceTransaction: source });
+  result.addressMap.setArtifactSnapshot({
+    provenanceHash: provenance,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'contract',
+    abi,
+    creationBytecodeHash: keccak256('0x6000'),
+    runtimeBytecodeHash: keccak256('0x6001'),
+  });
+  return source;
+}
+
+// A UUPS upgradeToAndCall against an externally-deployed proxy (no gateway metadata) that embeds a
+// gateway predicted implementation is rewritten to the actual implementation once the proxy's live
+// TRC-1967 implementation slot proves the topology.
+test('rewrites an external UUPS upgradeToAndCall implementation argument to its actual address', async (t: TestContext) => {
+  const proxyExternal = `0x${'c1'.repeat(20)}`;
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getStorageAt' && params[0] === proxyExternal && params[1] === UUPS_IMPLEMENTATION_SLOT) {
+          return slotWord(`0x${'e1'.repeat(20)}`);
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  await seedGatewayImplementation(result, {
+    predicted: implPredicted,
+    actual: implActual,
+    provenance: `0x${'aa'.repeat(32)}`,
+    nonce: 21,
+    abi: ['function value() view returns (uint256)'],
+  });
+  const upgradeData = new Interface(UUPS_UPGRADE_ABI).encodeFunctionData('upgradeToAndCall', [implPredicted, '0x']);
+  const raw = await signedTransaction({ to: proxyExternal, nonce: 22, data: upgradeData });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  const built = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  assert.equal(built.value.contractAddress, proxyExternal);
+  assert.equal(
+    built.value.data,
+    new Interface(UUPS_UPGRADE_ABI).encodeFunctionData('upgradeToAndCall', [implActual, '0x']),
+  );
+});
+
+// A ProxyAdmin upgradeAndCall against an externally-deployed ProxyAdmin is rewritten once the proxy
+// argument's live TRC-1967 admin slot proves the target is that proxy's admin.
+test('rewrites an external ProxyAdmin upgradeAndCall implementation argument to its actual address', async (t: TestContext) => {
+  const adminExternal = `0x${'c1'.repeat(20)}`;
+  const proxyExternal = `0x${'c2'.repeat(20)}`;
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getStorageAt' && params[0] === proxyExternal && params[1] === ADMIN_STORAGE_SLOT) {
+          return slotWord(adminExternal);
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  await seedGatewayImplementation(result, {
+    predicted: implPredicted,
+    actual: implActual,
+    provenance: `0x${'aa'.repeat(32)}`,
+    nonce: 21,
+    abi: ['function value() view returns (uint256)'],
+  });
+  const upgradeData = new Interface(PROXY_ADMIN_UPGRADE_ABI).encodeFunctionData('upgradeAndCall', [
+    proxyExternal,
+    implPredicted,
+    '0x',
+  ]);
+  const raw = await signedTransaction({ to: adminExternal, nonce: 22, data: upgradeData });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  const built = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  assert.equal(built.value.contractAddress, adminExternal);
+  assert.equal(
+    built.value.data,
+    new Interface(PROXY_ADMIN_UPGRADE_ABI).encodeFunctionData('upgradeAndCall', [proxyExternal, implActual, '0x']),
+  );
+});
+
+// A beacon upgradeTo against an externally-deployed UpgradeableBeacon is rewritten once the beacon's
+// live implementation() view proves the topology.
+test('rewrites an external beacon upgradeTo implementation argument to its actual address', async (t: TestContext) => {
+  const beaconExternal = `0x${'c1'.repeat(20)}`;
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_call' && params[0]?.to === beaconExternal && params[0]?.data === BEACON_IMPLEMENTATION_SELECTOR) {
+          return slotWord(`0x${'e1'.repeat(20)}`);
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  await seedGatewayImplementation(result, {
+    predicted: implPredicted,
+    actual: implActual,
+    provenance: `0x${'aa'.repeat(32)}`,
+    nonce: 21,
+    abi: ['function value() view returns (uint256)'],
+  });
+  const upgradeData = new Interface(BEACON_UPGRADE_ABI).encodeFunctionData('upgradeTo', [implPredicted]);
+  const raw = await signedTransaction({ to: beaconExternal, nonce: 22, data: upgradeData });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  const built = result.calls.find((call: JsonAny) => call.type === 'buildCall');
+  assert.equal(built.value.contractAddress, beaconExternal);
+  assert.equal(built.value.data, new Interface(BEACON_UPGRADE_ABI).encodeFunctionData('upgradeTo', [implActual]));
+});
+
+// Adversarial: the recognized selector plus a known predicted implementation, but the target's live
+// topology does not match (no implementation slot) — the existing fail-closed rejection is unchanged.
+test('rejects an external UUPS upgrade whose target has no implementation slot', async (t: TestContext) => {
+  const proxyExternal = `0x${'c1'.repeat(20)}`;
+  const implPredicted = `0x${'22'.repeat(20)}`;
+  const implActual = `0x${'b2'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getStorageAt' && params[1] === UUPS_IMPLEMENTATION_SLOT) return `0x${'00'.repeat(32)}`;
+        return `${method}:result`;
+      },
+    },
+  });
+  await seedGatewayImplementation(result, {
+    predicted: implPredicted,
+    actual: implActual,
+    provenance: `0x${'aa'.repeat(32)}`,
+    nonce: 21,
+    abi: ['function value() view returns (uint256)'],
+  });
+  const upgradeData = new Interface(UUPS_UPGRADE_ABI).encodeFunctionData('upgradeToAndCall', [implPredicted, '0x']);
+  const raw = await signedTransaction({ to: proxyExternal, nonce: 22, data: upgradeData });
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.data.code, 'OPAQUE_PREDICTED_ADDRESS');
+  assert.equal(
+    result.calls.some((call: JsonAny) => call.type === 'buildCall' || call.type === 'broadcast'),
+    false,
+  );
+});
+
+// Adversarial: the recognized selector but the embedded implementation is not a known predicted
+// deployment, while a known predicted address rides along in the payload — rejected exactly as today,
+// without ever probing the target's topology.
+test('rejects an external upgrade selector whose embedded implementation is unknown', async (t: TestContext) => {
+  const proxyExternal = `0x${'c1'.repeat(20)}`;
+  const unknownImplementation = `0x${'d4'.repeat(20)}`;
+  const upstreamCalls: JsonAny[] = [];
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        upstreamCalls.push({ method, params });
+        return `${method}:result`;
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const upgradeData = new Interface(UUPS_UPGRADE_ABI).encodeFunctionData('upgradeToAndCall', [
+    unknownImplementation,
+    `0x${'00'.repeat(12)}${TARGET.slice(2)}`,
+  ]);
+  const raw = await signedTransaction({ to: proxyExternal, nonce: 22, data: upgradeData });
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.data.code, 'OPAQUE_PREDICTED_ADDRESS');
+  assert.equal(
+    upstreamCalls.some((call: JsonAny) => call.method === 'eth_getStorageAt' || call.method === 'eth_call'),
+    false,
+  );
+});
+
+// Adversarial: a non-recognized selector that embeds a known predicted address is rejected as today,
+// untouched by the recognized-upgrade path.
+test('rejects a non-matching selector that embeds a known predicted address as before', async (t: TestContext) => {
+  const targetExternal = `0x${'c1'.repeat(20)}`;
+  const upstreamCalls: JsonAny[] = [];
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        upstreamCalls.push({ method, params });
+        return `${method}:result`;
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const data = `0x12345678${'00'.repeat(12)}${TARGET.slice(2)}`;
+  const raw = await signedTransaction({ to: targetExternal, nonce: 22, data });
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.data.code, 'OPAQUE_PREDICTED_ADDRESS');
+  assert.equal(
+    upstreamCalls.some((call: JsonAny) => call.method === 'eth_getStorageAt' || call.method === 'eth_call'),
+    false,
+  );
+});
+
+// Adversarial: a verified recognized upgrade whose implementation argument is rewritten still fails
+// closed when a second predicted address rides in the init payload — the narrow rewrite never blesses
+// any other embedded predicted address.
+test('rejects a recognized external upgrade that smuggles a second predicted address in its payload', async (t: TestContext) => {
+  const proxyExternal = `0x${'c1'.repeat(20)}`;
+  const implPredicted = `0x${'33'.repeat(20)}`;
+  const implActual = `0x${'b3'.repeat(20)}`;
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getStorageAt' && params[1] === UUPS_IMPLEMENTATION_SLOT) return slotWord(`0x${'e1'.repeat(20)}`);
+        return `${method}:result`;
+      },
+    },
+  });
+  await seedGatewayImplementation(result, {
+    predicted: implPredicted,
+    actual: implActual,
+    provenance: `0x${'aa'.repeat(32)}`,
+    nonce: 21,
+    abi: ['function value() view returns (uint256)'],
+  });
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const upgradeData = new Interface(UUPS_UPGRADE_ABI).encodeFunctionData('upgradeToAndCall', [
+    implPredicted,
+    `0x${'00'.repeat(12)}${TARGET.slice(2)}`,
+  ]);
+  const raw = await signedTransaction({ to: proxyExternal, nonce: 22, data: upgradeData });
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error.data.code, 'OPAQUE_PREDICTED_ADDRESS');
+  assert.equal(
+    result.calls.some((call: JsonAny) => call.type === 'buildCall' || call.type === 'broadcast'),
+    false,
+  );
+});
+
 test('propagates branded upstream JSON-RPC errors without rewriting their code or data', async (t: TestContext) => {
   const error = new UpstreamRpcError(-32042, 'upstream reverted', { reason: 'boom' }, true);
   const { handlers } = fixture(t, {
