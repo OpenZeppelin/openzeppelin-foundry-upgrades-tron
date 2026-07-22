@@ -31,6 +31,7 @@ const provenanceTypes = [
   'string',
   'string',
   'string',
+  'string',
   'string[]',
   'bytes32[]',
 ];
@@ -121,6 +122,39 @@ function validateLinkReferences(bytecode, artifactReferences, buildReferences) {
 function normalizeBytecode(value) {
   if (typeof value !== 'string') throw new Error('Missing creation bytecode');
   return value.startsWith('0x') || value.startsWith('0X') ? value.slice(2) : value;
+}
+
+// A canonical binding string for the deployed runtime template: the normalized bytecode object joined
+// with a sorted, flattened list of its immutableReferences byte ranges. Both participate in the
+// provenance hash so any tamper of the runtime object OR its immutable offset map changes provenance.
+// Returns '' when the artifact declares no deployed bytecode object (an abstract contract/interface),
+// keeping a fixture with no deployedBytecode unaffected. A non-string reference map or malformed group
+// yields an explicit 'invalid' marker so it can never collide with a well-formed offset list.
+function deployedBytecodeBinding(deployedBytecode) {
+  const object = typeof deployedBytecode === 'string' ? deployedBytecode : deployedBytecode?.object;
+  if (typeof object !== 'string') return '';
+  const normalized = normalizeBytecode(object);
+  const references =
+    deployedBytecode !== null && typeof deployedBytecode === 'object' ? deployedBytecode.immutableReferences : undefined;
+  if (references === undefined || references === null) return `${normalized}|`;
+  if (typeof references !== 'object') return `${normalized}|invalid`;
+  const pairs = [];
+  for (const group of Object.values(references)) {
+    if (!Array.isArray(group)) return `${normalized}|invalid`;
+    for (const entry of group) {
+      const start = entry?.start;
+      const length = entry?.length;
+      // Reject exactly what immutableRanges rejects, so a malformed entry (e.g. a string-typed offset
+      // that formats to the same text as its integer form) can never share a binding with the
+      // well-formed offset the range parser would accept.
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length <= 0) {
+        return `${normalized}|invalid`;
+      }
+      pairs.push(`${start}:${length}`);
+    }
+  }
+  pairs.sort();
+  return `${normalized}|${pairs.join(',')}`;
 }
 
 function semanticVersion(version) {
@@ -328,6 +362,16 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
   );
   if (requiresLinking === null) return response(CODE.invalidLinkReferences, ZERO_HASH, fullyQualifiedName);
 
+  // The deployed runtime template is bound into provenance alongside creation bytecode. The immutable
+  // projection derives its role descriptors and the zero-immutable raw-serve gate's template hash from
+  // deployedBytecode, so provenance that bound only creation bytecode would let a swapped runtime
+  // template (references stripped, live addresses embedded) re-verify unchanged. Both the runtime
+  // bytecode object AND its immutableReferences offset map are bound: stripping the map alone
+  // suppresses role/__self descriptor derivation without touching the object, so the map must
+  // participate too. An artifact that declares no deployed bytecode (an abstract contract or interface)
+  // binds the empty string, so a fixture with no deployedBytecode is unaffected.
+  const artifactDeployedBytecode = deployedBytecodeBinding(artifact.deployedBytecode);
+
   const metadataSources = artifact.metadata?.sources;
   if (metadataSources === null || typeof metadataSources !== 'object') {
     return response(CODE.toolFailure, ZERO_HASH, 'Artifact metadata sources are missing');
@@ -355,6 +399,7 @@ function verify([outputDirectoryArg, artifactPathArg, contractPath, contractName
       solcLongVersion,
       `${contractPath}:${contractName}`,
       artifactBytecode,
+      artifactDeployedBytecode,
       sourceNames,
       sourceHashes,
     ]),

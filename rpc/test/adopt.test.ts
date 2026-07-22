@@ -25,6 +25,9 @@ const ACTUAL = `0x${'b2'.repeat(20)}`;
 const IMPL = `0x${'c3'.repeat(20)}`;
 const ADMIN = `0x${'d4'.repeat(20)}`;
 const BEACON = `0x${'e5'.repeat(20)}`;
+// The controller a proxy's admin/beacon answers with: a ProxyAdmin.owner() (transparent, --owner) and
+// an UpgradeableBeacon.implementation() (beacon, --impl). Matches the default nodeStub eth_call return.
+const CONTROLLER = `0x${'0c'.repeat(20)}`;
 const RUNTIME_HEX = '0x60806040527f00';
 const CREATION_HEX = '0x60806040523415';
 const ABI: JsonAny[] = [
@@ -85,6 +88,15 @@ function nodeStub(overrides: JsonAny = {}): JsonAny {
       if (method === 'eth_chainId') return `0x${CHAIN_ID.toString(16)}`;
       if (method === 'eth_getCode') return overrides.code ?? RUNTIME_HEX;
       if (method === 'eth_getStorageAt') return slots[params[1]] ?? `0x${'00'.repeat(32)}`;
+      // The H1 liveness cross-check: a ProxyAdmin.owner()/UpgradeableBeacon.implementation() call. By
+      // default answer with a valid 32-byte address word so the live controller reads as responsive;
+      // `overrides.call` (a value, a throwing thunk, or a per-target map) drives the fail-closed paths.
+      if (method === 'eth_call') {
+        const call = overrides.call;
+        if (typeof call === 'function') return call(params);
+        if (call !== undefined) return call;
+        return slotWord(`0x${'0c'.repeat(20)}`);
+      }
       throw new Error(`unexpected upstream method ${method}`);
     },
   };
@@ -138,6 +150,28 @@ function freshMap(stateFile: string): AddressMap {
   return new AddressMap(new JsonStore(stateFile, { createIfMissing: false }), CHAIN);
 }
 
+// A proxy delegates upgrade authority to a controller whose runtime code eth_getCode must project, so a
+// transparent/beacon proxy can only be adopted after its ProxyAdmin/UpgradeableBeacon is. These helpers
+// adopt that controller first (a distinct predicted/actual, a distinct provenance hash so its artifact
+// snapshot does not collide with the proxy's), matching the deploy-path controller-first invariant.
+const ADMIN_PREDICTED = `0x${'a9'.repeat(20)}`;
+const BEACON_PREDICTED = `0x${'b9'.repeat(20)}`;
+const CONTROLLER_PROVENANCE = `0x${'66'.repeat(32)}`;
+
+async function adoptProxyAdmin(context: JsonAny): Promise<number> {
+  return run(
+    adoptArgs({ '--predicted': ADMIN_PREDICTED, '--actual': ADMIN, '--kind': 'proxy-admin', '--owner': CONTROLLER }),
+    adoptOptions(context, { verification: { provenanceHash: CONTROLLER_PROVENANCE } }),
+  );
+}
+
+async function adoptBeaconController(context: JsonAny): Promise<number> {
+  return run(
+    adoptArgs({ '--predicted': BEACON_PREDICTED, '--actual': BEACON, '--kind': 'upgradeable-beacon', '--impl': CONTROLLER }),
+    adoptOptions(context, { verification: { provenanceHash: CONTROLLER_PROVENANCE } }),
+  );
+}
+
 test('adopts a verified bare implementation deployment into gateway state', async t => {
   const context = fixture(t);
   const stdout = output();
@@ -162,14 +196,28 @@ test('adopts a verified bare implementation deployment into gateway state', asyn
 });
 
 test('adopts each proxy kind only when its TRC-1967 slot matches the declared address', async t => {
-  const cases: Array<[string, string, string]> = [
-    ['uups-proxy', '--impl', IMPL],
-    ['transparent-proxy', '--admin', ADMIN],
-    ['beacon-proxy', '--beacon', BEACON],
+  // Each proxy kind's required flags: uups needs its impl slot; a transparent proxy needs its admin
+  // slot plus the ProxyAdmin owner it answers with (--owner); a beacon proxy needs its beacon slot plus
+  // the implementation the beacon answers with (--impl).
+  const cases: Array<[string, Record<string, string>]> = [
+    ['uups-proxy', { '--impl': IMPL }],
+    ['transparent-proxy', { '--admin': ADMIN, '--owner': CONTROLLER }],
+    ['beacon-proxy', { '--beacon': BEACON, '--impl': CONTROLLER }],
   ];
-  for (const [kind, flag, value] of cases) {
+  for (const [kind, flags] of cases) {
     const context = fixture(t);
-    const exitCode = await run(adoptArgs({ '--kind': kind, [flag]: value }), adoptOptions(context));
+    // A transparent/beacon proxy requires its controller adopted first, and a canonical proxy artifact
+    // always embeds that controller as a runtime immutable — model both so adoption can bind it.
+    if (kind === 'transparent-proxy') assert.equal(await adoptProxyAdmin(context), 0, `${kind} controller`);
+    if (kind === 'beacon-proxy') assert.equal(await adoptBeaconController(context), 0, `${kind} controller`);
+    const options =
+      kind === 'uups-proxy'
+        ? adoptOptions(context)
+        : adoptOptions(context, {
+            node: { code: proxyOnchainCode(kind === 'transparent-proxy' ? ADMIN : BEACON) },
+            verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+          });
+    const exitCode = await run(adoptArgs({ '--kind': kind, ...flags }), options);
     assert.equal(exitCode, 0, kind);
     const metadata = freshMap(context.stateFile).resolveContractMetadata(PREDICTED);
     assert.equal(metadata?.contractKind, kind, kind);
@@ -181,12 +229,17 @@ test('adopts each proxy kind only when its TRC-1967 slot matches the declared ad
 // carries the admin in that word's low 20 bytes. An exact hash comparison could never match them.
 const PROXY_IMMUTABLE_REFERENCES = { '77': [{ start: 2, length: 32 }] };
 const PROXY_TEMPLATE = `0x6080${'00'.repeat(32)}6000`;
-const PROXY_ONCHAIN = `0x6080${'00'.repeat(12)}${'d4'.repeat(20)}6000`;
+// The live runtime code with a controller address baked into the immutable word's low 20 bytes.
+function proxyOnchainCode(controller: string): string {
+  return `0x6080${'00'.repeat(12)}${controller.slice(2)}6000`;
+}
+const PROXY_ONCHAIN = proxyOnchainCode(ADMIN);
 
 test('adopts a proxy whose constructor-set immutable admin is baked into the runtime code', async t => {
   const context = fixture(t);
+  assert.equal(await adoptProxyAdmin(context), 0);
   const exitCode = await run(
-    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN }),
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
     adoptOptions(context, {
       node: { code: PROXY_ONCHAIN },
       verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
@@ -204,7 +257,7 @@ test('refuses adoption when the on-chain immutable admin does not match --admin'
   // Point the admin slot at the mismatched flag so the slot check would pass; the on-chain immutable
   // (ADMIN) still disagrees with --admin, isolating the immutable-value verification.
   const exitCode = await run(
-    adoptArgs({ '--kind': 'transparent-proxy', '--admin': wrongAdmin }),
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': wrongAdmin, '--owner': CONTROLLER }),
     adoptOptions(context, {
       stderr: stderr.stream,
       node: { code: PROXY_ONCHAIN, slots: { [ADMIN_SLOT]: slotWord(wrongAdmin) } },
@@ -214,6 +267,278 @@ test('refuses adoption when the on-chain immutable admin does not match --admin'
   assert.equal(exitCode, 1);
   assert.match(stderr.read(), /immutable/i);
   assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+// H1: a transparent proxy's ProxyAdmin must answer owner() with the operator-declared --owner, and a
+// beacon proxy's UpgradeableBeacon must answer implementation() with the operator-declared --impl. A
+// reverting/empty controller, a value mismatch, or a missing flag is refused.
+test('refuses a transparent-proxy adoption when the ProxyAdmin owner() call reverts', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+    adoptOptions(context, {
+      stderr: stderr.stream,
+      node: {
+        call: () => {
+          throw new Error('execution reverted');
+        },
+      },
+    }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /controller/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+test('refuses a beacon-proxy adoption when the beacon implementation() returns no data', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON, '--impl': CONTROLLER }),
+    adoptOptions(context, { stderr: stderr.stream, node: { call: '0x' } }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /controller/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+// H1 value check: the transparent-proxy ProxyAdmin owner() must EQUAL --owner (compared in actual
+// space). A correct value adopts; a wrong value or a missing --owner is refused.
+test('refuses a proxy-kind adoption whose artifact declares no controller immutable', async t => {
+  // An artifact with no immutableReferences cannot yield the admin/beacon role descriptor, so a later
+  // eth_getCode read would fail closed forever while adopt reported success. Refuse the adoption
+  // instead — before any state is written.
+  const transparent = fixture(t);
+  assert.equal(await adoptProxyAdmin(transparent), 0);
+  const transparentErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+      // The default verification carries no immutableReferences: the degenerate proxy artifact.
+      adoptOptions(transparent, { stderr: transparentErr.stream, node: { call: slotWord(CONTROLLER) } }),
+    ),
+    1,
+  );
+  assert.match(transparentErr.read(), /declares no admin address immutable.*not adoptable/i);
+  assert.equal(freshMap(transparent.stateFile).resolvePredicted(PREDICTED), undefined);
+
+  const beacon = fixture(t);
+  assert.equal(await adoptBeaconController(beacon), 0);
+  const beaconErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON, '--impl': CONTROLLER }),
+      adoptOptions(beacon, { stderr: beaconErr.stream, node: { call: slotWord(CONTROLLER) } }),
+    ),
+    1,
+  );
+  assert.match(beaconErr.read(), /declares no beacon address immutable.*not adoptable/i);
+  assert.equal(freshMap(beacon.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+test('adopts a transparent proxy only when ProxyAdmin owner() equals --owner', async t => {
+  const ok = fixture(t);
+  assert.equal(await adoptProxyAdmin(ok), 0);
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+      adoptOptions(ok, {
+        node: { call: slotWord(CONTROLLER), code: PROXY_ONCHAIN },
+        verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+      }),
+    ),
+    0,
+  );
+  assert.equal(freshMap(ok.stateFile).resolveContractMetadata(PREDICTED)?.contractKind, 'transparent-proxy');
+
+  const wrong = fixture(t);
+  const wrongErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+      adoptOptions(wrong, { stderr: wrongErr.stream, node: { call: slotWord(`0x${'19'.repeat(20)}`) } }),
+    ),
+    1,
+  );
+  assert.match(wrongErr.read(), /owner\(\) does not match --owner/i);
+  assert.equal(freshMap(wrong.stateFile).resolvePredicted(PREDICTED), undefined);
+
+  const missing = fixture(t);
+  const missingErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN }),
+      adoptOptions(missing, { stderr: missingErr.stream }),
+    ),
+    1,
+  );
+  assert.match(missingErr.read(), /requires --owner/i);
+  assert.equal(freshMap(missing.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+// H1 value check: the beacon-proxy UpgradeableBeacon implementation() must EQUAL --impl. A correct
+// value adopts; a wrong value or a missing --impl is refused.
+test('adopts a beacon proxy only when the beacon implementation() equals --impl', async t => {
+  const ok = fixture(t);
+  assert.equal(await adoptBeaconController(ok), 0);
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON, '--impl': CONTROLLER }),
+      adoptOptions(ok, {
+        node: { call: slotWord(CONTROLLER), code: proxyOnchainCode(BEACON) },
+        verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+      }),
+    ),
+    0,
+  );
+  assert.equal(freshMap(ok.stateFile).resolveContractMetadata(PREDICTED)?.contractKind, 'beacon-proxy');
+
+  const wrong = fixture(t);
+  const wrongErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON, '--impl': CONTROLLER }),
+      adoptOptions(wrong, { stderr: wrongErr.stream, node: { call: slotWord(`0x${'19'.repeat(20)}`) } }),
+    ),
+    1,
+  );
+  assert.match(wrongErr.read(), /implementation\(\) does not match --impl/i);
+  assert.equal(freshMap(wrong.stateFile).resolvePredicted(PREDICTED), undefined);
+
+  const missing = fixture(t);
+  const missingErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON }),
+      adoptOptions(missing, { stderr: missingErr.stream }),
+    ),
+    1,
+  );
+  assert.match(missingErr.read(), /requires --impl/i);
+  assert.equal(freshMap(missing.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+// A UUPS proxy's implementation slot points at the logic contract itself, which exposes no controller
+// selector, so adoption performs no controller call — a throwing eth_call stub is never reached.
+test('adopts a uups-proxy without a controller call', async t => {
+  const context = fixture(t);
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'uups-proxy', '--impl': IMPL }),
+    adoptOptions(context, {
+      node: {
+        call: () => {
+          throw new Error('no controller call expected for uups-proxy');
+        },
+      },
+    }),
+  );
+  assert.equal(exitCode, 0);
+  assert.equal(freshMap(context.stateFile).resolveContractMetadata(PREDICTED)?.contractKind, 'uups-proxy');
+});
+
+// (c) A proxy delegates upgrade authority to a controller whose runtime code eth_getCode must project;
+// that projection needs the controller mapped. Adopting a transparent/beacon proxy before its
+// controller fails closed with a naming error, before any state is written.
+test('refuses a transparent proxy adoption whose ProxyAdmin is not adopted first', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+    adoptOptions(context, { stderr: stderr.stream }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /Adopt the ProxyAdmin at .* before adopting this transparent proxy/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+test('refuses a beacon proxy adoption whose UpgradeableBeacon is not adopted first', async t => {
+  const context = fixture(t);
+  const stderr = output();
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'beacon-proxy', '--beacon': BEACON, '--impl': CONTROLLER }),
+    adoptOptions(context, { stderr: stderr.stream }),
+  );
+  assert.equal(exitCode, 1);
+  assert.match(stderr.read(), /Adopt the UpgradeableBeacon at .* before adopting this beacon proxy/i);
+  assert.equal(freshMap(context.stateFile).resolvePredicted(PREDICTED), undefined);
+});
+
+// (c) Standalone controller adoptions cross-check their control value: a ProxyAdmin's owner() must
+// equal --owner, an UpgradeableBeacon's implementation() must equal --impl. A wrong or missing value is
+// refused; the correct value adopts (and needs no controller-first, being a controller itself).
+test('adopts a standalone proxy-admin only when owner() equals --owner', async t => {
+  const ok = fixture(t);
+  assert.equal(await run(adoptArgs({ '--kind': 'proxy-admin', '--owner': CONTROLLER }), adoptOptions(ok)), 0);
+  assert.equal(freshMap(ok.stateFile).resolveContractMetadata(PREDICTED)?.contractKind, 'proxy-admin');
+
+  const wrong = fixture(t);
+  const wrongErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'proxy-admin', '--owner': `0x${'19'.repeat(20)}` }),
+      adoptOptions(wrong, { stderr: wrongErr.stream, node: { call: slotWord(CONTROLLER) } }),
+    ),
+    1,
+  );
+  assert.match(wrongErr.read(), /owner\(\) does not match --owner/i);
+  assert.equal(freshMap(wrong.stateFile).resolvePredicted(PREDICTED), undefined);
+
+  const missing = fixture(t);
+  const missingErr = output();
+  assert.equal(await run(adoptArgs({ '--kind': 'proxy-admin' }), adoptOptions(missing, { stderr: missingErr.stream })), 1);
+  assert.match(missingErr.read(), /requires --owner/i);
+});
+
+test('adopts a standalone upgradeable-beacon only when implementation() equals --impl', async t => {
+  const ok = fixture(t);
+  assert.equal(await run(adoptArgs({ '--kind': 'upgradeable-beacon', '--impl': CONTROLLER }), adoptOptions(ok)), 0);
+  assert.equal(freshMap(ok.stateFile).resolveContractMetadata(PREDICTED)?.contractKind, 'upgradeable-beacon');
+
+  const wrong = fixture(t);
+  const wrongErr = output();
+  assert.equal(
+    await run(
+      adoptArgs({ '--kind': 'upgradeable-beacon', '--impl': `0x${'19'.repeat(20)}` }),
+      adoptOptions(wrong, { stderr: wrongErr.stream, node: { call: slotWord(CONTROLLER) } }),
+    ),
+    1,
+  );
+  assert.match(wrongErr.read(), /implementation\(\) does not match --impl/i);
+  assert.equal(freshMap(wrong.stateFile).resolvePredicted(PREDICTED), undefined);
+
+  const missing = fixture(t);
+  const missingErr = output();
+  assert.equal(
+    await run(adoptArgs({ '--kind': 'upgradeable-beacon' }), adoptOptions(missing, { stderr: missingErr.stream })),
+    1,
+  );
+  assert.match(missingErr.read(), /requires --impl/i);
+});
+
+// The adopted proxy persists the artifact-scoped offsets on its snapshot and the per-deployment role
+// descriptor in the deployment-descriptor index, so a later eth_getCode read can project its
+// constructor-set admin into the predicted world. The admin descriptor's committed value is the admin
+// embedded in the live runtime code (ADMIN, baked into PROXY_ONCHAIN).
+test('persists immutable references and a complete deployment descriptor for an adopted proxy', async t => {
+  const context = fixture(t);
+  assert.equal(await adoptProxyAdmin(context), 0);
+  const exitCode = await run(
+    adoptArgs({ '--kind': 'transparent-proxy', '--admin': ADMIN, '--owner': CONTROLLER }),
+    adoptOptions(context, {
+      node: { code: PROXY_ONCHAIN },
+      verification: { deployedBytecode: PROXY_TEMPLATE, immutableReferences: PROXY_IMMUTABLE_REFERENCES },
+    }),
+  );
+  assert.equal(exitCode, 0);
+  const map = freshMap(context.stateFile);
+  const snapshot = map.resolveArtifactSnapshot(`0x${'77'.repeat(32)}`);
+  assert.deepEqual(snapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+  assert.deepEqual(map.resolveDeploymentDescriptor(PREDICTED), {
+    predicted: PREDICTED,
+    status: 'complete',
+    descriptors: [{ role: 'admin', start: 2, length: 32, expectedActual: ADMIN }],
+  });
 });
 
 test('refuses adoption when on-chain runtime code does not match the artifact', async t => {

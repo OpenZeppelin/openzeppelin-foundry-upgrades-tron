@@ -122,6 +122,37 @@ test('translates a successful native deployment receipt including block, contrac
   });
 });
 
+test('reverse-maps addresses embedded in log topics and data, not just the log address', () => {
+  // An indexed address arg (e.g. Upgraded(address indexed implementation)) lands in `topics`; a
+  // non-indexed address arg (e.g. AdminChanged) lands in `data`. Both must be reverse-mapped to the
+  // predicted world, exactly like the log's own emitter address — otherwise an event consumer sees
+  // raw TRON addresses. The event-signature topic and non-address words stay byte-for-byte.
+  const info = confirmedInfo({
+    log: [
+      {
+        address: ACTUAL_CONTRACT.slice(2),
+        topics: [`0x${'dd'.repeat(32)}`, `0x${'00'.repeat(12)}${'22'.repeat(20)}`],
+        data: `0x${'00'.repeat(12)}${'22'.repeat(20)}${'0'.repeat(60)}01`,
+      },
+    ],
+    internal_transactions: [],
+  });
+
+  const receipt = translateReceipt(
+    { transaction: nativeTransaction('TriggerSmartContract'), info },
+    {
+      sourceTransactionHash: SOURCE_HASH,
+      resolveAddress(address) {
+        return address.toLowerCase() === `0x${'22'.repeat(20)}` ? PREDICTED_CONTRACT : undefined;
+      },
+    },
+  );
+
+  assert.equal(receipt.logs[0].address, PREDICTED_CONTRACT);
+  assert.deepEqual(receipt.logs[0].topics, [`0x${'dd'.repeat(32)}`, `0x${'00'.repeat(12)}${'33'.repeat(20)}`]);
+  assert.equal(receipt.logs[0].data, `0x${'00'.repeat(12)}${'33'.repeat(20)}${'0'.repeat(60)}01`);
+});
+
 test('keeps internal transaction addresses native when reconciliation supplies a distinct resolver', () => {
   const child = `41${'44'.repeat(20)}`;
   const info = confirmedInfo();

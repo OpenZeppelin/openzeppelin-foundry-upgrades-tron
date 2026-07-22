@@ -247,6 +247,10 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
       })),
     rewriteDeployment: overrides.rewriteDeployment ?? (async (match: JsonAny) => ({ ...match, initcode: '0x6000' })),
     rewriteCall: overrides.rewriteCall ?? (async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL })),
+    ...(overrides.delay === undefined ? {} : { delay: overrides.delay }),
+    ...(overrides.descriptorCaptureRetryDelayMs === undefined
+      ? {}
+      : { descriptorCaptureRetryDelayMs: overrides.descriptorCaptureRetryDelayMs }),
     ...(overrides.findArtifactPaths === undefined ? {} : { findArtifactPaths: overrides.findArtifactPaths }),
     ...(overrides.verifyArtifactProvenance === undefined
       ? {}
@@ -1081,6 +1085,590 @@ test('maps code, storage, balance, and eth_call targets while preserving safe op
   assert.deepEqual(result.calls.at(-1).params, [`0x${'00'.repeat(20)}`, 'latest']);
 });
 
+test('eth_getLogs forward-maps the filter to actual and reverse-maps returned log addresses to predicted', async (t: TestContext) => {
+  const paddedActual = `0x${'00'.repeat(12)}${'a2'.repeat(20)}`;
+  const paddedPredicted = `0x${'00'.repeat(12)}${'22'.repeat(20)}`;
+  const signature = `0x${'dd'.repeat(32)}`;
+  const captured: JsonAny[] = [];
+  const upstreamLogs = [
+    { address: TARGET_ACTUAL, topics: [signature, paddedActual], data: paddedActual, blockNumber: '0x2a', logIndex: '0x0' },
+  ];
+  const result = fixture(t, {
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        captured.push({ method, params });
+        return method === 'eth_getLogs' ? upstreamLogs : `${method}:result`;
+      },
+    },
+  });
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 'logs',
+    method: 'eth_getLogs',
+    params: [{ address: TARGET, topics: [signature, paddedPredicted], fromBlock: '0x1' }],
+  });
+
+  // Inbound: the predicted filter address and address-topic are mapped to the actual world before
+  // the node ever sees them — otherwise the node has nothing at the predicted address and matches none.
+  const forwarded = captured.find((call: JsonAny) => call.method === 'eth_getLogs');
+  assert.deepEqual(forwarded.params, [{ address: TARGET_ACTUAL, topics: [signature, paddedActual], fromBlock: '0x1' }]);
+
+  // Outbound: the returned log's emitter address, indexed address topic, and data address are all
+  // reverse-mapped back to the predicted world; the event-signature topic is left untouched.
+  assert.deepEqual(response.result, [
+    { address: TARGET, topics: [signature, paddedPredicted], data: paddedPredicted, blockNumber: '0x2a', logIndex: '0x0' },
+  ]);
+});
+
+// A predicted deployment's runtime code carries its role immutable (_admin/_beacon/__self) holding an
+// actual-world address; eth_getCode must project that word to the predicted world so code agrees with
+// the reverse-mapped storage slot. Which word to rewrite comes from the deployment's provenance-bound
+// semantic descriptors in the durable artifact snapshot — never a coincidental low-20 match.
+const IMMUTABLE_ADMIN_ACTUAL = `0x${'a4'.repeat(20)}`;
+const IMMUTABLE_ADMIN_PREDICTED = `0x${'d4'.repeat(20)}`;
+const PROXY_IDENTITY = {
+  sourceName: 'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol',
+  contractName: 'TransparentUpgradeableProxy',
+  fullyQualifiedName:
+    'openzeppelin-tron-solidity/contracts/proxy/transparent/TransparentUpgradeableProxy.sol:TransparentUpgradeableProxy',
+};
+
+function seedProxyWithImmutable(result: JsonAny, opts: JsonAny = {}) {
+  const {
+    provenanceHash = `0x${'71'.repeat(32)}`,
+    contractKind = 'transparent-proxy',
+    controllerActual = IMMUTABLE_ADMIN_ACTUAL,
+    controllerPredicted = IMMUTABLE_ADMIN_PREDICTED,
+    mapController = true,
+    // The snapshot's runtime-template hash; a zero-immutable proxy's raw-code pass-through verifies the
+    // served code against it, so those tests seed the keccak of the code the upstream stub serves.
+    runtimeBytecodeHash = `0x${'99'.repeat(32)}`,
+    // When false, the artifact snapshot (with immutable offsets) is written but NO deployment-descriptor
+    // record is seeded, modeling a legacy/pending deployment that eth_getCode enriches ephemerally.
+    descriptorRecord = true,
+  } = opts;
+  const role = contractKind === 'transparent-proxy' ? 'admin' : contractKind === 'beacon-proxy' ? 'beacon' : 'self';
+  // A 'self' descriptor commits to the deployment's OWN actual (a UUPS impl's __self); a proxy controller
+  // descriptor commits to the embedded admin/beacon actual. `descriptors` may be passed explicitly,
+  // including `null` to model a legacy deployment with neither a descriptor record nor snapshot offsets,
+  // or `[]` for a captured deployment that carries no role immutable.
+  const expectedActual = role === 'self' ? TARGET_ACTUAL : controllerActual;
+  const descriptors = 'descriptors' in opts ? opts.descriptors : [{ role, start: 2, length: 32, expectedActual }];
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  // A proxy controller (admin/beacon) is a distinct mapped deployment; a 'self' immutable projects
+  // through the deployment's own TARGET mapping set above.
+  if (mapController && role !== 'self') {
+    result.addressMap.set({
+      predicted: controllerPredicted,
+      actual: controllerActual,
+      creator: WALLET.address,
+      sender: WALLET.address,
+      sourceTransaction: `0x${'ac'.repeat(32)}`,
+    });
+  }
+  result.addressMap.setContractMetadata({
+    predicted: TARGET,
+    contractKind,
+    artifactIdentity: PROXY_IDENTITY,
+    sourceTransaction: SOURCE_TX,
+    provenanceHash,
+  });
+  // Descriptors === null models a LEGACY deployment: no snapshot offsets and no descriptor record, so
+  // ephemeral enrichment has nothing to rebuild from and a proxy fails closed. Otherwise the snapshot
+  // carries the artifact-scoped offsets derived from the descriptors' byte ranges.
+  const legacy = descriptors === null || descriptors === undefined;
+  // `references` may be passed explicitly to make the snapshot offsets disagree with the seeded
+  // descriptors (e.g. an empty descriptor record for an artifact that DOES declare an immutable).
+  const references =
+    'references' in opts ? opts.references : legacy ? undefined : descriptors.map((d: JsonAny) => ({ start: d.start, length: d.length }));
+  result.addressMap.setArtifactSnapshot({
+    provenanceHash,
+    artifactIdentity: PROXY_IDENTITY,
+    contractKind,
+    abi: [],
+    creationBytecodeHash: `0x${'88'.repeat(32)}`,
+    runtimeBytecodeHash,
+    ...(references === undefined ? {} : { immutableReferences: references }),
+  });
+  if (!legacy && descriptorRecord) {
+    result.addressMap.setDeploymentDescriptor({ predicted: TARGET, status: 'complete', descriptors });
+  }
+}
+
+// A 32-byte immutable word at byte offset 2 (chars 4..67): 12 zero bytes then the address low 20.
+function proxyRuntimeCode(embedded: string): string {
+  return `0x6080${'00'.repeat(12)}${embedded.slice(2)}6000`;
+}
+
+// Two 32-byte immutable words, at byte offsets 2 and 34, each holding an address in its low 20 bytes.
+function twoWordRuntimeCode(first: string, second: string): string {
+  return `0x6080${'00'.repeat(12)}${first.slice(2)}${'00'.repeat(12)}${second.slice(2)}6000`;
+}
+
+test('projects address-bearing immutables in eth_getCode for a mapped predicted proxy', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result);
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  // The embedded actual admin must be projected to its predicted address in the returned code.
+  assert.equal(response.result, proxyRuntimeCode(IMMUTABLE_ADMIN_PREDICTED));
+});
+
+test('reads the raw upstream code for an actual (non-predicted) address without projecting', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result);
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET_ACTUAL, 'latest'],
+  });
+  // An actual-world read is served byte-for-byte; the embedded admin stays actual.
+  assert.equal(response.result, proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL));
+});
+
+test('fails closed for a transparent proxy whose snapshot lacks descriptors', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  // A legacy snapshot predating the descriptor capture: a proxy with no admin descriptor cannot project.
+  seedProxyWithImmutable(result, { descriptors: null });
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'UNPROJECTABLE_PROXY_CODE');
+});
+
+test('passes through empty upstream code for a mapped predicted proxy instead of failing closed', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return '0x';
+        return `${method}:result`;
+      },
+    },
+  });
+  // A fully-mapped proxy with offsets present, but the upstream reports no code at this block.
+  seedProxyWithImmutable(result);
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  // Code-less reads (e.g. a historical or pre-deployment block) have no immutable to project and must
+  // not trip the proxy fail-closed path.
+  assert.equal(response.result, '0x');
+  assert.equal(response.error, undefined);
+});
+
+test('fails closed for a beacon proxy whose embedded beacon does not resolve to a mapped address', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  // The beacon immutable is present in the code but never mapped, so its word cannot be projected.
+  seedProxyWithImmutable(result, { contractKind: 'beacon-proxy', mapController: false });
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'UNPROJECTABLE_PROXY_CODE');
+});
+
+test('projects a UUPS impl __self at every captured offset to its own predicted address', async (t: TestContext) => {
+  // A UUPS implementation is a plain 'contract' kind whose __self immutable holds its own actual
+  // address, possibly at several offsets; each is projected to the deployment's predicted address.
+  const runtimeCode = twoWordRuntimeCode(TARGET_ACTUAL, TARGET_ACTUAL);
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return runtimeCode;
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result, {
+    contractKind: 'contract',
+    descriptors: [
+      { role: 'self', start: 2, length: 32, expectedActual: TARGET_ACTUAL },
+      { role: 'self', start: 34, length: 32, expectedActual: TARGET_ACTUAL },
+    ],
+  });
+  const mapped = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(mapped.result, twoWordRuntimeCode(TARGET, TARGET));
+});
+
+// The semantic-binding guarantee: a `contract` whose non-role address immutable happens to hold a value
+// that resolves to a mapped predicted address must be LEFT UNTOUCHED. Capture never records a descriptor
+// for a non-role immutable, so the deployment's descriptor list is empty and eth_getCode rewrites
+// nothing — a coincidental low-20 match is never projected (the uniform model would have rewritten it).
+test('leaves a mapped non-role contract immutable untouched in eth_getCode', async (t: TestContext) => {
+  const runtimeCode = proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return runtimeCode;
+        return `${method}:result`;
+      },
+    },
+  });
+  // The embedded address is mapped (IMMUTABLE_ADMIN_ACTUAL) but is not this contract's own actual, so
+  // capture produced no descriptor for it; the code must pass through byte-for-byte.
+  seedProxyWithImmutable(result, { contractKind: 'contract', descriptors: [] });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.result, runtimeCode);
+});
+
+// A proxy artifact that declares NO immutables at all (its admin/beacon lives only in the ERC-1967
+// storage slots, as in the OpenZeppelin v4 proxies) embeds no address in its runtime code, so raw code
+// cannot contradict the reverse-mapped storage slots. A complete-but-empty descriptor record backed by
+// authoritative empty snapshot offsets serves the code byte-for-byte instead of failing closed.
+test('serves raw code for a transparent proxy whose artifact declares no immutables', async (t: TestContext) => {
+  const runtimeCode = '0x60806000';
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return runtimeCode;
+        return `${method}:result`;
+      },
+    },
+  });
+  // Snapshot offsets [] (the artifact declares no immutables), a captured complete/empty record, and a
+  // runtime-template hash matching the served code (a zero-immutable deployment's code IS its template).
+  seedProxyWithImmutable(result, { descriptors: [], runtimeBytecodeHash: keccak256(runtimeCode) });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error, undefined);
+  assert.equal(response.result, runtimeCode);
+});
+
+// The same zero-immutable proxy read before any descriptor record exists (pending capture or legacy):
+// the ephemeral enrichment resolves authoritative empty offsets and passes the code through.
+test('serves raw code ephemerally for a zero-immutable proxy with no descriptor record', async (t: TestContext) => {
+  const runtimeCode = '0x60806000';
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return runtimeCode;
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result, { descriptors: [], descriptorRecord: false, runtimeBytecodeHash: keccak256(runtimeCode) });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error, undefined);
+  assert.equal(response.result, runtimeCode);
+});
+
+// The provenance hash binds creation bytecode and sources, NOT the deployed bytecode's immutable
+// reference map — so an artifact whose reference map was stripped (tampered or corrupted) still
+// verifies and captures an authoritative-looking empty range list. The zero-immutable pass-through
+// therefore also verifies the SERVED code against the snapshot's runtime-template hash: a genuine
+// zero-immutable deployment's on-chain code equals its template byte-for-byte, while a proxy whose
+// immutables were hidden carries live addresses where the template has zeros. Mismatch fails closed.
+test('fails closed for a zero-immutable proxy record whose served code does not match the runtime template', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        // The served code embeds a live admin address — it cannot be the zero-immutable template.
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  // Empty offsets and an empty complete record, but the template hash disagrees with the served code.
+  seedProxyWithImmutable(result, { descriptors: [], runtimeBytecodeHash: keccak256('0x60806000') });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'UNPROJECTABLE_PROXY_CODE');
+});
+
+// The empty-record pass-through is gated on the ARTIFACT declaring no immutables: a complete-but-empty
+// record for an artifact whose snapshot offsets DO declare an address-width immutable is a capture
+// defect, and serving raw code would resurrect the projected-vs-storage contradiction. Fail closed.
+test('fails closed for a proxy whose complete record is empty but artifact declares an address immutable', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result, { descriptors: [], references: [{ start: 2, length: 32 }] });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'UNPROJECTABLE_PROXY_CODE');
+});
+
+// A descriptor is an authoritative commitment: if the on-chain runtime word no longer equals the
+// captured expectedActual, that is artifact/code drift and eth_getCode fails closed even for a plain
+// contract, rather than serving code that contradicts the commitment.
+test('fails closed when a contract self descriptor no longer matches the on-chain code', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  // Captured expectedActual is the contract's own actual (TARGET_ACTUAL), but the live word now holds a
+  // different address, so the commitment is violated.
+  seedProxyWithImmutable(result, { contractKind: 'contract' });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.error.code, -32000);
+  assert.equal(response.error.data.code, 'UNPROJECTABLE_PROXY_CODE');
+});
+
+test('reads raw code for a mapped predicted address that has no resolvable metadata', async (t: TestContext) => {
+  const runtimeCode = proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return runtimeCode;
+        return `${method}:result`;
+      },
+    },
+  });
+  // Mapped but unmanaged: no contract metadata and no journal provenance, so nothing is projected.
+  result.addressMap.set({
+    predicted: TARGET,
+    actual: TARGET_ACTUAL,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: SOURCE_TX,
+  });
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, 'latest'],
+  });
+  assert.equal(response.result, runtimeCode);
+});
+
+// (a) Regression for the release blocker: two deployments of the SAME artifact (one provenance hash)
+// with DIFFERENT controllers/actuals. Before the deployment-scoped descriptor index, the second
+// deployment's snapshot write threw 'Artifact snapshot conflict' (deployment-specific role values were
+// stored on the artifact-keyed snapshot). Now the artifact snapshot is shared byte-identical (offsets
+// only) while each deployment owns its own descriptor record, and each eth_getCode read projects its
+// OWN controller into the predicted world.
+for (const kind of ['transparent-proxy', 'beacon-proxy', 'contract'] as const) {
+  test(`two deployments of the same ${kind} artifact keep independent descriptors and project their own controller`, async (t: TestContext) => {
+    const provenanceHash = `0x${'7a'.repeat(32)}`;
+    const identity = kind === 'contract' ? ARTIFACT_IDENTITY : PROXY_IDENTITY;
+    const role = kind === 'transparent-proxy' ? 'admin' : kind === 'beacon-proxy' ? 'beacon' : 'self';
+    // Deployment A and B: distinct predicted/actual, and (for a proxy) distinct controllers.
+    const A = { predicted: `0x${'a1'.repeat(20)}`, actual: `0x${'a2'.repeat(20)}`, ctrlActual: `0x${'a3'.repeat(20)}`, ctrlPredicted: `0x${'a4'.repeat(20)}` };
+    const B = { predicted: `0x${'b1'.repeat(20)}`, actual: `0x${'b2'.repeat(20)}`, ctrlActual: `0x${'b3'.repeat(20)}`, ctrlPredicted: `0x${'b4'.repeat(20)}` };
+    // For a UUPS impl the role is `self`: the embedded value is the deployment's OWN actual and it
+    // projects to its OWN predicted; a proxy embeds its controller's actual and projects to the
+    // controller's predicted.
+    const embeddedActual = (d: typeof A) => (role === 'self' ? d.actual : d.ctrlActual);
+    const projectedTo = (d: typeof A) => (role === 'self' ? d.predicted : d.ctrlPredicted);
+    const code: Record<string, string> = {
+      [A.actual]: proxyRuntimeCode(embeddedActual(A)),
+      [B.actual]: proxyRuntimeCode(embeddedActual(B)),
+    };
+    const result = fixture(t, {
+      resolveCallContext: async () => undefined,
+      upstream: {
+        async request(method: JsonAny, params: JsonAny) {
+          if (method === 'eth_getCode') return code[params[0]] ?? '0x';
+          return `${method}:result`;
+        },
+      },
+    });
+    const seed = (d: typeof A) => {
+      result.addressMap.set({ predicted: d.predicted, actual: d.actual, creator: WALLET.address, sender: WALLET.address, sourceTransaction: keccak256(toUtf8Bytes(`m:${d.predicted}`)) });
+      if (role !== 'self') {
+        result.addressMap.set({ predicted: d.ctrlPredicted, actual: d.ctrlActual, creator: WALLET.address, sender: WALLET.address, sourceTransaction: keccak256(toUtf8Bytes(`c:${d.ctrlActual}`)) });
+      }
+      result.addressMap.setContractMetadata({ predicted: d.predicted, contractKind: kind, artifactIdentity: identity, sourceTransaction: keccak256(toUtf8Bytes(`m:${d.predicted}`)), provenanceHash });
+      const expectedActual = role === 'self' ? d.actual : d.ctrlActual;
+      return { snapshot: result.addressMap.setArtifactSnapshot({ provenanceHash, artifactIdentity: identity, contractKind: kind, abi: [], creationBytecodeHash: `0x${'88'.repeat(32)}`, runtimeBytecodeHash: `0x${'99'.repeat(32)}`, immutableReferences: [{ start: 2, length: 32 }] }), expectedActual };
+    };
+    const seedA = seed(A);
+    // The second deployment's snapshot write is byte-identical and must NOT throw (the old blocker).
+    const seedB = seed(B);
+    assert.deepEqual(seedA.snapshot, seedB.snapshot);
+    result.addressMap.setDeploymentDescriptor({ predicted: A.predicted, status: 'complete', descriptors: [{ role, start: 2, length: 32, expectedActual: seedA.expectedActual }] });
+    result.addressMap.setDeploymentDescriptor({ predicted: B.predicted, status: 'complete', descriptors: [{ role, start: 2, length: 32, expectedActual: seedB.expectedActual }] });
+
+    // Two distinct descriptor records, keyed by predicted, each committing to its own controller.
+    assert.notDeepEqual(
+      result.addressMap.resolveDeploymentDescriptor(A.predicted),
+      result.addressMap.resolveDeploymentDescriptor(B.predicted),
+    );
+
+    for (const d of [A, B]) {
+      const response = await result.handlers.handle({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [d.predicted, 'latest'] });
+      assert.equal(response.error, undefined, `${kind} ${d.predicted}`);
+      assert.equal(response.result, proxyRuntimeCode(projectedTo(d)), `${kind} ${d.predicted}`);
+    }
+  });
+}
+
+// (d) A legacy/pending deployment (a snapshot carrying the artifact-scoped offsets but NO descriptor
+// record) is enriched ephemerally at eth_getCode from the served runtime code and projected, without
+// any durable write. This is the read-path self-heal that lets a proxy project before repair runs.
+test('ephemerally enriches and projects a mapped proxy that has no descriptor record yet', async (t: TestContext) => {
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  // Snapshot offsets present, controller mapped, but no deployment-descriptor record written.
+  seedProxyWithImmutable(result, { descriptorRecord: false });
+  assert.equal(result.addressMap.resolveDeploymentDescriptor(TARGET), undefined);
+
+  const response = await result.handlers.handle({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [TARGET, 'latest'] });
+  assert.equal(response.error, undefined);
+  assert.equal(response.result, proxyRuntimeCode(IMMUTABLE_ADMIN_PREDICTED));
+  // The read path never persists: the record is still absent after the ephemeral enrichment.
+  assert.equal(result.addressMap.resolveDeploymentDescriptor(TARGET), undefined);
+});
+
+test('projects a mapped proxy code after the numbered-block stock TRE quantity retry', async (t: TestContext) => {
+  const attempts: JsonAny[] = [];
+  const result = fixture(t, {
+    resolveCallContext: async () => undefined,
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        attempts.push({ method, block: params.at(-1) });
+        if (method === 'eth_getCode' && params.at(-1) === '0x13') {
+          throw new UpstreamRpcError(-32602, 'QUANTITY not supported, just support TAG as latest');
+        }
+        if (method === 'eth_getCode') return proxyRuntimeCode(IMMUTABLE_ADMIN_ACTUAL);
+        return `${method}:result`;
+      },
+    },
+  });
+  seedProxyWithImmutable(result);
+
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_getCode',
+    params: [TARGET, '0x13'],
+  });
+  // The stock-quantity retry still fires before projection, and the retried code is then projected.
+  assert.deepEqual(
+    attempts.map(a => [a.method, a.block]),
+    [
+      ['eth_getCode', '0x13'],
+      ['eth_getCode', 'latest'],
+    ],
+  );
+  assert.equal(response.result, proxyRuntimeCode(IMMUTABLE_ADMIN_PREDICTED));
+});
+
 test('retries numbered immutable reads as latest only after the explicit stock TRE quantity error', async (t: TestContext) => {
   const attempts: JsonAny[] = [];
   const result = fixture(t, {
@@ -1276,13 +1864,82 @@ test('persists an immutable artifact snapshot for a confirmed deployment', async
     abi: [{ type: 'constructor', inputs: [] }],
     creationBytecodeHash: keccak256('0x6000'),
     runtimeBytecodeHash: keccak256('0x6001'),
+    // A plain contract with no immutables carries an empty artifact-scoped offset list.
+    immutableReferences: [],
+  });
+});
+
+// A deployment whose artifact declares an address-width immutable binds its role descriptors from the
+// deployment's ACTUAL on-chain runtime code, read once the transaction has confirmed (the artifact's
+// deployedBytecode carries the word zeroed). Here a UUPS implementation's __self holds the deployment's
+// own actual address, so a 'self' descriptor is captured; a plain contract deploy reads no code.
+test('captures role-immutable descriptors from the confirmed on-chain code of a deployment', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const selfWord = `0x6080${'00'.repeat(12)}${ACTUAL_TARGET.slice(2)}6000`;
+  let getCodeReads = 0;
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        deployedBytecode: { object: selfWord, immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+      },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: false,
+    }),
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getCode') {
+          getCodeReads += 1;
+          // Descriptor capture reads the raw actual address directly (no predicted->actual mapping).
+          assert.equal(params[0], ACTUAL_TARGET);
+          return selfWord;
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  // The reconciler maps the deployment's predicted->actual at confirm; seed that mapping (the fixture's
+  // fake reconciler does not) so the per-deployment descriptor can be persisted keyed by predicted.
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'1c'.repeat(32)}`,
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+
+  assert.equal(getCodeReads, 1);
+  const snapshot = result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`);
+  // The artifact-scoped offsets live on the snapshot; the deployment-specific role values live in the
+  // per-predicted descriptor index, captured complete from the confirmed on-chain code.
+  assert.deepEqual(snapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+  assert.deepEqual(result.addressMap.resolveDeploymentDescriptor(predicted), {
+    predicted,
+    status: 'complete',
+    descriptors: [{ role: 'self', start: 2, length: 32, expectedActual: ACTUAL_TARGET }],
   });
 });
 
 // The prepared-native journal record and the artifact snapshot are written in two separate store
 // transactions, so a crash between them leaves a prepared deployment with no snapshot. Recovery
 // reconstructs the missing snapshot from the on-disk artifact when its fresh provenance still matches.
-function seedPreparedWithoutSnapshot(result: JsonAny, raw: JsonAny, provenanceHash: JsonAny) {
+function seedPreparedWithoutSnapshot(
+  result: JsonAny,
+  raw: JsonAny,
+  provenanceHash: JsonAny,
+  {
+    identity = ARTIFACT_IDENTITY,
+    actualTarget = ACTUAL_TARGET,
+    contractKind = 'contract',
+  }: JsonAny = {},
+) {
   const sourceHash = keccak256(raw);
   const nonce = Transaction.from(raw).nonce;
   result.journal.receive(raw);
@@ -1296,16 +1953,16 @@ function seedPreparedWithoutSnapshot(result: JsonAny, raw: JsonAny, provenanceHa
         to: null,
         nonce: String(nonce),
         predictedContractAddress: getCreateAddress({ from: WALLET.address, nonce }),
-        actualTarget: ACTUAL_TARGET,
-        contractKind: 'contract',
-        artifactIdentity: ARTIFACT_IDENTITY,
+        actualTarget,
+        contractKind,
+        artifactIdentity: identity,
         provenanceHash,
       },
       childCreatePlan: {
         version: 1,
         mode: 'exact-signed',
         sender: WALLET.address,
-        simulationRootAddress: ACTUAL_TARGET,
+        simulationRootAddress: actualTarget,
         attempts: [],
         counterBases: {},
         counterFinals: {},
@@ -1376,6 +2033,278 @@ test('leaves the crash-lost snapshot absent when the on-disk artifact provenance
   assert.equal(result.addressMap.resolveArtifactSnapshot(replacedHash), undefined);
 });
 
+// Durability twin of the repair gate: when a LEGACY offset-less snapshot already exists, recovery must
+// enrich it with the artifact's immutable offsets before (or as) it completes the descriptor. Without
+// this, a completed zero-immutable proxy descriptor would resolve an offset-less snapshot on later
+// reads, fall back to the on-disk artifact, and fail the proxy closed forever once that artifact is
+// removed — and the complete+offset-less state is otherwise skipped by every subsequent recovery.
+test('startup recovery enriches a legacy offset-less snapshot so a completed descriptor stays durable', async (t: TestContext) => {
+  const provenanceHash = `0x${'57'.repeat(32)}`;
+  const raw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    findArtifactPaths: () => ['/out/Box.sol/Box.json'],
+    verifyArtifactProvenance: () => diskArtifact(provenanceHash),
+  });
+  seedPreparedWithoutSnapshot(result, raw, provenanceHash, { contractKind: 'transparent-proxy' });
+  // A legacy snapshot predating the offsets field is already present (no immutableReferences).
+  result.addressMap.setArtifactSnapshot({
+    provenanceHash,
+    artifactIdentity: ARTIFACT_IDENTITY,
+    contractKind: 'transparent-proxy',
+    abi: [],
+    creationBytecodeHash: `0x${'88'.repeat(32)}`,
+    runtimeBytecodeHash: `0x${'99'.repeat(32)}`,
+  });
+  assert.equal(result.addressMap.resolveArtifactSnapshot(provenanceHash)?.immutableReferences, undefined);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  await result.handlers.recoverStartup(capability);
+
+  // The disk artifact declares no immutables, so the enriched offsets are the empty list — defined, so
+  // a later read resolves them durably instead of depending on the on-disk artifact.
+  assert.deepEqual(result.addressMap.resolveArtifactSnapshot(provenanceHash)?.immutableReferences, []);
+});
+
+const IMMUTABLE_IDENTITY = {
+  sourceName: 'contracts/Impl.sol',
+  contractName: 'Impl',
+  fullyQualifiedName: 'contracts/Impl.sol:Impl',
+};
+
+// An address-width immutable is bound after confirmation by reading the deployment's ACTUAL on-chain
+// runtime code. That post-confirmation read can transiently fail or return not-yet-populated '0x' code
+// (read-your-writes / node lag). Capture must never let that failure escape a CONFIRMED deployment's
+// recovery: recovery of this and every subsequent pending record must complete, and the base envelope
+// (ABI, provenance, bytecode hashes) must still persist so ABI-orphan protection is never lost. The
+// role descriptors are simply absent (an empty list), which fails a later proxy read closed exactly as
+// a missing snapshot would.
+test('startup recovery survives a transient descriptor-capture failure and still recovers later records', async (t: TestContext) => {
+  const failingProvenance = `0x${'55'.repeat(32)}`;
+  const plainProvenance = `0x${'66'.repeat(32)}`;
+  const failingActual = `0x${'aa'.repeat(20)}`;
+  const plainActual = `0x${'bb'.repeat(20)}`;
+  let getCodeReads = 0;
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    delay: async () => {},
+    findArtifactPaths: (_out: JsonAny, fqn: JsonAny) => [`/out/${fqn}.json`],
+    verifyArtifactProvenance: ({ artifactPath }: JsonAny) =>
+      artifactPath === `/out/${IMMUTABLE_IDENTITY.fullyQualifiedName}.json`
+        ? {
+            artifact: {
+              abi: [{ type: 'constructor', inputs: [] }],
+              bytecode: { object: '0x6000' },
+              deployedBytecode: { object: '0x6001', immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+            },
+            artifactPath,
+            ...IMMUTABLE_IDENTITY,
+            provenanceHash: failingProvenance,
+          }
+        : {
+            artifact: {
+              abi: [{ type: 'constructor', inputs: [] }],
+              bytecode: { object: '0x6000' },
+              deployedBytecode: { object: '0x6001' },
+            },
+            artifactPath,
+            ...ARTIFACT_IDENTITY,
+            provenanceHash: plainProvenance,
+          },
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') {
+          getCodeReads += 1;
+          throw new Error('upstream getCode transiently unavailable');
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+
+  const failingRaw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const plainRaw = await signedTransaction({ to: null, nonce: 9, data: '0x6000' });
+  const failingHash = seedPreparedWithoutSnapshot(result, failingRaw, failingProvenance, {
+    identity: IMMUTABLE_IDENTITY,
+    actualTarget: failingActual,
+  });
+  const plainHash = seedPreparedWithoutSnapshot(result, plainRaw, plainProvenance, { actualTarget: plainActual });
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  const recovered = await result.handlers.recoverStartup(capability);
+
+  // The transient capture failure of the lower-nonce record neither threw out of recovery nor aborted
+  // recovery of the later record; both confirmed.
+  assert.deepEqual(recovered, [failingHash, plainHash]);
+  assert.equal(result.journal.get(failingHash).state, 'confirmed');
+  assert.equal(result.journal.get(plainHash).state, 'confirmed');
+  // The address-immutable record retried the read the bounded number of times, then persisted its base
+  // envelope with an empty descriptor list rather than throwing.
+  assert.equal(getCodeReads, 3);
+  const failingSnapshot = result.addressMap.resolveArtifactSnapshot(failingProvenance);
+  assert.equal(failingSnapshot?.provenanceHash, failingProvenance);
+  assert.deepEqual(failingSnapshot?.abi, [{ type: 'constructor', inputs: [] }]);
+  // The base snapshot persists the artifact-scoped offsets even though the post-confirmation code read
+  // failed; the descriptor capture is left pending, to be completed later by recovery or repair.
+  assert.deepEqual(failingSnapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+  // The later plain record read no code and snapshotted normally.
+  const plainSnapshot = result.addressMap.resolveArtifactSnapshot(plainProvenance);
+  assert.deepEqual(plainSnapshot?.abi, [{ type: 'constructor', inputs: [] }]);
+});
+
+// A live re-send that resumes a prepared address-immutable deployment through resumePrepared confirms
+// the transaction, so a subsequent transient capture failure must not throw back to the caller: the
+// deployment is already confirmed (the confirmed short-circuit would then block any retry), so the base
+// snapshot must still persist here rather than being lost forever.
+test('a re-sent prepared deployment confirms and persists its base snapshot despite a transient capture failure', async (t: TestContext) => {
+  const provenanceHash = `0x${'55'.repeat(32)}`;
+  const raw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  let getCodeReads = 0;
+  const result = fixture(t, {
+    delay: async () => {},
+    findArtifactPaths: () => [`/out/${IMMUTABLE_IDENTITY.fullyQualifiedName}.json`],
+    verifyArtifactProvenance: () => ({
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        bytecode: { object: '0x6000' },
+        deployedBytecode: { object: '0x6001', immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+      },
+      artifactPath: `/out/${IMMUTABLE_IDENTITY.fullyQualifiedName}.json`,
+      ...IMMUTABLE_IDENTITY,
+      provenanceHash,
+    }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') {
+          getCodeReads += 1;
+          throw new Error('upstream getCode transiently unavailable');
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  const sourceHash = seedPreparedWithoutSnapshot(result, raw, provenanceHash, { identity: IMMUTABLE_IDENTITY });
+
+  const response = await send(result.handlers, raw);
+  assert.equal(response.error, undefined);
+  assert.equal(response.result, sourceHash);
+  assert.equal(result.journal.get(sourceHash).state, 'confirmed');
+  assert.equal(getCodeReads, 3);
+  const snapshot = result.addressMap.resolveArtifactSnapshot(provenanceHash);
+  assert.equal(snapshot?.provenanceHash, provenanceHash);
+  assert.deepEqual(snapshot?.abi, [{ type: 'constructor', inputs: [] }]);
+  assert.deepEqual(snapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+});
+
+// A read that fails on the first attempt but succeeds on retry (absorbing node lag) still binds the
+// role descriptor, and does so within the bounded attempt budget.
+test('a deploy descriptor capture retries a transient read failure and binds the descriptor on success', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const selfWord = `0x6080${'00'.repeat(12)}${ACTUAL_TARGET.slice(2)}6000`;
+  let getCodeReads = 0;
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    delay: async () => {},
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        deployedBytecode: { object: selfWord, immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+      },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: false,
+    }),
+    upstream: {
+      async request(method: JsonAny, params: JsonAny) {
+        if (method === 'eth_getCode') {
+          getCodeReads += 1;
+          if (getCodeReads === 1) throw new Error('transient read-your-writes lag');
+          assert.equal(params[0], ACTUAL_TARGET);
+          return selfWord;
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'2c'.repeat(32)}`,
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  assert.equal(getCodeReads, 2);
+  const snapshot = result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`);
+  assert.deepEqual(snapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+  assert.deepEqual(result.addressMap.resolveDeploymentDescriptor(predicted), {
+    predicted,
+    status: 'complete',
+    descriptors: [{ role: 'self', start: 2, length: 32, expectedActual: ACTUAL_TARGET }],
+  });
+});
+
+// A deploy whose post-confirmation code read never populates ('0x' on every attempt) still persists the
+// base envelope (with offsets) and marks its descriptor capture PENDING, rather than dropping the
+// snapshot on a confirmed deployment. The pending record is completed later by recovery or repair.
+test('a deploy persists its base snapshot and a pending descriptor when the capture read persistently fails', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const selfWord = `0x6080${'00'.repeat(12)}${ACTUAL_TARGET.slice(2)}6000`;
+  let getCodeReads = 0;
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    delay: async () => {},
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        deployedBytecode: { object: selfWord, immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+      },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: false,
+    }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') {
+          getCodeReads += 1;
+          return '0x';
+        }
+        return `${method}:result`;
+      },
+    },
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'3c'.repeat(32)}`,
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  assert.equal(getCodeReads, 3);
+  const snapshot = result.addressMap.resolveArtifactSnapshot(`0x${'55'.repeat(32)}`);
+  assert.equal(snapshot?.provenanceHash, `0x${'55'.repeat(32)}`);
+  assert.deepEqual(snapshot?.abi, [{ type: 'constructor', inputs: [] }]);
+  assert.deepEqual(snapshot?.immutableReferences, [{ start: 2, length: 32 }]);
+  assert.deepEqual(result.addressMap.resolveDeploymentDescriptor(predicted), {
+    predicted,
+    status: 'pending',
+    descriptors: [],
+  });
+});
+
 // A deployment whose runtime bytecode still carries unresolved external-library link placeholders
 // (__$...$__) — a shape artifact provenance explicitly permits — snapshots successfully by hashing
 // the raw runtime template rather than demanding fully linked pure hex.
@@ -1403,6 +2332,7 @@ test('snapshots a linked-library deployment whose runtime bytecode carries link 
     abi: [{ type: 'constructor', inputs: [] }],
     creationBytecodeHash: keccak256('0x6000'),
     runtimeBytecodeHash: keccak256(toUtf8Bytes(linkedRuntime.toLowerCase())),
+    immutableReferences: [],
   });
 });
 

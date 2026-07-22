@@ -36,7 +36,7 @@ forge-std/=lib/forge-std/src/
 ```
 
 The npm package does not vendor mutable Forge dependencies. Pin the TRON
-contracts commit in the consuming repository. Node.js 20 or newer, Bash, and
+contracts commit in the consuming repository. Node.js 22 or newer, Bash, and
 forge-std 1.9.5 or newer are required. On Windows, set
 `OPENZEPPELIN_BASH_PATH` to the absolute forward-slash path of a trusted Bash
 executable.
@@ -184,12 +184,14 @@ The shared dispatcher recognizes the v4 UUPS `upgradeTo` entrypoint and v4
 ProxyAdmin `upgrade`/`upgradeAndCall` paths while retaining strict v5
 `UPGRADE_INTERFACE_VERSION = "5.0.0"` dispatch.
 
-Compatibility is exercised against pinned `@openzeppelin/contracts@4.9.6` and
-`@openzeppelin/contracts-upgradeable@4.9.6` on stock TRE. The external consumer
-deploys genuine upstream v4 UUPS, transparent, and beacon fixtures, upgrades
-them through `LegacyUpgrades.sol`, and independently verifies state, ownership,
-and ERC-1967 slots. These are upstream OpenZeppelin Contracts v4 sources; there
-is no TRON-branded v4 package.
+Dispatch for pinned `@openzeppelin/contracts@4.9.6` and
+`@openzeppelin/contracts-upgradeable@4.9.6` sources is unit-verified. Full live
+verification — deploying genuine upstream v4 UUPS, transparent, and beacon
+fixtures, upgrading them through `LegacyUpgrades.sol` on stock TRE, and
+independently checking state, ownership, and ERC-1967 slots — is a pending
+real-node regression step and is not yet confirmed against the current
+adapter. These are upstream OpenZeppelin Contracts v4 sources; there is no
+TRON-branded v4 package.
 
 ## Compiler provenance and FFI security
 
@@ -260,6 +262,22 @@ accepts signed Forge transactions but holds the native TRON key in memory.
 See [the RPC security boundaries](rpc/SECURITY.md) before using a public
 network or a non-loopback listener.
 
+### Stop and restart the adapter
+
+Stop the adapter with a graceful shutdown signal — `Ctrl-C` (`SIGINT`) in an
+interactive shell, or `SIGTERM` from a process manager. There is no separate
+`stop` command; shutdown is signal-driven. On either signal the adapter stops
+accepting new connections, gives in-flight requests up to a bounded 10-second
+grace period to finish, then force-closes any connections still open, releases
+the state-file lock, and exits.
+
+A stopped adapter process cannot be resumed in place. To restart, run `npm run
+rpc:start` again: it goes through the same startup sequence described above —
+re-acquiring the state-file lock and completing recovery of durable in-flight
+transactions before printing the readiness record — so it resumes safely from
+the persisted state file whether the previous process stopped gracefully or
+crashed.
+
 ## Resolve TVM addresses
 
 Forge predicts Ethereum-style CREATE addresses. TRON assigns a different
@@ -303,9 +321,23 @@ the on-chain runtime code at `--actual` and requires it to match the artifact's
 runtime bytecode, and for a proxy kind reads the TRC-1967 slots and requires
 them to match the declared references (`--impl` for `uups-proxy`, `--admin` for
 `transparent-proxy`, `--beacon` for `beacon-proxy`; a bare implementation has no
-slots). Only then does it record the address mapping, contract metadata, and the
-verified artifact snapshot, and set an optional `--nonce-baseline`. The address
+slots). It also cross-checks, against live on-chain state, the controller a proxy
+delegates upgrade authority to: a `transparent-proxy`'s ProxyAdmin must answer
+`owner()` with `--owner`, and a `beacon-proxy`'s UpgradeableBeacon must answer
+`implementation()` with `--impl`. Adopted in their own right, a `proxy-admin`
+must answer `owner()` with `--owner` and an `upgradeable-beacon` must answer
+`implementation()` with `--impl`. Only then does it record the address mapping,
+contract metadata, the verified artifact snapshot, and the deployment's
+role-immutable descriptors, and set an optional `--nonce-baseline`. The address
 accepts Base58, `41`-hex, or `0x` TRON forms.
+
+Adopt the controller before its proxy. A `transparent-proxy` requires its
+ProxyAdmin (kind `proxy-admin`) to be adopted first, and a `beacon-proxy`
+requires its UpgradeableBeacon (kind `upgradeable-beacon`) to be adopted first,
+so `eth_getCode` can project the proxy's constructor-set controller address into
+the predicted world. Adopting a proxy before its controller fails closed with a
+naming error before any state is written; adopt the controller (with its
+`--owner`/`--impl`) and then re-run the proxy adoption.
 
 `adopt` does not reconstruct historical nonces or receipts. It re-registers a
 deployment for ABI-aware operation going forward. Adopt a proxy's implementation
@@ -314,6 +346,13 @@ ABI-aware. Provide `--nonce-baseline` with the sender's already-consumed on-chai
 nonce count so Forge does not reuse a spent nonce after re-registration. That
 floor also applies to `eth_getTransactionCount` for the configured sender, so
 the adapter never reports a nonce below it.
+
+`repair` durably backfills the per-deployment role-immutable descriptors for
+already-mapped deployments — legacy deployments predating the descriptor index,
+or captures left pending by a transient post-confirmation read failure. It holds
+the state lock like `adopt`, reads each deployment's live runtime code, and
+completes its descriptor only when the read yields the required role; a
+deployment it cannot verify is left pending and retried on a later run.
 
 ## Adapter behavior
 
@@ -396,9 +435,10 @@ The following EVM features are intentionally outside the supported surface:
   adapter. Stock constant simulation also rejects ambiguous child creation.
 
 The upgrade-only `LegacyUpgrades.sol` entrypoint is exported for existing
-OpenZeppelin Contracts v4 deployments. Its external stock-TRE suite deploys and
-upgrades genuine pinned v4.9.6 UUPS, transparent, and beacon fixtures; local
-lookalikes are used only for focused dispatch tests.
+OpenZeppelin Contracts v4 deployments. Dispatch is unit-verified; a live
+stock-TRE regression that deploys and upgrades genuine pinned v4.9.6 UUPS,
+transparent, and beacon fixtures is pending and not yet confirmed against the
+current adapter. Local lookalikes are used only for focused dispatch tests.
 
 ## Development
 
@@ -415,6 +455,34 @@ address resolution, restart, and receipt replay against an isolated
 `tronbox/tre:dev` container. The command requires Docker, uses deterministic
 development-only accounts, selects an ephemeral loopback port, and removes the
 container when the test finishes.
+
+## Troubleshooting
+
+**A Forge script times out waiting on the adapter.** The adapter waits for a
+solid receipt before acknowledging a write, bounded by a 120-second receipt
+window, so Forge's HTTP timeout must outlive it. Broadcast with
+`--disable-block-gas-limit` (stock TRE reports an Ethereum block gas limit of
+zero), and for TRE integration runs raise both timeouts together:
+`ETH_RPC_TIMEOUT=300 forge script ... --timeout 300`.
+
+**`start`, `resolve`, `mappings`, or `adopt` fails because the state file is
+missing.** These commands refuse to run against a missing state file rather
+than presenting an empty deployment history. Run `npm run rpc:init` once to
+create it, restore a backup, or use `npm run rpc:adopt` to re-register
+individual on-chain deployments.
+
+**`start` fails because the state file is already locked.** Another adapter
+process is already holding the lock for that state path. Stop that process
+first (see [Stop and restart the adapter](#stop-and-restart-the-adapter))
+before starting a new one against the same state file.
+
+**Validation or a script fails on a stale build-info or artifact mismatch.**
+Run scripts and tests with `--force`, or run `forge clean` first, so the
+artifact and build-info describe the same compilation.
+
+**FFI or Bash invocation fails on Windows.** Set `OPENZEPPELIN_BASH_PATH` to
+the absolute forward-slash path of a trusted Bash executable before running
+Forge.
 
 ## License
 

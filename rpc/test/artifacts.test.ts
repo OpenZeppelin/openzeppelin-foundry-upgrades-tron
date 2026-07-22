@@ -185,7 +185,7 @@ test('computes the exact provenance hash used by the Solidity FFI helper', t => 
   assert.equal(result.provenanceHash, provenanceHash);
   const expected = keccak256(
     AbiCoder.defaultAbiCoder().encode(
-      ['string', 'string', 'string', 'string', 'string', 'string', 'string', 'string', 'string[]', 'bytes32[]'],
+      ['string', 'string', 'string', 'string', 'string', 'string', 'string', 'string', 'string', 'string[]', 'bytes32[]'],
       [
         out,
         path.join(out, 'build-info/build.json'),
@@ -195,12 +195,78 @@ test('computes the exact provenance hash used by the Solidity FFI helper', t => 
         '0.8.22',
         'contracts/Widget.sol:Widget',
         '6001600055',
+        // The deployed runtime template, bound alongside creation bytecode; the valid fixture declares
+        // no deployedBytecode, so the empty string participates.
+        '',
         ['contracts/Widget.sol'],
         [keccak256(toUtf8Bytes('contract Widget {}'))],
       ],
     ),
   );
   assert.equal(result.provenanceHash, expected);
+});
+
+// Provenance must bind the deployed runtime template, not only creation bytecode: the immutable
+// projection derives role descriptors and the zero-immutable raw-serve gate's template hash from
+// deployedBytecode, so a swapped runtime template (references stripped, live addresses embedded) that
+// left creation bytecode and sources intact would otherwise re-verify unchanged and reopen the
+// projection fail-open on recovery/repair.
+test('binds the deployed runtime template into the provenance hash', t => {
+  const out = provenanceOut(t, 'valid');
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+
+  artifact.deployedBytecode = { object: '0x6001600055' };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const baseline = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  artifact.deployedBytecode = { object: '0x6002600055' };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const tampered = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  assert.notEqual(tampered, baseline);
+});
+
+// Binding the runtime template must also bind its immutableReferences map, not only the bytecode
+// object: stripping the map (bytecode object unchanged) suppresses role/__self descriptor derivation,
+// so a map-only tamper that left the provenance hash unchanged would re-verify clean and reopen the
+// projection fail-open (a UUPS implementation would serve its actual __self unprojected).
+test('binds the deployed immutableReferences map into the provenance hash', t => {
+  const out = provenanceOut(t, 'valid');
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+
+  artifact.deployedBytecode = { object: '0x6001600055', immutableReferences: { '1': [{ start: 2, length: 32 }] } };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const baseline = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  // Same bytecode object, immutableReferences stripped.
+  artifact.deployedBytecode = { object: '0x6001600055' };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const stripped = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  assert.notEqual(stripped, baseline);
+});
+
+// The offset binding must reject exactly what the range parser rejects, so a malformed immutable ENTRY
+// cannot preserve provenance while the parser later drops it. String-typed offsets format to the same
+// 'start:length' text as integers yet are rejected by immutableRanges — if they kept the provenance
+// hash, a deployment would silently lose its offsets on re-verification and a UUPS impl would serve its
+// actual __self unprojected.
+test('binds a type-tampered immutable entry distinctly from its well-formed integer form', t => {
+  const out = provenanceOut(t, 'valid');
+  const artifactPath = path.join(out, 'Widget.sol/Widget.json');
+  const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8'));
+
+  artifact.deployedBytecode = { object: '0x6001600055', immutableReferences: { '1': [{ start: 2, length: 32 }] } };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const wellFormed = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  artifact.deployedBytecode = { object: '0x6001600055', immutableReferences: { '1': [{ start: '2', length: '32' }] } };
+  fs.writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+  const typeTampered = verifyArtifactProvenance({ outputDirectory: out, artifactPath }).provenanceHash;
+
+  assert.notEqual(typeTampered, wellFormed);
 });
 
 test('returns artifact identity, ABI, verified prefix, compiler, and constructor suffix', t => {

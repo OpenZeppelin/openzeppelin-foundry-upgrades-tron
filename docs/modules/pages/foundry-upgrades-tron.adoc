@@ -26,7 +26,7 @@ An npm consumer instead maps
 `node_modules/@openzeppelin/foundry-upgrades-tron/src/` and installs pinned
 OpenZeppelin Contracts for TRON and forge-std sources separately.
 
-Node.js 20+, Bash, and forge-std 1.9.5+ are required. Windows users set
+Node.js 22+, Bash, and forge-std 1.9.5+ are required. Windows users set
 `OPENZEPPELIN_BASH_PATH` to a trusted Bash executable.
 
 == Foundry configuration
@@ -88,11 +88,12 @@ deployments use `Upgrades.sol` with OpenZeppelin Contracts for TRON v5.
 
 The dispatcher supports the v4 UUPS `upgradeTo` and ProxyAdmin
 `upgrade`/`upgradeAndCall` paths while retaining strict v5 interface-version
-dispatch. External stock-TRE coverage deploys genuine pinned
-`@openzeppelin/contracts@4.9.6` and
-`@openzeppelin/contracts-upgradeable@4.9.6` UUPS, transparent, and beacon
-fixtures, upgrades them through the legacy API, and independently verifies
-their state and ERC-1967 slots. These are upstream v4 packages, not a
+dispatch. Dispatch is unit-verified against pinned
+`@openzeppelin/contracts@4.9.6` and `@openzeppelin/contracts-upgradeable@4.9.6`
+sources. Live stock-TRE coverage — deploying genuine upstream fixtures,
+upgrading them through the legacy API, and independently verifying their state
+and ERC-1967 slots — is a pending real-node regression step, not yet confirmed
+against the current adapter. These are upstream v4 packages, not a
 TRON-branded v4 release.
 
 == Compiler provenance and FFI security
@@ -121,6 +122,13 @@ deployment to TronWeb, Hardhat, or an explorer.
 Public-network use requires an explicit endpoint and key. Read
 `rpc/SECURITY.md` before treating the adapter as a signing service.
 
+Stop the adapter with `Ctrl-C` (`SIGINT`) or `SIGTERM`; there is no separate
+`stop` command. The adapter stops accepting new connections, lets in-flight
+requests finish within a bounded grace period, releases the state-file lock,
+and exits. A stopped process cannot be resumed in place; restart by running
+`npm run rpc:start` again, which repeats the same lock-acquisition and
+in-flight-recovery sequence as the first start.
+
 == Intentional divergences
 
 OpenZeppelin Defender is not supported or included. Ethereum source
@@ -129,9 +137,10 @@ supported. Typed Ethereum transactions, generic CREATE2, Hardhat manifest
 imports, implementation reuse, kind inference, and `forceImport` are outside
 the Solidity API.
 
-The upgrade-only legacy entrypoint is backed by external v4.9.6 lifecycle
-evidence as described above. Local interface mocks remain focused dispatch
-tests rather than acceptance evidence for upstream v4 bytecode on TVM.
+The upgrade-only legacy entrypoint is unit-verified; external v4.9.6 live-TRE
+lifecycle evidence is pending as described above. Local interface mocks remain
+focused dispatch tests rather than acceptance evidence for upstream v4
+bytecode on TVM.
 
 See xref:api-foundry-upgrades-tron.adoc[the Solidity API reference] for
 contract-name formats, options, and every modern overload.

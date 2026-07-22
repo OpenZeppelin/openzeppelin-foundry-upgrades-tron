@@ -1,6 +1,7 @@
 import { decodeInternalTransactionNote } from '@openzeppelin/tron-runtime';
 
 import { toEvmAddress } from './address-codec.js';
+import { mapLogData, mapTopics } from './log-translation.js';
 
 const HASH_PATTERN = /^(?:0x)?[0-9a-f]{64}$/i;
 const SOURCE_HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
@@ -251,12 +252,19 @@ function translateReceipt(snapshot: JsonAny, context: TranslateReceiptContext = 
       : toEvmAddress(context.predictedContractAddress)
     : null;
 
+  // Reverse-map addresses wherever they appear in a log — the emitter `address`, an indexed address
+  // arg in `topics`, and a non-indexed address arg in ABI-encoded `data` — through the same resolver
+  // used for the emitter, so an event consumer never sees a raw actual (TRON) address.
+  const mapLogAddress = (address: string): string => toEvmAddress(resolveAddress?.(address) ?? address);
   const logs: TranslatedLog[] = (info.log ?? []).map((log: JsonAny, index: number) => {
     if (!isObject(log) || !Array.isArray(log.topics)) throw new Error('Invalid native receipt log');
     return {
       address: resolvedAddress(log.address, resolveAddress),
-      topics: log.topics.map((topic: JsonAny) => normalizeHash(topic, 'log topic')),
-      data: normalizeData(log.data, 'log data'),
+      topics: mapTopics(
+        log.topics.map((topic: JsonAny) => normalizeHash(topic, 'log topic')),
+        mapLogAddress,
+      ),
+      data: mapLogData(normalizeData(log.data, 'log data'), mapLogAddress),
       blockNumber,
       transactionHash: sourceTransactionHash.toLowerCase(),
       transactionIndex,

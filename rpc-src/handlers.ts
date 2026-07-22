@@ -6,6 +6,17 @@ import { normalizeAddress, toEvmAddress } from './address-codec.js';
 import { canonicalTronFullyQualifiedName, derivedTronProxyAdminIdentity } from './artifact-identities.js';
 import type { ArtifactIdentity } from './artifact-identities.js';
 import { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } from './artifacts.js';
+import {
+  buildDescriptorsFromRanges,
+  codeMatchesRuntimeTemplate,
+  extractImmutableReferences,
+  hasAddressWidthRange,
+  immutableRanges,
+  projectDescriptorImmutables,
+  runtimeBytecodeTemplateHash,
+} from './immutable-projection.js';
+import type { ImmutableDescriptor, ImmutableRange, ImmutableSource } from './immutable-projection.js';
+import { mapFilterParams, mapLogEntry } from './log-translation.js';
 import { assertOpaqueBytesSafe, rewriteCall, rewriteDeployment } from './rewriter.js';
 import { assertStateLockHeld } from './state-lock.js';
 import { decodeLegacyTransaction } from './transactions.js';
@@ -25,6 +36,11 @@ const JSON_RPC_VERSION = '2.0';
 // The deadline a signer's transaction waits for a strictly-lower missing nonce before it is failed
 // deterministically, rather than racing ahead of (or hanging on) an absent predecessor.
 const DEFAULT_NONCE_GAP_DEADLINE_MS = 30_000;
+// The post-confirmation actual-runtime-code read that binds address-width immutable descriptors can
+// briefly observe a not-yet-populated ('0x') or transiently unavailable body under read-your-writes /
+// node lag; capture retries the read a bounded number of times before giving up with no descriptors.
+const DESCRIPTOR_CAPTURE_ATTEMPTS = 3;
+const DEFAULT_DESCRIPTOR_CAPTURE_RETRY_DELAY_MS = 50;
 const ZERO_ADDRESS = `0x${'00'.repeat(20)}`;
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
 const ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
@@ -51,7 +67,6 @@ const FORWARDED_METHODS = new Set([
   'eth_blockNumber',
   'eth_getBlockTransactionCountByHash',
   'eth_getBlockTransactionCountByNumber',
-  'eth_getLogs',
   'eth_getTransactionByBlockHashAndIndex',
   'eth_getTransactionByBlockNumberAndIndex',
   'web3_clientVersion',
@@ -155,22 +170,6 @@ function bytecodeHash(value: JsonAny, label: string): string {
     throw error;
   }
   return keccak256(hex.toLowerCase());
-}
-
-// The runtime bytecode template can carry unresolved external-library link placeholders
-// (__$...$__), a shape artifact provenance permits. The fully linked runtime bytes are not known
-// before broadcast, and this hash is stored only — never consulted during resolution — so it is
-// taken over the raw template string (placeholders included) rather than requiring pure hex. Pure
-// hex is still hashed over its byte value so unlinked artifacts keep an identical snapshot to before.
-function runtimeBytecodeTemplateHash(value: JsonAny, label: string): string {
-  const template = bytecodeObject(value);
-  if (typeof template !== 'string' || template.length === 0) {
-    const error: JsonAny = new Error(`Deployment artifact ${label} is unavailable`);
-    error.code = 'INVALID_ARTIFACT';
-    throw error;
-  }
-  const normalized = template.toLowerCase();
-  return /^0x(?:[0-9a-fA-F]{2})*$/.test(normalized) ? keccak256(normalized) : keccak256(toUtf8Bytes(normalized));
 }
 
 function contractKindForArtifact(identity: JsonAny): string {
@@ -460,6 +459,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   const opaqueSafety = options.assertOpaqueBytesSafe ?? assertOpaqueBytesSafe;
   const inFlight = new Map<string, Promise<JsonAny>>();
   const gapDeadlineMs = options.nonceGapDeadlineMs ?? DEFAULT_NONCE_GAP_DEADLINE_MS;
+  const captureRetryDelayMs = options.descriptorCaptureRetryDelayMs ?? DEFAULT_DESCRIPTOR_CAPTURE_RETRY_DELAY_MS;
+  // Injectable so tests drive the bounded descriptor-capture retry deterministically without real
+  // backoff; production waits on an unref'd timer so a pending retry never keeps the process alive.
+  const delay: (ms: number) => Promise<void> =
+    options.delay ??
+    ((ms: number) =>
+      new Promise<void>(resolve => {
+        const handle = setTimeout(resolve, ms);
+        if (typeof (handle as JsonAny)?.unref === 'function') (handle as JsonAny).unref();
+      }));
 
   function nonceBaselineFor(signer: JsonAny): bigint {
     if (typeof addressMap.resolveNonceBaseline !== 'function') return 0n;
@@ -553,10 +562,13 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     } catch (error) {
       diskError = error;
     }
+    // Role-immutable descriptors no longer travel with the artifact envelope: they are deployment-
+    // scoped and resolved from the separate deployment-descriptor index (keyed by predicted address),
+    // so the artifact resolution here carries only ABI/identity/provenance.
+    const snapshot = addressMap.resolveArtifactSnapshot(operation.provenanceHash);
     if (disk !== undefined && disk.provenanceHash?.toLowerCase() === operation.provenanceHash) {
       return disk;
     }
-    const snapshot = addressMap.resolveArtifactSnapshot(operation.provenanceHash);
     if (snapshot !== undefined) {
       return {
         abi: snapshot.abi,
@@ -621,6 +633,181 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   async function resolveArtifact(address: JsonAny): Promise<JsonAny> {
     const metadata = metadataFor(address);
     return metadata === undefined ? undefined : verifiedArtifactForMetadata(metadata);
+  }
+
+  // A canonical proxy whose runtime immutable cannot be projected must fail rather than serve code that
+  // contradicts its reverse-mapped storage: returning an unprojected proxy _admin/_beacon is the exact
+  // upgrade-reverting bug this projection closes.
+  function unprojectableProxyCode(kind: JsonAny, predicted: JsonAny, cause?: JsonAny): RpcError {
+    return new RpcError(
+      -32000,
+      `Cannot project ${kind} runtime immutables at ${predicted} into the predicted world`,
+      { code: 'UNPROJECTABLE_PROXY_CODE' },
+      cause === undefined ? undefined : { cause },
+    );
+  }
+
+  // The artifact-scoped immutable source for a deployment, used only to rebuild role descriptors
+  // during eth_getCode enrichment (never a durable write). Returns an AUTHORITATIVE source — empty
+  // ranges mean the artifact genuinely declares no such immutable, and the paired runtime-template
+  // hash lets the zero-immutable pass-through verify the served code — or undefined when no
+  // trustworthy source resolves, letting the caller fail a proxy closed. The durable snapshot's
+  // `immutableReferences` are preferred because they survive an on-disk artifact that is gone or
+  // replaced; the on-disk artifact's deployedBytecode is the fallback for a legacy snapshot captured
+  // before the offsets field existed, honored only when its provenance still equals the provenance
+  // recorded for THIS deployment — a replaced-in-place artifact's offsets describe different runtime
+  // code and must never be bound. An internally-created ProxyAdmin's metadata points at the parent
+  // proxy's deployment (and its provenance), whose offsets do not describe ProxyAdmin code: the
+  // derived child resolves its own artifact's reference list instead.
+  function immutableReferencesForMetadata(metadata: JsonAny): ImmutableSource | undefined {
+    function diskSource(verified: JsonAny): ImmutableSource {
+      return {
+        ranges: immutableRanges(extractImmutableReferences(verified.artifact?.deployedBytecode)),
+        runtimeTemplateHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
+      };
+    }
+    let recordedProvenance;
+    if (metadata.provenanceHash !== undefined && metadata.provenanceHash !== null) {
+      recordedProvenance = metadata.provenanceHash;
+    } else {
+      const operation = journal.get(metadata.sourceTransaction)?.operationContext;
+      recordedProvenance = operation?.provenanceHash ?? undefined;
+      const derived = operation === undefined ? undefined : derivedTronProxyAdminIdentity(operation.artifactIdentity);
+      if (
+        metadata.contractKind === 'proxy-admin' &&
+        derived !== undefined &&
+        sameArtifactIdentity(metadata.artifactIdentity, derived)
+      ) {
+        try {
+          return diskSource(verifiedArtifactForIdentity(metadata.artifactIdentity));
+        } catch {
+          return undefined;
+        }
+      }
+    }
+    if (recordedProvenance === undefined || recordedProvenance === null) return undefined;
+    const snapshot = addressMap.resolveArtifactSnapshot(recordedProvenance);
+    if (snapshot?.immutableReferences !== undefined) {
+      return { ranges: snapshot.immutableReferences, runtimeTemplateHash: snapshot.runtimeBytecodeHash };
+    }
+    try {
+      const disk = verifiedArtifactForIdentity(metadata.artifactIdentity);
+      if (disk.provenanceHash?.toLowerCase() !== String(recordedProvenance).toLowerCase()) return undefined;
+      return diskSource(disk);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function toPredictedForProjection(actual: string): string | undefined {
+    try {
+      return addressMap.toPredicted(normalizeEvmAddress(actual));
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Rebuild a deployment's role descriptors from the runtime code being served, without any durable
+  // write. This is the "retry attempt first" for a deployment whose capture is pending or absent
+  // (legacy): the served code IS the actual runtime code at the requested block (the handler read it
+  // from the mapped actual address), so its embedded role addresses are read directly and bound against
+  // the artifact-scoped offsets. Returns undefined when no offsets are known (references unavailable) or
+  // the code cannot be interpreted, letting the caller apply the proxy-vs-contract fail-closed policy.
+  function enrichDescriptorsFromCode(
+    predicted: JsonAny,
+    metadata: JsonAny,
+    code: JsonAny,
+    source: ImmutableSource,
+  ): ImmutableDescriptor[] | undefined {
+    const ownActual = addressMap.toActual(predicted);
+    if (ownActual === undefined) return undefined;
+    try {
+      return buildDescriptorsFromRanges(metadata.contractKind, ownActual, code, source.ranges);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Rewrite a predicted contract's runtime code so its role immutables (a UUPS impl's __self, a
+  // transparent proxy's _admin, a beacon proxy's _beacon) present their predicted addresses, matching
+  // the reverse-mapped TRC-1967 storage slots eth_getStorageAt already serves. The role words come from
+  // the deployment-scoped descriptor index (keyed by predicted address); only those words are ever
+  // touched, so a non-role address immutable that coincidentally holds a mapped address is left
+  // byte-for-byte. A COMPLETE record is an authoritative commitment: a transparent/beacon proxy fails
+  // closed when it carries no role descriptor — unless the artifact authoritatively declares no
+  // address-width immutable at all (its admin/beacon lives only in the ERC-1967 storage slots, as in
+  // the OpenZeppelin v4 proxies), where the raw code embeds no address and passes through — and any
+  // descriptor whose committed value drifted from the on-chain code or does not resolve to its mapped
+  // predicted address fails closed for a proxy and
+  // a contract alike. A pending or absent (legacy) record is enriched ephemerally from the served code;
+  // if that cannot yield the required projection a proxy fails closed (signaling a retry / repair) while
+  // a plain contract passes through untouched — a non-proxy never fails closed.
+  function projectCodeImmutables(predicted: JsonAny, code: JsonAny): JsonAny {
+    const metadata = metadataFor(predicted);
+    if (metadata === undefined) return code;
+    // Empty upstream code (no deployed bytecode — e.g. a historical or pre-deployment block) carries no
+    // immutable to project and cannot contradict the reverse-mapped storage slots, so pass it through
+    // rather than tripping the proxy fail-closed path below on a legitimately code-less read.
+    if (code === '0x' || code === '0x0') return code;
+    const proxyKind = metadata.contractKind === 'transparent-proxy' || metadata.contractKind === 'beacon-proxy';
+    const requiredRole = metadata.contractKind === 'transparent-proxy' ? 'admin' : 'beacon';
+    const record = addressMap.resolveDeploymentDescriptor(predicted);
+
+    if (record !== undefined && record.status === 'complete') {
+      const descriptors = record.descriptors;
+      if (proxyKind && !descriptors.some((descriptor: JsonAny) => descriptor.role === requiredRole)) {
+        // A complete-but-empty record is legitimate for a proxy artifact that declares no address-width
+        // immutable (an admin/beacon held only in its ERC-1967 storage slots, as in the OpenZeppelin v4
+        // proxies): raw code embeds no address and cannot contradict the reverse-mapped slots. That
+        // safety is re-derived on every read, never assumed from the record shape: the authoritative
+        // offsets must be empty AND the served code must equal the artifact's runtime template
+        // byte-for-byte — provenance does not bind the reference map, so a proxy whose references were
+        // stripped still resolves empty ranges, but its live role address makes the served code differ
+        // from the template. Anything less fails closed.
+        const known = descriptors.length === 0 ? immutableReferencesForMetadata(metadata) : undefined;
+        if (known === undefined || hasAddressWidthRange(known.ranges) || !codeMatchesRuntimeTemplate(code, known)) {
+          throw unprojectableProxyCode(metadata.contractKind, predicted);
+        }
+        return code;
+      }
+      if (descriptors.length === 0) return code;
+      try {
+        return projectDescriptorImmutables(code, descriptors, predicted, toPredictedForProjection);
+      } catch (error) {
+        // A completed descriptor is an authoritative commitment: a drifted or unresolvable role
+        // immutable fails closed for a proxy and a contract alike rather than serving contradicting code.
+        throw unprojectableProxyCode(metadata.contractKind, predicted, error);
+      }
+    }
+
+    // Pending or absent (legacy): enrich ephemerally from the served code. No durable write here; the
+    // durable pending->complete transition happens only in a write context (recovery / repair).
+    const source = immutableReferencesForMetadata(metadata);
+    const descriptors = source === undefined ? undefined : enrichDescriptorsFromCode(predicted, metadata, code, source);
+    if (descriptors === undefined || source === undefined) {
+      if (proxyKind) throw unprojectableProxyCode(metadata.contractKind, predicted);
+      return code;
+    }
+    // An empty enrichment is authoritative here: the ranges resolved (else `undefined` above) and held
+    // no address-width entry, so the code embeds no address and passes through. A proxy kind must also
+    // match the artifact's runtime template byte-for-byte (see the complete-record branch above).
+    if (descriptors.length === 0) {
+      if (proxyKind && !codeMatchesRuntimeTemplate(code, source)) {
+        throw unprojectableProxyCode(metadata.contractKind, predicted);
+      }
+      return code;
+    }
+    if (proxyKind && !descriptors.some(descriptor => descriptor.role === requiredRole)) {
+      throw unprojectableProxyCode(metadata.contractKind, predicted);
+    }
+    try {
+      return projectDescriptorImmutables(code, descriptors, predicted, toPredictedForProjection);
+    } catch (error) {
+      // Ephemeral projection could not resolve: a proxy must not serve an unprojected role word, but a
+      // plain contract passes through untouched (a non-proxy never fails closed on the read path).
+      if (proxyKind) throw unprojectableProxyCode(metadata.contractKind, predicted, error);
+      return code;
+    }
   }
 
   async function readStorageAddress(target: JsonAny, slot: JsonAny): Promise<string> {
@@ -861,13 +1048,92 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     return reconciler.reconcile(record.sourceTransactionHash, receipt).receipt;
   }
 
-  // The prepared-native journal record and its artifact snapshot are persisted in two separate store
-  // transactions, so a crash between them leaves a prepared deployment with no snapshot. Rebuild the
-  // missing envelope from the on-disk artifact before the resumed transaction is broadcast, but only
-  // when the freshly re-resolved artifact's provenance still matches the journaled one. A changed or
-  // unresolvable artifact leaves the legacy no-snapshot behavior, which refuses a later resolution
-  // rather than binding a mismatched artifact to this deployment.
-  function reconstructMissingSnapshot(record: JsonAny): void {
+  // Read the raw actual runtime code at an on-chain address directly from upstream (no predicted->actual
+  // mapping and no projection), so descriptor capture can bind role immutables to the actual values the
+  // live code carries. The artifact's deployedBytecode cannot supply them (its immutable words are
+  // zeroed).
+  async function readActualRuntimeCode(actual: JsonAny): Promise<string> {
+    const code = await upstream.request('eth_getCode', [actual, 'latest']);
+    if (typeof code !== 'string' || !/^0x(?:[0-9a-f]{2})*$/i.test(code)) {
+      throw new Error('Upstream returned invalid runtime code for descriptor capture');
+    }
+    return code;
+  }
+
+  // The artifact-scoped immutable byte ranges to persist on a deployment's snapshot, flattened from the
+  // solc deployedBytecode.immutableReferences map. Returns undefined on a malformed map so the snapshot
+  // is written in its original (offset-less) shape rather than failing an already-confirmed deployment.
+  function snapshotImmutableReferences(deployedBytecode: JsonAny): ImmutableRange[] | undefined {
+    try {
+      return immutableRanges(extractImmutableReferences(deployedBytecode));
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Capture the deployment's semantic role-immutable descriptors from its ACTUAL on-chain runtime code,
+  // returning both the capture status and the descriptors. The upstream code is read only when the
+  // artifact declares an address-width immutable, so the common no-immutable contract does no upstream
+  // read and completes with an empty list. The read is retried a bounded number of times to absorb a
+  // transient failure or a not-yet-populated ('0x') body under read-your-writes / node lag. On
+  // persistent read failure the status is `pending` (a later verified read completes it); a malformed
+  // reference map is likewise pending — it is an unresolvable source, not proof of no immutables.
+  // Nothing is thrown: a CONFIRMED deployment must never fail on capture. Must be called once the
+  // deployment's actual code is on chain (post-confirmation).
+  async function captureDescriptorsBestEffort(
+    actualTarget: JsonAny,
+    kind: JsonAny,
+    ownActual: JsonAny,
+    deployedBytecode: JsonAny,
+  ): Promise<{ status: 'pending' | 'complete'; descriptors: ImmutableDescriptor[] }> {
+    let ranges;
+    try {
+      ranges = immutableRanges(extractImmutableReferences(deployedBytecode));
+    } catch {
+      // A malformed reference map is an UNRESOLVABLE source, not proof of "no immutables": completing
+      // empty would durably assert nothing-to-project for a deployment whose immutables are unknown
+      // (and repair skips complete records). Pending keeps it repairable from a valid artifact.
+      return { status: 'pending', descriptors: [] };
+    }
+    if (!ranges.some(range => range.length >= 20)) return { status: 'complete', descriptors: [] };
+    for (let attempt = 1; attempt <= DESCRIPTOR_CAPTURE_ATTEMPTS; attempt += 1) {
+      try {
+        const code = await readActualRuntimeCode(actualTarget);
+        return { status: 'complete', descriptors: buildDescriptorsFromRanges(kind, ownActual, code, ranges) };
+      } catch {
+        if (attempt < DESCRIPTOR_CAPTURE_ATTEMPTS) await delay(captureRetryDelayMs);
+      }
+    }
+    return { status: 'pending', descriptors: [] };
+  }
+
+  // Persist a deployment's captured descriptors keyed by predicted address, guarded and best-effort:
+  // the predicted->actual mapping must already exist (it is written by the reconciler at confirm), and a
+  // confirmed deployment must never fail on descriptor persistence, so a missing mapping is skipped and
+  // any transition refusal (e.g. a re-sent deploy whose recapture would regress a completed record to
+  // pending) is swallowed. The snapshot and descriptor are separate store transactions; both idempotent.
+  function persistDeploymentDescriptor(
+    predicted: JsonAny,
+    capture: { status: 'pending' | 'complete'; descriptors: ImmutableDescriptor[] },
+  ): void {
+    if (predicted === undefined || predicted === null) return;
+    try {
+      if (addressMap.resolvePredicted(predicted) === undefined) return;
+      addressMap.setDeploymentDescriptor({ predicted, status: capture.status, descriptors: capture.descriptors });
+    } catch {
+      // Best-effort: never fail an already-confirmed deployment on descriptor persistence.
+    }
+  }
+
+  // The prepared-native journal record, its artifact snapshot, and its deployment descriptor are
+  // persisted in separate store transactions, so a crash between them can leave a prepared deployment
+  // with no snapshot and/or no completed descriptor. Rebuild whatever is missing from the on-disk
+  // artifact once the resumed transaction has confirmed (so its actual runtime code is readable for
+  // descriptor binding), but only when the freshly re-resolved artifact's provenance still matches the
+  // journaled one. A changed or unresolvable artifact leaves the no-snapshot behavior, which refuses a
+  // later resolution rather than binding a mismatched artifact to this deployment. This is the recovery
+  // durable-transition site: a pending descriptor whose read now succeeds is completed here.
+  async function reconstructMissingSnapshot(record: JsonAny): Promise<void> {
     const operation = record?.operationContext;
     if (
       operation === undefined ||
@@ -879,7 +1145,17 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     ) {
       return;
     }
-    if (addressMap.resolveArtifactSnapshot(operation.provenanceHash) !== undefined) return;
+    const existingSnapshot = addressMap.resolveArtifactSnapshot(operation.provenanceHash);
+    const snapshotHasOffsets = existingSnapshot?.immutableReferences !== undefined;
+    const descriptorRecord =
+      operation.predictedContractAddress === undefined || operation.predictedContractAddress === null
+        ? undefined
+        : addressMap.resolveDeploymentDescriptor(operation.predictedContractAddress);
+    // Fully durable already: the snapshot carries offsets AND the descriptor is complete. A snapshot
+    // that exists but is offset-less (a legacy pre-offsets capture) is NOT durable for a completed
+    // descriptor — a later read would fall back to the on-disk artifact and fail closed once it is
+    // gone — so recovery proceeds to enrich it below rather than skipping on snapshot existence alone.
+    if (snapshotHasOffsets && descriptorRecord?.status === 'complete') return;
     let verified;
     try {
       verified = verifiedArtifactForIdentity(operation.artifactIdentity);
@@ -887,18 +1163,36 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       return;
     }
     if (verified.provenanceHash?.toLowerCase() !== operation.provenanceHash) return;
-    addressMap.setArtifactSnapshot({
-      provenanceHash: operation.provenanceHash,
-      artifactIdentity: operation.artifactIdentity,
-      contractKind: operation.contractKind,
-      abi: verified.artifact?.abi,
-      creationBytecodeHash: bytecodeHash(verified.artifact?.bytecode, 'creation bytecode'),
-      runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
-    });
+    // Capture never throws; the base envelope is always persisted exactly once (with the artifact-scoped
+    // immutable offsets), so a confirmed deployment never loses its ABI-orphan protection to a transient
+    // post-confirmation read failure. The per-deployment descriptor is written separately, keyed by
+    // predicted address.
+    const capture = await captureDescriptorsBestEffort(
+      operation.actualTarget,
+      operation.contractKind,
+      operation.actualTarget,
+      verified.artifact?.deployedBytecode,
+    );
+    const references = snapshotImmutableReferences(verified.artifact?.deployedBytecode);
+    if (existingSnapshot === undefined) {
+      addressMap.setArtifactSnapshot({
+        provenanceHash: operation.provenanceHash,
+        artifactIdentity: operation.artifactIdentity,
+        contractKind: operation.contractKind,
+        abi: verified.artifact?.abi,
+        creationBytecodeHash: bytecodeHash(verified.artifact?.bytecode, 'creation bytecode'),
+        runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
+        ...(references === undefined ? {} : { immutableReferences: references }),
+      });
+    } else if (!snapshotHasOffsets && references !== undefined) {
+      // Enrich a legacy offset-less snapshot in place (an offsets-only difference the snapshot store
+      // reconciles) so a descriptor completed by this recovery resolves durable offsets on later reads.
+      addressMap.setArtifactSnapshot({ ...existingSnapshot, immutableReferences: references });
+    }
+    persistDeploymentDescriptor(operation.predictedContractAddress, capture);
   }
 
   async function resumePrepared(record: JsonAny): Promise<JsonAny> {
-    reconstructMissingSnapshot(record);
     const snapshot = await nativeClient.getTransaction(record.nativeTransactionId);
     if (snapshot === null) {
       await nativeClient.broadcastSigned(record.signedNativeTransaction, record.nativeTransactionId);
@@ -906,6 +1200,9 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     let current = journal.get(record.sourceTransactionHash);
     if (current.state === 'native-built') current = journal.recordBroadcast(record.sourceTransactionHash);
     await waitAndReconcile(current);
+    // Reconstruct the crash-lost snapshot only after confirmation, when the deployment's actual runtime
+    // code is on chain and its role immutables can be bound.
+    await reconstructMissingSnapshot(record);
     return record.sourceTransactionHash;
   }
 
@@ -915,7 +1212,7 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       const decoded = decode(raw, { expectedSender: config.expectedSender, expectedChainId: config.chainId });
       let built;
       let operationContext;
-      let artifactSnapshot;
+      let deploymentCapture;
       if (decoded.kind === 'deployment') {
         const match = matchArtifact({ outputDirectory: config.foundryOut, initcode: decoded.data });
         const rewritten = await rewriteDeploy(match, rewriteDependencies);
@@ -941,13 +1238,18 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         };
         // Capture the verified artifact envelope from this just-verified deployment match, so a later
         // in-place replacement of the same-named on-disk artifact cannot orphan this deployment's ABI.
-        artifactSnapshot = {
-          provenanceHash: operationContext.provenanceHash,
-          artifactIdentity: identity,
-          contractKind: operationContext.contractKind,
-          abi: rewritten.abi ?? rewritten.artifact?.abi,
-          creationBytecodeHash: bytecodeHash(match.creationBytecode, 'creation bytecode'),
-          runtimeBytecodeHash: runtimeBytecodeTemplateHash(match.artifact?.deployedBytecode, 'runtime bytecode'),
+        // The role-immutable descriptors are bound after confirmation (see below), when the deployment's
+        // actual runtime code is on chain to read the embedded values from.
+        deploymentCapture = {
+          base: {
+            provenanceHash: operationContext.provenanceHash,
+            artifactIdentity: identity,
+            contractKind: operationContext.contractKind,
+            abi: rewritten.abi ?? rewritten.artifact?.abi,
+            creationBytecodeHash: bytecodeHash(match.creationBytecode, 'creation bytecode'),
+            runtimeBytecodeHash: runtimeBytecodeTemplateHash(match.artifact?.deployedBytecode, 'runtime bytecode'),
+          },
+          deployedBytecode: match.artifact?.deployedBytecode,
         };
       } else {
         const context = await resolveCallContext(decoded.to);
@@ -987,13 +1289,31 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         built.transaction,
       );
       const prepared = reconciler.recordPreparedNative(sourceHash, native, simulation, operationContext);
-      // Persist the deployment's immutable artifact envelope once its native transaction is durably
-      // prepared. The snapshot is keyed by provenance hash and never overwritten, so a re-prepared or
-      // recovered deployment reuses the identical envelope.
-      if (artifactSnapshot !== undefined) addressMap.setArtifactSnapshot(artifactSnapshot);
       await nativeClient.broadcastSigned(prepared.signedNativeTransaction, prepared.nativeTransactionId);
       const broadcast = journal.recordBroadcast(sourceHash);
       await waitAndReconcile(broadcast);
+      // Persist the deployment's immutable artifact envelope once the transaction has confirmed, so the
+      // deployment's actual runtime code is on chain to bind its role-immutable descriptors from. The
+      // snapshot is keyed by provenance hash and never overwritten, so a re-prepared or recovered
+      // deployment reuses the identical envelope. Descriptor capture is best-effort and never throws:
+      // the base envelope is always persisted exactly once with whatever descriptors were captured ([]
+      // on a persistent capture failure), rather than failing the already-confirmed transaction or
+      // dropping the base snapshot; a later read then fails closed for a proxy (signaling re-adopt) as
+      // an absent snapshot does.
+      if (deploymentCapture !== undefined) {
+        const capture = await captureDescriptorsBestEffort(
+          operationContext.actualTarget,
+          operationContext.contractKind,
+          operationContext.actualTarget,
+          deploymentCapture.deployedBytecode,
+        );
+        const references = snapshotImmutableReferences(deploymentCapture.deployedBytecode);
+        addressMap.setArtifactSnapshot({
+          ...deploymentCapture.base,
+          ...(references === undefined ? {} : { immutableReferences: references }),
+        });
+        persistDeploymentDescriptor(operationContext.predictedContractAddress, capture);
+      }
       return sourceHash;
     } catch (error) {
       const current = journal.get(sourceHash);
@@ -1119,7 +1439,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
             ? null
             : ethereumTransaction(record);
       }
-      case 'eth_getCode':
+      case 'eth_getCode': {
+        const [address, block] = requirePositional(params, 1, 2);
+        const normalized = normalizeEvmAddress(address);
+        const rewritten = [mappedAddress(normalized), ...(block === undefined ? [] : [block])];
+        const code = await requestStockCompatibleRead(upstream, method, rewritten, block);
+        // Only a predicted, gateway-mapped address reads the projected (predicted-world) code; an
+        // actual, unmapped, or zero address reads the raw upstream code byte-for-byte.
+        if (normalized === ZERO_ADDRESS || addressMap.resolvePredicted(normalized) === undefined) return code;
+        return projectCodeImmutables(normalized, code);
+      }
       case 'eth_getBalance': {
         const [address, block] = requirePositional(params, 1, 2);
         const rewritten = [mappedAddress(address), ...(block === undefined ? [] : [block])];
@@ -1162,6 +1491,17 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       case 'eth_getBlockByNumber': {
         requirePositional(params, 2);
         return normalizeUpstreamBlock(await upstream.request(method, params));
+      }
+      case 'eth_getLogs': {
+        // A log query crosses the address boundary in both directions. Inbound, the caller's filter
+        // is expressed in predicted addresses the node has never heard of, so map its address/topics
+        // to the actual world before forwarding (otherwise it matches nothing). Outbound, each
+        // returned log carries actual addresses in its emitter, topics, and data; reverse-map them so
+        // the caller only ever sees the predicted world. Addresses outside the gateway map, and
+        // non-address words, pass through untouched.
+        const forwarded = await upstream.request(method, mapFilterParams(params, actual => mappedAddress(actual)));
+        if (!Array.isArray(forwarded)) return forwarded;
+        return forwarded.map((log: JsonAny) => mapLogEntry(log, actual => addressMap.toPredicted(actual) ?? actual));
       }
       case 'tron_resolveAddress': {
         const [address] = requirePositional(params, 1);

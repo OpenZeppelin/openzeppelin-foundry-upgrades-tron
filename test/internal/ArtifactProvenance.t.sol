@@ -34,6 +34,9 @@ contract ArtifactProvenanceTest is Test {
                 "0.8.22",
                 "contracts/Widget.sol:Widget",
                 "6001600055",
+                // The deployed runtime template, bound alongside creation bytecode; the valid fixture
+                // declares no deployedBytecode, so the empty string participates.
+                "",
                 sources,
                 sourceHashes
             )

@@ -1,10 +1,12 @@
 import { toEvmAddress } from './address-codec.js';
 import type { ArtifactIdentity } from './artifact-identities.js';
+import type { ImmutableDescriptor, ImmutableRange } from './immutable-projection.js';
 import { validateChainIdentity, type ChainState } from './store.js';
 
 const ADDRESS_MAP_VERSION = 1;
 const CONTRACT_METADATA_VERSION = 1;
 const ARTIFACT_SNAPSHOT_VERSION = 1;
+const DEPLOYMENT_DESCRIPTOR_VERSION = 1;
 const NONCE_BASELINE_VERSION = 1;
 const TRANSACTION_HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
 const CONTRACT_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
@@ -67,12 +69,42 @@ export interface ArtifactSnapshotRecord {
   // whose runtime bytecode still carries __$...$__ placeholders it hashes the raw runtime template
   // (placeholders included) rather than the — unavailable — fully linked runtime bytes.
   runtimeBytecodeHash: string;
+  // The artifact-scoped constructor-set immutable byte ranges (start/length), flattened from the solc
+  // deployedBytecode.immutableReferences map. Identical for every deployment of an artifact (they are
+  // offsets, not values), so this never conflicts across deployments of one artifact. Optional so
+  // pre-existing on-disk snapshots (captured before this field existed) stay valid without a version
+  // bump. It lets eth_getCode descriptor enrichment rebuild role bindings from a fresh on-chain read
+  // even when the on-disk artifact is gone. The per-deployment role VALUES live in the separate
+  // deployment-descriptor index (keyed by predicted address), never here.
+  immutableReferences?: ImmutableRange[];
 }
 
 /** The durable artifact-snapshot index for one chain, keyed by provenance hash. */
 export interface ArtifactSnapshotIndex {
   version: number;
   byProvenanceHash: Record<string, ArtifactSnapshotRecord>;
+}
+
+/** The lifecycle of a deployment's descriptor capture: [] until a verified read completes it. */
+export type DescriptorCaptureStatus = 'pending' | 'complete';
+
+/**
+ * One deployment's captured role-immutable descriptors, keyed by its predicted address. Descriptors
+ * are deployment-specific (they bind the actual controller/self addresses this particular deployment
+ * embeds), so — unlike the artifact-scoped snapshot — two deployments of the same artifact each own
+ * an independent record. `descriptors` MUST be empty while `status` is `pending`; a `pending` record
+ * marks a capture whose post-confirmation read failed, to be completed later by verified enrichment.
+ */
+export interface DeploymentDescriptorRecord {
+  predicted: string;
+  status: DescriptorCaptureStatus;
+  descriptors: ImmutableDescriptor[];
+}
+
+/** The durable per-deployment descriptor index for one chain, keyed by predicted address. */
+export interface DeploymentDescriptorIndex {
+  version: number;
+  byPredicted: Record<string, DeploymentDescriptorRecord>;
 }
 
 /** The subset of a durable store's API used by {@link AddressMap}. */
@@ -306,18 +338,45 @@ function normalizeHash32(value: JsonAny, field: string): string {
   return value.toLowerCase();
 }
 
+// Validate and canonicalize a flattened immutable-reference list: an array of { start, length } where
+// start is a non-negative safe integer and length a positive safe integer (same shape the projection
+// module validates). Rebuilt into a canonical field order so a persisted snapshot round-trips and an
+// identical re-store stays idempotent regardless of the caller's key ordering. Throws on malformed
+// content.
+function normalizeImmutableRanges(ranges: JsonAny): ImmutableRange[] {
+  if (!Array.isArray(ranges)) {
+    throw new Error('Invalid artifact snapshot immutable references');
+  }
+  return ranges.map(entry => {
+    if (
+      !isObject(entry) ||
+      Object.keys(entry).sort().join(',') !== 'length,start' ||
+      !Number.isSafeInteger(entry.start) ||
+      !Number.isSafeInteger(entry.length) ||
+      entry.start < 0 ||
+      entry.length <= 0
+    ) {
+      throw new Error('Invalid artifact snapshot immutable references');
+    }
+    return { start: entry.start, length: entry.length };
+  });
+}
+
 function normalizeArtifactSnapshot(snapshot: JsonAny): ArtifactSnapshotRecord {
+  const fields = isObject(snapshot) ? Object.keys(snapshot).sort().join(',') : '';
+  const base = 'abi,artifactIdentity,contractKind,creationBytecodeHash,provenanceHash,runtimeBytecodeHash';
+  const withReferences =
+    'abi,artifactIdentity,contractKind,creationBytecodeHash,immutableReferences,provenanceHash,runtimeBytecodeHash';
   if (
     !isObject(snapshot) ||
-    Object.keys(snapshot).sort().join(',') !==
-      'abi,artifactIdentity,contractKind,creationBytecodeHash,provenanceHash,runtimeBytecodeHash' ||
+    (fields !== base && fields !== withReferences) ||
     typeof snapshot.contractKind !== 'string' ||
     !CONTRACT_KIND_PATTERN.test(snapshot.contractKind) ||
     !Array.isArray(snapshot.abi)
   ) {
     throw new Error('Invalid artifact snapshot');
   }
-  return {
+  const record: ArtifactSnapshotRecord = {
     provenanceHash: normalizeHash32(snapshot.provenanceHash, 'provenance hash'),
     artifactIdentity: normalizeArtifactIdentity(snapshot.artifactIdentity),
     contractKind: snapshot.contractKind,
@@ -325,6 +384,10 @@ function normalizeArtifactSnapshot(snapshot: JsonAny): ArtifactSnapshotRecord {
     creationBytecodeHash: normalizeHash32(snapshot.creationBytecodeHash, 'creation bytecode hash'),
     runtimeBytecodeHash: normalizeHash32(snapshot.runtimeBytecodeHash, 'runtime bytecode hash'),
   };
+  if (fields === withReferences) {
+    record.immutableReferences = normalizeImmutableRanges(snapshot.immutableReferences);
+  }
+  return record;
 }
 
 function emptyArtifactSnapshots(): ArtifactSnapshotIndex {
@@ -356,6 +419,13 @@ function requireArtifactSnapshots(chain: ChainState): ArtifactSnapshotIndex {
   return snapshots as unknown as ArtifactSnapshotIndex;
 }
 
+// A snapshot record with its optional artifact-scoped immutable offsets removed, for comparing two
+// envelopes that may differ only in whether those offsets were captured.
+function withoutImmutableReferences(record: ArtifactSnapshotRecord): Omit<ArtifactSnapshotRecord, 'immutableReferences'> {
+  const { immutableReferences: _references, ...rest } = record;
+  return rest;
+}
+
 function setArtifactSnapshotInChain(chain: ChainState, value: JsonAny): ArtifactSnapshotRecord {
   const record = normalizeArtifactSnapshot(value);
   const snapshots = requireArtifactSnapshots(chain);
@@ -363,8 +433,24 @@ function setArtifactSnapshotInChain(chain: ChainState, value: JsonAny): Artifact
   if (existing !== undefined) {
     // A provenance hash cryptographically binds one artifact, so an identical re-store is an
     // idempotent retry; any differing envelope for the same hash is refused and never overwritten.
-    if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('Artifact snapshot conflict');
-    return existing;
+    if (JSON.stringify(existing) === JSON.stringify(record)) return existing;
+    // One reconciliation: a record written before offset capture existed differs from a new write of
+    // the same artifact only by the added `immutableReferences`. Upgrade it in place (offsets are
+    // artifact-scoped and deterministic from the same provenance-bound bytecode) rather than failing a
+    // confirmed deployment; the reverse direction keeps the richer existing record. Any other
+    // difference is still a conflict.
+    const offsetsOnlyDifference =
+      (existing.immutableReferences === undefined) !== (record.immutableReferences === undefined) &&
+      JSON.stringify(withoutImmutableReferences(existing)) === JSON.stringify(withoutImmutableReferences(record));
+    if (offsetsOnlyDifference) {
+      if (existing.immutableReferences === undefined) {
+        snapshots.byProvenanceHash[record.provenanceHash] = record;
+        chain.artifactSnapshots = snapshots;
+        return record;
+      }
+      return existing;
+    }
+    throw new Error('Artifact snapshot conflict');
   }
   snapshots.byProvenanceHash[record.provenanceHash] = record;
   chain.artifactSnapshots = snapshots;
@@ -374,6 +460,133 @@ function setArtifactSnapshotInChain(chain: ChainState, value: JsonAny): Artifact
 function resolveArtifactSnapshotInChain(chain: ChainState, provenanceHash: JsonAny): ArtifactSnapshotRecord | undefined {
   const normalized = normalizeHash32(provenanceHash, 'provenance hash');
   return requireArtifactSnapshots(chain).byProvenanceHash[normalized];
+}
+
+const IMMUTABLE_ROLES = new Set(['self', 'admin', 'beacon']);
+const IMMUTABLE_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+
+// Validate and canonicalize the immutable descriptor list: an array of { role, start, length,
+// expectedActual } where role is one of the known roles, start is a non-negative safe integer, length
+// a positive safe integer, and expectedActual a normalized (0x + 40 lowercase hex) address. Rebuilt
+// into a canonical field order so a persisted descriptor record round-trips and an identical re-store
+// stays idempotent regardless of the caller's key ordering. Throws on any malformed content.
+function normalizeImmutableDescriptors(descriptors: JsonAny): ImmutableDescriptor[] {
+  if (!Array.isArray(descriptors)) {
+    throw new Error('Invalid deployment descriptor record');
+  }
+  return descriptors.map(entry => {
+    if (
+      !isObject(entry) ||
+      Object.keys(entry).sort().join(',') !== 'expectedActual,length,role,start' ||
+      !IMMUTABLE_ROLES.has(entry.role) ||
+      !Number.isSafeInteger(entry.start) ||
+      !Number.isSafeInteger(entry.length) ||
+      entry.start < 0 ||
+      entry.length <= 0 ||
+      typeof entry.expectedActual !== 'string' ||
+      !IMMUTABLE_ADDRESS_PATTERN.test(entry.expectedActual)
+    ) {
+      throw new Error('Invalid deployment descriptor record');
+    }
+    return {
+      role: entry.role as ImmutableDescriptor['role'],
+      start: entry.start,
+      length: entry.length,
+      expectedActual: entry.expectedActual,
+    };
+  });
+}
+
+function normalizeDeploymentDescriptor(value: JsonAny): DeploymentDescriptorRecord {
+  if (!isObject(value) || Object.keys(value).sort().join(',') !== 'descriptors,predicted,status') {
+    throw new Error('Invalid deployment descriptor record');
+  }
+  if (value.status !== 'pending' && value.status !== 'complete') {
+    throw new Error('Invalid deployment descriptor record');
+  }
+  const record: DeploymentDescriptorRecord = {
+    predicted: normalizeNonzeroAddress(value.predicted, 'predicted'),
+    status: value.status,
+    descriptors: normalizeImmutableDescriptors(value.descriptors),
+  };
+  // A pending record marks an incomplete capture and carries no descriptors; only a completed capture
+  // may bind role immutables. Enforcing it here keeps every persisted record self-consistent.
+  if (record.status === 'pending' && record.descriptors.length !== 0) {
+    throw new Error('Invalid deployment descriptor record');
+  }
+  return record;
+}
+
+function emptyDeploymentDescriptors(): DeploymentDescriptorIndex {
+  return { version: DEPLOYMENT_DESCRIPTOR_VERSION, byPredicted: {} };
+}
+
+function requireDeploymentDescriptors(chain: ChainState): DeploymentDescriptorIndex {
+  const descriptors = chain.deploymentDescriptors;
+  if (descriptors === undefined) return emptyDeploymentDescriptors();
+  if (
+    !isObject(descriptors) ||
+    Object.keys(descriptors).sort().join(',') !== 'byPredicted,version' ||
+    descriptors.version !== DEPLOYMENT_DESCRIPTOR_VERSION ||
+    !isObject(descriptors.byPredicted)
+  ) {
+    throw new Error('Corrupt deployment descriptor index');
+  }
+  const indexes = requireIndexes(chain);
+  for (const [predicted, rawRecord] of Object.entries(descriptors.byPredicted)) {
+    let record: DeploymentDescriptorRecord;
+    try {
+      record = normalizeDeploymentDescriptor(rawRecord);
+    } catch (error) {
+      throw new Error('Corrupt deployment descriptor record', { cause: error });
+    }
+    if (
+      predicted !== record.predicted ||
+      JSON.stringify(rawRecord) !== JSON.stringify(record) ||
+      indexes.byPredicted[predicted] === undefined
+    ) {
+      throw new Error('Corrupt deployment descriptor index');
+    }
+  }
+  return descriptors as unknown as DeploymentDescriptorIndex;
+}
+
+// The one durable record with a controlled state transition rather than pure conflict-refuse. A
+// pending capture may be COMPLETED by a later verified read (pending -> complete replaces the record),
+// while a completed capture is immutable: an identical re-store is idempotent, a differing one is
+// refused, and it can never regress to pending. Requires the deployment's address mapping to exist
+// first, so a descriptor never dangles without the predicted->actual binding eth_getCode resolves it
+// through.
+function setDeploymentDescriptorInChain(chain: ChainState, value: JsonAny): DeploymentDescriptorRecord {
+  const record = normalizeDeploymentDescriptor(value);
+  const indexes = requireIndexes(chain);
+  if (indexes.byPredicted[record.predicted] === undefined) {
+    throw new Error('Deployment descriptors require an address mapping');
+  }
+  const descriptors = requireDeploymentDescriptors(chain);
+  const existing = descriptors.byPredicted[record.predicted];
+  if (existing !== undefined) {
+    if (existing.status === 'complete') {
+      if (record.status === 'pending') throw new Error('Deployment descriptor cannot regress to pending');
+      if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('Deployment descriptor conflict');
+      return existing;
+    }
+    // A pending record: an incoming pending is an idempotent no-op (both empty); an incoming complete
+    // is the enrichment transition that replaces it.
+    if (record.status === 'pending') return existing;
+  }
+  descriptors.byPredicted[record.predicted] = record;
+  chain.deploymentDescriptors = descriptors;
+  return record;
+}
+
+function resolveDeploymentDescriptorInChain(chain: ChainState, address: JsonAny): DeploymentDescriptorRecord | undefined {
+  const normalized = normalizeNonzeroAddress(address, 'deployment descriptor');
+  const indexes = requireIndexes(chain);
+  const descriptors = requireDeploymentDescriptors(chain);
+  const predicted = indexes.byPredicted[normalized] === undefined ? indexes.byActual[normalized] : normalized;
+  if (predicted === undefined) return undefined;
+  return descriptors.byPredicted[predicted];
 }
 
 /** The durable per-signer transaction-count baseline index for one chain. */
@@ -514,6 +727,17 @@ class AddressMap {
     return record === undefined ? undefined : structuredClone(record);
   }
 
+  setDeploymentDescriptor(value: JsonAny): DeploymentDescriptorRecord {
+    return this.store.transaction(this.chainIdentity, chain => setDeploymentDescriptorInChain(chain, value));
+  }
+
+  resolveDeploymentDescriptor(address: JsonAny): DeploymentDescriptorRecord | undefined {
+    const chain = this.store.readChain(this.chainIdentity);
+    if (chain === undefined) return undefined;
+    const record = resolveDeploymentDescriptorInChain(chain, address);
+    return record === undefined ? undefined : structuredClone(record);
+  }
+
   setNonceBaseline(baseline: JsonAny): bigint {
     return this.store.transaction(this.chainIdentity, chain => setNonceBaselineInChain(chain, baseline));
   }
@@ -529,16 +753,20 @@ export {
   ADDRESS_MAP_VERSION,
   ARTIFACT_SNAPSHOT_VERSION,
   CONTRACT_METADATA_VERSION,
+  DEPLOYMENT_DESCRIPTOR_VERSION,
   NONCE_BASELINE_VERSION,
   AddressMap,
   requireArtifactSnapshots,
+  requireDeploymentDescriptors,
   requireIndexes,
   requireNonceBaselines,
   resolveArtifactSnapshotInChain,
   resolveContractMetadataInChain,
+  resolveDeploymentDescriptorInChain,
   resolveNonceBaselineInChain,
   setArtifactSnapshotInChain,
   setContractMetadataInChain,
+  setDeploymentDescriptorInChain,
   setMappingInChain,
   setNonceBaselineInChain,
 };
