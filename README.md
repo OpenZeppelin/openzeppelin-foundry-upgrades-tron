@@ -1,9 +1,119 @@
 # OpenZeppelin Foundry Upgrades for TRON
 
-Foundry library and local JSON-RPC adapter for validating, deploying, and
-upgrading proxy contracts on TRON (TVM). The Solidity API follows OpenZeppelin
-Foundry Upgrades, while the adapter translates Forge's signed legacy Ethereum
-transactions into native TRON transactions.
+Deploy and upgrade **UUPS, Transparent, and Beacon** proxies on TRON using the
+*unmodified* OpenZeppelin Foundry upgrades API. You write ordinary Foundry
+scripts; a small local adapter makes TRON look like a normal EVM chain to Forge.
+
+## How it works
+
+Forge computes a contract's address *before* deploying (a **predicted** address)
+and builds its whole simulation around it. TRON assigns a *different* **actual**
+address on-chain, and its RPC differs from Ethereum's. The adapter is a local
+JSON-RPC process that sits between Forge and a TRON node and reconciles the two:
+
+```text
+  forge script          Adapter                 TRON node
+  (Upgrades.sol)  ──▶   predicted ⇄ actual  ──▶  (java-tron)
+       ▲                translates reads            │
+       └──────────  predicted view  ◀───────────────┘
+```
+
+- **You always work with predicted addresses.** The adapter translates code,
+  storage slots, call results, logs, and receipts back to the predicted world,
+  so Forge stays consistent — you never touch a TRON address inside a script.
+- **The adapter must be running**, and Forge must point at it via `--rpc-url`.
+- **State is durable.** The predicted↔actual mappings live in a state file —
+  back it up like a keystore; it is the only record of your deployments.
+
+## Quickstart
+
+Deploy and upgrade a UUPS proxy against a local TRON node, end to end.
+
+**1 · Install** (keeps the Solidity library and the adapter together):
+
+```sh
+forge install OpenZeppelin/openzeppelin-foundry-upgrades-tron
+(cd lib/openzeppelin-foundry-upgrades-tron && npm install && npm run build:rpc)
+```
+
+Add the remappings:
+
+```text
+openzeppelin-foundry-upgrades-tron/=lib/openzeppelin-foundry-upgrades-tron/src/
+openzeppelin-tron-solidity/=lib/openzeppelin-foundry-upgrades-tron/lib/openzeppelin-tron-solidity/
+```
+
+**2 · Configure `foundry.toml`:**
+
+```toml
+ffi = true
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "./" }]
+```
+
+**3 · Write an ordinary deploy script** (`script/Deploy.s.sol`):
+
+```solidity
+import {Script, console2} from "forge-std/Script.sol";
+import {Upgrades} from "openzeppelin-foundry-upgrades-tron/Upgrades.sol";
+
+contract Deploy is Script {
+    function run() external {
+        vm.startBroadcast();
+        address proxy = Upgrades.deployUUPSProxy(
+            "Box.sol:Box",
+            abi.encodeCall(Box.initialize, (msg.sender, 1))
+        );
+        console2.log("proxy", proxy); // predicted address
+        vm.stopBroadcast();
+    }
+}
+```
+
+**4 · Start the adapter** (defaults to a local TRE node):
+
+```sh
+npm run rpc:init     # once — creates the durable state file
+npm run rpc:start    # listens on http://127.0.0.1:8545
+```
+
+**5 · Broadcast through the adapter:**
+
+```sh
+ETH_RPC_TIMEOUT=300 forge script script/Deploy.s.sol \
+  --rpc-url http://127.0.0.1:8545 --broadcast --legacy --slow \
+  --disable-block-gas-limit --timeout 300
+```
+
+**6 · See the predicted ↔ actual mapping:**
+
+```sh
+npm run rpc:resolve -- <predicted-address>
+npm run rpc:mappings
+```
+
+**To upgrade**, run the same flow with an upgrade script — identify the previous
+version with `referenceContract` (or `@custom:oz-upgrades-from`):
+
+```solidity
+Options memory opts;
+opts.referenceContract = "Box.sol:Box";
+Upgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
+```
+
+> **Public networks:** set `TRON_NETWORK`, `TRON_RPC_URL`, `TRON_PRIVATE_KEY`,
+> and `TRON_CHAIN_ID` explicitly, and read [rpc/SECURITY.md](rpc/SECURITY.md)
+> before exposing the adapter beyond loopback.
+
+---
+
+# Reference
+
+The Quickstart above is all most projects need. The sections below are the full
+reference — npm install, the complete Solidity API, compiler provenance & FFI
+security, adapter behavior & internals, state recovery, and TVM differences.
 
 ## Install
 
