@@ -41,7 +41,7 @@
     "prepack": "npm run build:rpc && node scripts/require-package-contents.cjs"
   },
   "dependencies": {
-    "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
+    "@openzeppelin/tron-runtime": "0.1.0-alpha.1",
     "ethers": "6.17.0",
     "tronweb": "6.4.0"
   },
