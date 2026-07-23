@@ -3200,3 +3200,196 @@ test('classifies privileged contract kinds only for exact canonical TRON and ups
     'contract',
   );
 });
+
+// --- Adversarial / malformed JSON-RPC at the handler boundary -------------------------------------
+// The gateway must answer every malformed request with a typed JSON-RPC error, never throw out of
+// `handle`, and never mutate durable state (journal) or reach upstream on a request rejected during
+// envelope or parameter validation.
+
+function noUpstream(result: JsonAny): boolean {
+  return result.calls.filter((call: JsonAny) => call.type === 'upstream').length === 0;
+}
+
+test('rejects malformed request envelopes with -32600 and no state mutation', async (t: TestContext) => {
+  const result = fixture(t);
+  const envelopes: JsonAny[] = [
+    'a string payload',
+    42,
+    null,
+    true,
+    [],
+    { id: 1, method: 'eth_chainId', params: [] }, // missing jsonrpc
+    { jsonrpc: '1.0', id: 1, method: 'eth_chainId', params: [] }, // wrong version
+    { jsonrpc: '2.0', id: 1, method: '', params: [] }, // empty method
+    { jsonrpc: '2.0', id: 1, method: 123, params: [] }, // non-string method
+    { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: 'nope' }, // params neither array nor object
+    { jsonrpc: '2.0', id: {}, method: 'eth_chainId', params: [] }, // object id
+    { jsonrpc: '2.0', id: [1], method: 'eth_chainId', params: [] }, // array id
+    { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [], extra: true }, // unknown member
+  ];
+  for (const payload of envelopes) {
+    const response = await result.handlers.handle(payload);
+    assert.equal(response.error.code, -32600, JSON.stringify(payload));
+    assert.equal(response.id, null);
+  }
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('rejects an unknown method with -32601 and reports the request id', async (t: TestContext) => {
+  const result = fixture(t);
+  const response = await result.handlers.handle({ jsonrpc: '2.0', id: 7, method: 'eth_unknownMethod', params: [] });
+  assert.equal(response.error.code, -32601);
+  assert.equal(response.id, 7);
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('rejects wrong parameter arity and shape with -32602 before any upstream or native work', async (t: TestContext) => {
+  const result = fixture(t);
+  const cases: [string, JsonAny][] = [
+    ['eth_chainId', [1]], // extra param on a zero-arg method
+    ['net_version', ['x']],
+    ['eth_accounts', [{}]],
+    ['eth_sendRawTransaction', []], // missing required param
+    ['eth_sendRawTransaction', ['0x01', '0x02']], // too many params
+    ['eth_getTransactionReceipt', []],
+    ['eth_getTransactionReceipt', ['0xabc', 'extra']],
+    ['eth_getCode', []],
+    ['eth_getCode', [TARGET, 'latest', 'extra']],
+    ['eth_getStorageAt', [TARGET]], // needs at least 2
+    ['eth_getBalance', []],
+    ['eth_getTransactionCount', []],
+    ['eth_call', []],
+    ['eth_estimateGas', [{}, 'latest', 'extra']],
+    ['eth_getBlockByNumber', ['latest']], // needs exactly 2
+    ['tron_resolveAddress', []],
+  ];
+  for (const [method, params] of cases) {
+    const response = await result.handlers.handle({ jsonrpc: '2.0', id: 1, method, params });
+    assert.equal(response.error.code, -32602, `${method} ${JSON.stringify(params)}`);
+  }
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('rejects non-hex and malformed hashes/addresses with -32602 without reaching upstream', async (t: TestContext) => {
+  const result = fixture(t);
+  const cases: [string, JsonAny[]][] = [
+    ['eth_getTransactionReceipt', ['0xnothex']],
+    ['eth_getTransactionReceipt', [`0x${'ab'.repeat(31)}`]], // 62 hex chars — wrong length
+    ['eth_getTransactionReceipt', [123]],
+    ['eth_getTransactionByHash', ['0x1234']],
+    ['eth_getCode', ['not-an-address', 'latest']],
+    ['eth_getCode', [`0x${'zz'.repeat(20)}`, 'latest']],
+    ['eth_getStorageAt', [`0x${'12'.repeat(19)}`, '0x0', 'latest']], // 19-byte address
+    ['eth_getBalance', ['0x', 'latest']],
+    ['eth_getTransactionCount', [TARGET, 'not-a-block']],
+    ['eth_getTransactionCount', [TARGET, '0x0g']],
+    ['tron_resolveAddress', ['garbage']],
+  ];
+  for (const [method, params] of cases) {
+    const response = await result.handlers.handle({ jsonrpc: '2.0', id: 1, method, params });
+    assert.equal(response.error.code, -32602, `${method} ${JSON.stringify(params)}`);
+  }
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('rejects a malformed eth_call/eth_estimateGas transaction object with -32602 before upstream', async (t: TestContext) => {
+  const result = fixture(t);
+  const cases: [string, JsonAny][] = [
+    ['eth_call', ['not-an-object', 'latest']],
+    ['eth_call', [42, 'latest']],
+    ['eth_call', [null, 'latest']],
+    ['eth_call', [{ to: TARGET, data: '0x1234', input: '0x5678' }, 'latest']], // conflicting data/input
+    ['eth_estimateGas', [{ to: TARGET, data: '0xaa', input: '0xbb' }]],
+  ];
+  for (const [method, params] of cases) {
+    const response = await result.handlers.handle({ jsonrpc: '2.0', id: 1, method, params });
+    assert.equal(response.error.code, -32602, `${method} ${JSON.stringify(params)}`);
+  }
+  assert.equal(noUpstream(result), true);
+  assert.deepEqual(result.journal.list(), []);
+});
+
+test('rejects non-string raw transaction bytes with -32602 and never touches the journal', async (t: TestContext) => {
+  const result = fixture(t);
+  for (const raw of [null, 42, {}, ['0x01'], true, undefined]) {
+    const response = await result.handlers.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_sendRawTransaction',
+      params: [raw],
+    });
+    assert.equal(response.error.code, -32602, JSON.stringify(raw));
+  }
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('rejects a non-hex raw transaction as a typed error before any durable write', async (t: TestContext) => {
+  const result = fixture(t);
+  for (const raw of ['0xZZ', 'deadbeef', '0x123', '0x6g']) {
+    const response = await result.handlers.handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_sendRawTransaction',
+      params: [raw],
+    });
+    // Non-hex bytes are rejected before the journal receive write, surfacing a typed operation error.
+    assert.equal(response.error.code, -32000, raw);
+    assert.equal(typeof response.error.message, 'string');
+  }
+  assert.deepEqual(result.journal.list(), []);
+  assert.equal(noUpstream(result), true);
+});
+
+test('fails a well-formed-hex but undecodable raw transaction deterministically without crashing', async (t: TestContext) => {
+  const result = fixture(t);
+  const raw = '0xdeadbeef'; // valid hex bytes, not a decodable legacy transaction
+  const response = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_sendRawTransaction',
+    params: [raw],
+  });
+  assert.ok(response.error !== undefined, 'expected a typed error, not a crash');
+  assert.equal(typeof response.error.code, 'number');
+  // The record is deterministically marked failed (received -> failed), never left dangling or retried.
+  const records = result.journal.list();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, 'failed');
+  // A second identical resend re-surfaces the same deterministic failure, no duplicate native work.
+  const again = await result.handlers.handle({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'eth_sendRawTransaction',
+    params: [raw],
+  });
+  assert.ok(again.error !== undefined);
+  assert.equal(
+    result.calls.some((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall'),
+    false,
+  );
+});
+
+test('handles a batch payload of mixed valid and malformed requests without crashing', async (t: TestContext) => {
+  const result = fixture(t);
+  const batch = [
+    { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] },
+    { jsonrpc: '2.0', id: 2, method: 'nope', params: [] },
+    { jsonrpc: '1.0', id: 3, method: 'eth_chainId', params: [] },
+    { jsonrpc: '2.0', method: 'eth_chainId', params: [] }, // notification: no response
+  ];
+  const responses = await result.handlers.handle(batch);
+  assert.equal(Array.isArray(responses), true);
+  // The notification produces no response; the other three do.
+  assert.equal(responses.length, 3);
+  assert.equal(responses.find((r: JsonAny) => r.id === 1).result, `0x${CHAIN_ID.toString(16)}`);
+  assert.equal(responses.find((r: JsonAny) => r.id === 2).error.code, -32601);
+  assert.equal(responses.find((r: JsonAny) => r.id === null).error.code, -32600);
+
+  const empty = await result.handlers.handle([]);
+  assert.equal(empty.error.code, -32600);
+});
