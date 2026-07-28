@@ -58,8 +58,9 @@ runs on the rewritten bytes. All other opaque bytes are rejected when they
 contain a known predicted address in packed 20-byte, fixed-bytes, or padded ABI
 form. A mapped contract's ABI comes from a verified deployment artifact and
 nothing else: the live on-disk artifact when its current provenance still
-matches the deployment, or the immutable snapshot captured at deployment when
-the on-disk artifact is missing or has been replaced in place. A changed disk
+matches the deployment, or the immutable snapshot — captured at deployment or
+adoption, or reconstructed under the same provenance check — when the on-disk
+artifact is missing or has been replaced in place. A changed disk
 artifact is never adopted as the deployed one, and a legacy deployment with no
 snapshot still fails closed when its on-disk provenance no longer matches. A
 derived ProxyAdmin is the one exception: it has no deployment of its own, so

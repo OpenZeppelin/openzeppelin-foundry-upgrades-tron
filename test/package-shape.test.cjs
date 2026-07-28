@@ -250,6 +250,7 @@ test('documents adapter security boundaries and fail-closed unsupported writes',
   assert.match(security, /transaction[- ]shape\s+validation/i);
   assert.match(security, /`repair`/);
   assert.match(security, /reconstructed\s+later\s+under\s+the\s+same\s+provenance\s+check/i);
+  assert.doesNotMatch(security, /snapshot\s+captured\s+at\s+deployment\s+when/i);
   assert.match(security, /upgrade-safety/i);
   assert.doesNotMatch(security, /adopt.{0,40}only writer besides the deployment flow/i);
 });
