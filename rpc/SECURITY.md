@@ -2,8 +2,8 @@
 
 The adapter is a local signing service. It accepts Forge-signed legacy Ethereum
 transactions, rebuilds equivalent native TRON transactions, signs them with the
-configured TRON private key, and broadcasts them only after validation and
-simulation succeed. Run it on a trusted workstation and keep the default
+configured TRON private key, and broadcasts them only after transaction-shape
+validation and simulation succeed. Run it on a trusted workstation and keep the default
 loopback binding. A non-loopback listener requires an explicit CLI opt-in and
 should be placed behind authentication, network filtering, and transport
 security appropriate for a signing service.
@@ -18,11 +18,13 @@ environment variables and memory.
 
 The state file contains address provenance, transaction journals, exact signed
 native transaction bytes, confirmed receipts, and the immutable verified
-artifact snapshots captured at deployment. It does not contain the private key.
+artifact snapshots captured at deployment or adoption — or reconstructed later
+under the same provenance check by startup recovery or `repair`. It does not
+contain the private key.
 The `init` command creates the file explicitly at mode `0600` and refuses to
 overwrite an existing one; every state-opening command (`start`, `resolve`,
-`mappings`, `adopt`) refuses to run against a missing state file rather than
-silently starting from an empty deployment history. Initialize the file once,
+`mappings`, `adopt`, `repair`) refuses to run against a missing state file
+rather than silently starting from an empty deployment history. Initialize the file once,
 protect its parent directory and backups with equivalent permissions, and treat
 it like a keystore: losing it loses every mapping for its chain, recoverable
 only by restoring a backup or re-registering deployments with `adopt`. The
@@ -44,7 +46,15 @@ signed native transaction; it never silently builds a replacement transaction.
 Only canonical, EIP-155-protected legacy Ethereum transactions from the
 configured sender and chain are accepted. Typed transaction envelopes,
 unprotected signatures, malformed RLP, `CREATE2`, and ambiguous opaque address
-payloads fail before native broadcast. Opaque bytes are rejected when they
+payloads fail before native broadcast, with one narrow exception: opaque
+calldata matching a recognized upgrade entrypoint — UUPS `upgradeToAndCall`,
+ProxyAdmin `upgradeAndCall`, or UpgradeableBeacon `upgradeTo` — whose
+implementation argument is a known predicted address is rewritten instead of
+rejected, and only after the adapter has confirmed that implementation's
+predicted-to-actual mapping, resolved its intact artifact provenance, and
+verified the target's live on-chain topology for the entrypoint's proxy kind.
+Only the implementation argument is rewritten, and the final safety scan still
+runs on the rewritten bytes. All other opaque bytes are rejected when they
 contain a known predicted address in packed 20-byte, fixed-bytes, or padded ABI
 form. A mapped contract's ABI comes from a verified deployment artifact and
 nothing else: the live on-disk artifact when its current provenance still
@@ -77,14 +87,18 @@ status, ordered child-attempt topology, and rejection markers. A post-broadcast
 mismatch is irreversible on-chain, so the adapter retains the receipt and
 reports a fatal failure without publishing partial mappings.
 
-The `adopt` command is the only writer besides the deployment flow. It is
-local, never an RPC method, and holds the exclusive state lock so it cannot race
-a live gateway. It writes nothing until it has provenance-verified the named
-artifact from `FOUNDRY_OUT`, matched the on-chain runtime code at the declared
-address against that artifact's runtime bytecode, and, for a proxy kind, matched
-the TRC-1967 implementation, admin, or beacon slot against the declared
-reference; any mismatch is refused. It re-registers a deployment for ABI-aware
-operation but does not reconstruct historical nonces or receipts.
+Besides the deployment flow, state is written only by the local `adopt` and
+`repair` commands. Neither is an RPC method, and both hold the exclusive state
+lock so they cannot race a live gateway. `adopt` writes nothing until it has
+provenance-verified the named artifact from `FOUNDRY_OUT`, matched the on-chain
+runtime code at the declared address against that artifact's runtime bytecode,
+and, for a proxy kind, matched the TRC-1967 implementation, admin, or beacon
+slot against the declared reference; any mismatch is refused. It re-registers a
+deployment for ABI-aware operation but does not reconstruct historical nonces
+or receipts. `repair` has a narrower contract: it backfills per-deployment role
+descriptors, fills in snapshot immutable offsets, and rebuilds an artifact
+snapshot the confirm flow lost to a crash — always under the deployment's
+recorded provenance — and never creates or changes an address mapping.
 
 ## HTTP boundary
 
@@ -97,4 +111,7 @@ transactions are not reflected to clients.
 Before using a public network, separately review node trust, key custody,
 process isolation, filesystem permissions, monitoring, and operational
 recovery. The adapter does not provide remote authentication or a hardware
-wallet boundary.
+wallet boundary, and it performs no upgrade-safety or storage-layout validation
+of its own: those checks run only when a transaction comes from the validated
+`Upgrades`/`LegacyUpgrades` Solidity paths — `UnsafeUpgrades` and directly
+signed transactions bypass them, and the adapter accepts both.

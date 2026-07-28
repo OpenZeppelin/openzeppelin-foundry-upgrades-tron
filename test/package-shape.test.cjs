@@ -169,10 +169,7 @@ test('public documentation covers the supported modern TVM workflow and intentio
 
 test('documents opaque external v4 upgrade limits and the adoption route', () => {
   const readme = fs.readFileSync('README.md', 'utf8');
-  assert.match(
-    readme,
-    /opaque[\s\S]{0,300}`upgradeToAndCall`[\s\S]{0,300}`upgradeAndCall`[\s\S]{0,300}`upgradeTo`/iu,
-  );
+  assert.match(readme, /opaque[\s\S]{0,300}`upgradeToAndCall`[\s\S]{0,300}`upgradeAndCall`[\s\S]{0,300}`upgradeTo`/iu);
   assert.match(readme, /v4 UUPS[\s\S]{0,220}empty[\s\S]{0,220}not recognized/iu);
   assert.match(readme, /v4 transparent[\s\S]{0,240}empty[\s\S]{0,240}not recognized/iu);
   assert.match(readme, /adopt[\s\S]{0,220}`uups-proxy`[\s\S]{0,220}current implementation/iu);
@@ -250,6 +247,11 @@ test('documents adapter security boundaries and fail-closed unsupported writes',
   assert.match(security, /typed transaction/i);
   assert.match(security, /constant payload simulation/i);
   assert.match(security, /0600/);
+  assert.match(security, /transaction[- ]shape\s+validation/i);
+  assert.match(security, /`repair`/);
+  assert.match(security, /reconstructed\s+later\s+under\s+the\s+same\s+provenance\s+check/i);
+  assert.match(security, /upgrade-safety/i);
+  assert.doesNotMatch(security, /adopt.{0,40}only writer besides the deployment flow/i);
 });
 
 test('documents the nonstandard fail-closed simulation requirement without overstating public support', () => {
