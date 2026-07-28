@@ -1174,16 +1174,16 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       verified.artifact?.deployedBytecode,
     );
     const references = snapshotImmutableReferences(verified.artifact?.deployedBytecode);
-    if (existingSnapshot === undefined) {
-      let creationBytecodeHash;
-      try {
-        creationBytecodeHash = bytecodeHash(verified.artifact?.bytecode, 'creation bytecode');
-      } catch (error) {
-        if ((error as JsonAny)?.code !== 'INVALID_ARTIFACT') throw error;
-        // A linked artifact's creation template carries __$...$__ placeholders; recover the deployed
-        // linked prefix from the journaled initcode so this envelope matches what the deploy path
-        // writes for the same provenance, instead of aborting the whole recovery sweep.
+    try {
+      if (existingSnapshot === undefined) {
+        let creationBytecodeHash;
         try {
+          creationBytecodeHash = bytecodeHash(verified.artifact?.bytecode, 'creation bytecode');
+        } catch (error) {
+          if ((error as JsonAny)?.code !== 'INVALID_ARTIFACT') throw error;
+          // A linked artifact's creation template carries __$...$__ placeholders; recover the deployed
+          // linked prefix from the journaled initcode so this envelope matches what the deploy path
+          // writes for the same provenance, instead of aborting the whole recovery sweep.
           const decoded = decode(record.signedEthereumTransaction, {
             expectedSender: config.expectedSender,
             expectedChainId: config.chainId,
@@ -1197,24 +1197,25 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
             return;
           }
           creationBytecodeHash = bytecodeHash(match.creationBytecode, 'creation bytecode');
-        } catch {
-          // Declining reconstruction keeps the deployment confirmed and fail-closed, repairable later.
-          return;
         }
+        addressMap.setArtifactSnapshot({
+          provenanceHash: operation.provenanceHash,
+          artifactIdentity: operation.artifactIdentity,
+          contractKind: operation.contractKind,
+          abi: verified.artifact?.abi,
+          creationBytecodeHash,
+          runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
+          ...(references === undefined ? {} : { immutableReferences: references }),
+        });
+      } else if (!snapshotHasOffsets && references !== undefined) {
+        // Enrich a legacy offset-less snapshot in place (an offsets-only difference the snapshot store
+        // reconciles) so a descriptor completed by this recovery resolves durable offsets on later reads.
+        addressMap.setArtifactSnapshot({ ...existingSnapshot, immutableReferences: references });
       }
-      addressMap.setArtifactSnapshot({
-        provenanceHash: operation.provenanceHash,
-        artifactIdentity: operation.artifactIdentity,
-        contractKind: operation.contractKind,
-        abi: verified.artifact?.abi,
-        creationBytecodeHash,
-        runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
-        ...(references === undefined ? {} : { immutableReferences: references }),
-      });
-    } else if (!snapshotHasOffsets && references !== undefined) {
-      // Enrich a legacy offset-less snapshot in place (an offsets-only difference the snapshot store
-      // reconciles) so a descriptor completed by this recovery resolves durable offsets on later reads.
-      addressMap.setArtifactSnapshot({ ...existingSnapshot, immutableReferences: references });
+    } catch {
+      // Recovery is per-record best effort: a snapshot that cannot land must not abort the sweep, and
+      // a descriptor whose offsets are not durable must not be marked complete.
+      return;
     }
     persistDeploymentDescriptor(operation.predictedContractAddress, capture);
   }

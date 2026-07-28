@@ -2122,6 +2122,53 @@ const IMMUTABLE_IDENTITY = {
 // (ABI, provenance, bytecode hashes) must still persist so ABI-orphan protection is never lost. The
 // role descriptors are simply absent (an empty list), which fails a later proxy read closed exactly as
 // a missing snapshot would.
+// A record whose snapshot cannot be written (here: a disk artifact with no runtime bytecode) must be
+// skipped — descriptor left pending — without aborting recovery of every record behind it.
+test('startup recovery survives an unwritable snapshot rebuild and still recovers later records', async (t: TestContext) => {
+  const brokenProvenance = `0x${'77'.repeat(32)}`;
+  const plainProvenance = `0x${'66'.repeat(32)}`;
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    delay: async () => {},
+    findArtifactPaths: (_out: JsonAny, fqn: JsonAny) => [`/out/${fqn}.json`],
+    verifyArtifactProvenance: ({ artifactPath }: JsonAny) =>
+      artifactPath === `/out/${IMMUTABLE_IDENTITY.fullyQualifiedName}.json`
+        ? {
+            artifact: { abi: [{ type: 'constructor', inputs: [] }], bytecode: { object: '0x6000' } },
+            artifactPath,
+            ...IMMUTABLE_IDENTITY,
+            provenanceHash: brokenProvenance,
+          }
+        : {
+            artifact: {
+              abi: [{ type: 'constructor', inputs: [] }],
+              bytecode: { object: '0x6000' },
+              deployedBytecode: { object: '0x6001' },
+            },
+            artifactPath,
+            ...ARTIFACT_IDENTITY,
+            provenanceHash: plainProvenance,
+          },
+  });
+
+  const brokenRaw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const plainRaw = await signedTransaction({ to: null, nonce: 9, data: '0x6000' });
+  const brokenHash = seedPreparedWithoutSnapshot(result, brokenRaw, brokenProvenance, {
+    identity: IMMUTABLE_IDENTITY,
+  });
+  const plainHash = seedPreparedWithoutSnapshot(result, plainRaw, plainProvenance);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  await result.handlers.recoverStartup(capability);
+
+  assert.equal(result.journal.get(brokenHash).state, 'confirmed');
+  assert.equal(result.journal.get(plainHash).state, 'confirmed');
+  assert.equal(result.addressMap.resolveArtifactSnapshot(brokenProvenance), undefined);
+  assert.notEqual(result.addressMap.resolveArtifactSnapshot(plainProvenance), undefined);
+});
+
 test('startup recovery survives a transient descriptor-capture failure and still recovers later records', async (t: TestContext) => {
   const failingProvenance = `0x${'55'.repeat(32)}`;
   const plainProvenance = `0x${'66'.repeat(32)}`;
