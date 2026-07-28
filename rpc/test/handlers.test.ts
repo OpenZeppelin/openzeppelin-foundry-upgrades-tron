@@ -2033,6 +2033,47 @@ test('leaves the crash-lost snapshot absent when the on-disk artifact provenance
   assert.equal(result.addressMap.resolveArtifactSnapshot(replacedHash), undefined);
 });
 
+// A library-linked artifact's creation template carries __$...$__ placeholders, so recovery cannot
+// hash it directly; it must hash the linked prefix recovered from the journaled initcode — the same
+// bytes the deploy path hashes — instead of throwing and aborting the whole startup sweep.
+test('recovery hashes the linked creation prefix when rebuilding a missing snapshot', async (t: TestContext) => {
+  const provenanceHash = `0x${'58'.repeat(32)}`;
+  const raw = await signedTransaction({ to: null, nonce: 8, data: '0x6000' });
+  const linkedCreation = `0x6001${'44'.repeat(20)}6002`;
+  const creationTemplate = `0x6001__$${'b'.repeat(34)}$__6002`;
+  const linkedRuntime = `0x6001__$${'a'.repeat(34)}$__6002`;
+  const linkedArtifact = {
+    abi: [{ type: 'constructor', inputs: [] }],
+    bytecode: { object: creationTemplate },
+    deployedBytecode: { object: linkedRuntime },
+  };
+  const result = fixture(t, {
+    ownerId: 'boot-new',
+    allowRecovery: true,
+    findArtifactPaths: () => ['/out/Box.sol/Box.json'],
+    verifyArtifactProvenance: () => ({ ...diskArtifact(provenanceHash), artifact: linkedArtifact }),
+    matchDeploymentArtifact: () => ({
+      ...diskArtifact(provenanceHash),
+      artifact: linkedArtifact,
+      abi: [{ type: 'constructor', inputs: [] }],
+      creationBytecode: linkedCreation,
+      constructorData: '0x',
+      requiresLinking: true,
+    }),
+  });
+  const sourceHash = seedPreparedWithoutSnapshot(result, raw, provenanceHash);
+
+  const capability = await acquireStateLock(result.statePath);
+  t.after(() => capability.release());
+  await result.handlers.recoverStartup(capability);
+
+  assert.equal(result.journal.get(sourceHash).state, 'confirmed');
+  assert.equal(
+    result.addressMap.resolveArtifactSnapshot(provenanceHash)?.creationBytecodeHash,
+    keccak256(linkedCreation),
+  );
+});
+
 // Durability twin of the repair gate: when a LEGACY offset-less snapshot already exists, recovery must
 // enrich it with the artifact's immutable offsets before (or as) it completes the descriptor. Without
 // this, a completed zero-immutable proxy descriptor would resolve an offset-less snapshot on later

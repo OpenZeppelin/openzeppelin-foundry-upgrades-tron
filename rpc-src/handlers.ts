@@ -1175,12 +1175,39 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     );
     const references = snapshotImmutableReferences(verified.artifact?.deployedBytecode);
     if (existingSnapshot === undefined) {
+      let creationBytecodeHash;
+      try {
+        creationBytecodeHash = bytecodeHash(verified.artifact?.bytecode, 'creation bytecode');
+      } catch (error) {
+        if ((error as JsonAny)?.code !== 'INVALID_ARTIFACT') throw error;
+        // A linked artifact's creation template carries __$...$__ placeholders; recover the deployed
+        // linked prefix from the journaled initcode so this envelope matches what the deploy path
+        // writes for the same provenance, instead of aborting the whole recovery sweep.
+        try {
+          const decoded = decode(record.signedEthereumTransaction, {
+            expectedSender: config.expectedSender,
+            expectedChainId: config.chainId,
+          });
+          if (decoded.kind !== 'deployment') return;
+          const match = matchArtifact({ outputDirectory: config.foundryOut, initcode: decoded.data });
+          if (
+            match.fullyQualifiedName !== operation.artifactIdentity.fullyQualifiedName ||
+            match.provenanceHash?.toLowerCase() !== String(operation.provenanceHash).toLowerCase()
+          ) {
+            return;
+          }
+          creationBytecodeHash = bytecodeHash(match.creationBytecode, 'creation bytecode');
+        } catch {
+          // Declining reconstruction keeps the deployment confirmed and fail-closed, repairable later.
+          return;
+        }
+      }
       addressMap.setArtifactSnapshot({
         provenanceHash: operation.provenanceHash,
         artifactIdentity: operation.artifactIdentity,
         contractKind: operation.contractKind,
         abi: verified.artifact?.abi,
-        creationBytecodeHash: bytecodeHash(verified.artifact?.bytecode, 'creation bytecode'),
+        creationBytecodeHash,
         runtimeBytecodeHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
         ...(references === undefined ? {} : { immutableReferences: references }),
       });
