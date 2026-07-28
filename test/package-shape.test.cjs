@@ -167,6 +167,18 @@ test('public documentation covers the supported modern TVM workflow and intentio
   );
 });
 
+test('documents opaque external v4 upgrade limits and the adoption route', () => {
+  const readme = fs.readFileSync('README.md', 'utf8');
+  assert.match(
+    readme,
+    /opaque[\s\S]{0,300}`upgradeToAndCall`[\s\S]{0,300}`upgradeAndCall`[\s\S]{0,300}`upgradeTo`/iu,
+  );
+  assert.match(readme, /v4 UUPS[\s\S]{0,220}empty[\s\S]{0,220}not recognized/iu);
+  assert.match(readme, /v4 transparent[\s\S]{0,240}empty[\s\S]{0,240}not recognized/iu);
+  assert.match(readme, /adopt[\s\S]{0,220}`uups-proxy`[\s\S]{0,220}current implementation/iu);
+  assert.match(readme, /"OPAQUE_PREDICTED_ADDRESS"/u);
+});
+
 test('published package contains runtime RPC files but no tests or fixture build output', () => {
   const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: path.resolve(__dirname, '..'),

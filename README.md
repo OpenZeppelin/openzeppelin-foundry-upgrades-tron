@@ -298,9 +298,13 @@ opts.referenceContract = "BoxV1.sol:BoxV1";
 LegacyUpgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
 ```
 
-The shared dispatcher recognizes the v4 UUPS `upgradeTo` entrypoint and v4
-ProxyAdmin `upgrade`/`upgradeAndCall` paths while retaining strict v5
-`UPGRADE_INTERFACE_VERSION = "5.0.0"` dispatch.
+The shared Solidity dispatcher recognizes the v4 UUPS `upgradeTo` entrypoint
+and v4 ProxyAdmin `upgrade`/`upgradeAndCall` paths while retaining strict v5
+`UPGRADE_INTERFACE_VERSION = "5.0.0"` dispatch. Through the RPC adapter, an
+externally-deployed v4 proxy must first be adopted together with its current
+implementation before an upgrade with empty data — like the example above —
+can be dispatched; see
+[TVM differences and unsupported surfaces](#tvm-differences-and-unsupported-surfaces).
 
 Dispatch for pinned `@openzeppelin/contracts@4.9.6` and
 `@openzeppelin/contracts-upgradeable@4.9.6` sources is unit-verified. Full live
@@ -551,6 +555,21 @@ The following EVM features are intentionally outside the supported surface:
   are not part of the Solidity API.
 - Typed Ethereum transactions and generic `CREATE2` are rejected by the
   adapter. Stock constant simulation also rejects ambiguous child creation.
+- For an upgrade target the adapter holds no metadata for, opaque calldata
+  recognition covers exactly three entrypoints: UUPS `upgradeToAndCall` (v4
+  and v5 declare the identical signature), ProxyAdmin `upgradeAndCall`, and
+  UpgradeableBeacon `upgradeTo`. An externally-deployed v4 UUPS proxy upgraded
+  with empty data is not recognized — its bare `upgradeTo(address)` selector is
+  indistinguishable from a beacon's, and the beacon topology check cannot pass
+  against a UUPS proxy. An externally-deployed v4 transparent proxy upgraded
+  with empty data is not recognized either — its ProxyAdmin
+  `upgrade(address,address)` entrypoint is outside the recognized set. Both
+  fail closed before native broadcast with
+  `error.data.code = "OPAQUE_PREDICTED_ADDRESS"`. Adopt such a proxy first —
+  kind `uups-proxy`, or the `proxy-admin` and `transparent-proxy` pair —
+  together with its current implementation (kind `contract`); the ABI-aware
+  path then dispatches all four upgrade entrypoints. Adoption requires a
+  byte-exact runtime-code match against a locally compiled artifact.
 
 The upgrade-only `LegacyUpgrades.sol` entrypoint is exported for existing
 OpenZeppelin Contracts v4 deployments. Dispatch is unit-verified; a live
