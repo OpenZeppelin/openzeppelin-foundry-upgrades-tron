@@ -6,7 +6,7 @@ adapter, and real-node evidence.
 
 ## Prerequisites
 
-- Node.js 20 or newer
+- Node.js 22 or newer
 - Foundry with forge-std 1.9.5 or newer
 - Bash; on Windows, configure `OPENZEPPELIN_BASH_PATH`
 - Docker for opt-in TRE integration tests

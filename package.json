@@ -31,15 +31,17 @@
     "lint": "node scripts/lint.cjs",
     "lint:fix": "node scripts/lint.cjs --write",
     "rpc": "node dist/rpc/cli.js",
+    "rpc:init": "node dist/rpc/cli.js init",
     "rpc:start": "node dist/rpc/cli.js start",
     "rpc:resolve": "node dist/rpc/cli.js resolve",
     "rpc:mappings": "node dist/rpc/cli.js mappings",
+    "rpc:adopt": "node dist/rpc/cli.js adopt",
     "build:rpc": "tsc -p tsconfig.build.json",
     "typecheck:rpc": "tsc -p tsconfig.json",
     "prepack": "npm run build:rpc && node scripts/require-package-contents.cjs"
   },
   "dependencies": {
-    "@openzeppelin/tron-runtime": "file:vendor/openzeppelin-tron-runtime-0.1.0-alpha.0.tgz",
+    "@openzeppelin/tron-runtime": "0.1.0-alpha.1",
     "ethers": "6.17.0",
     "tronweb": "6.4.0"
   },

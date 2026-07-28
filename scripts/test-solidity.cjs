@@ -68,7 +68,7 @@ if (containsTest(path.join(root, 'test'))) {
         '--ffi',
         '--force',
         '--no-match-test',
-        'testValidatedDeployment(LinksBound|UsesPrelinked)ExternalLibraryArtifact',
+        'testValidatedDeployment(LinksBound|UsesPrelinked)ExternalLibraryArtifact|testGetOutDirDefaultsAndReadsEnvironment',
       ],
       {
         cwd: root,
@@ -86,6 +86,36 @@ if (containsTest(path.join(root, 'test'))) {
     }
     if (result.status !== 0) {
       process.exitCode = result.status ?? 1;
+      return;
+    }
+
+    // testGetOutDirDefaultsAndReadsEnvironment mutates the FOUNDRY_OUT env var via
+    // vm.setEnv, which forge's cheatcode implementation applies process-wide rather
+    // than per-test. Forge runs test functions across a multi-threaded pool by
+    // default, so running this test alongside the rest of the suite races any
+    // concurrently scheduled test that resolves artifact paths through
+    // Utils.getOutDir() (itself backed by the same env var): that test can
+    // transiently observe the mutated value and fail to locate its artifact.
+    // Run it in complete isolation so no other test observes the mutation.
+    const outDirEnvResult = spawnSync(
+      'forge',
+      ['test', '-vvv', '--ffi', '--match-test', 'testGetOutDirDefaultsAndReadsEnvironment'],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          FOUNDRY_OUT: 'out',
+          FOUNDRY_CACHE_PATH: defaultCache,
+          FOUNDRY_PROFILE: 'default',
+        },
+        stdio: 'inherit',
+      },
+    );
+    if (outDirEnvResult.error) {
+      throw outDirEnvResult.error;
+    }
+    if (outDirEnvResult.status !== 0) {
+      process.exitCode = outDirEnvResult.status ?? 1;
       return;
     }
 

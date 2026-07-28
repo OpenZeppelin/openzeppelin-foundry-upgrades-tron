@@ -10,7 +10,7 @@ import { buildRuntime, run } from '../../dist/rpc/cli.js';
 import { parseConfig } from '../../dist/rpc/config.js';
 import { CreateReconciler } from '../../dist/rpc/create-reconciler.js';
 import { TransactionJournal } from '../../dist/rpc/journal.js';
-import { JsonStore } from '../../dist/rpc/store.js';
+import { JsonStore, createStateFile } from '../../dist/rpc/store.js';
 import { TronClient } from '../../dist/rpc/tron-client.js';
 
 const PRIVATE_KEY = '11'.repeat(32);
@@ -100,6 +100,7 @@ test('builds the complete recovery-enabled adapter runtime from validated config
     TRON_STATE_FILE: path.join(directory, 'state.json'),
     TRON_PRIVATE_KEY: PRIVATE_KEY,
   });
+  createStateFile(config.stateFile);
   const runtime = buildRuntime(config, {
     host: '127.0.0.1',
     port: 0,
@@ -184,6 +185,63 @@ test('starts on loopback, reports only sanitized readiness data, and stops once 
   assert.doesNotMatch(stdout.read(), new RegExp(PRIVATE_KEY));
   assert.equal(signals.listenerCount('SIGINT'), 0);
   assert.equal(signals.listenerCount('SIGTERM'), 0);
+});
+
+// The runtime's diagnostic reporter must reach handlers through composition, and everything it emits
+// must pass the CLI's secret redaction — never a stack, never the raw key or endpoint.
+test('threads a sanitized error reporter into runtime composition', async () => {
+  const signals = new EventEmitter();
+  const stdout = output();
+  const stderr = output();
+  const rpcUrl = 'https://secret.example.test';
+  const config = {
+    chainId: 728126428n,
+    chainIdentity: 'tre:728126428',
+    foundryOut: '/absolute/out',
+    stateFile: '/absolute/state.json',
+  };
+  const server = {
+    async start() {
+      return { host: '127.0.0.1', port: 18545 };
+    },
+    async stop() {},
+  };
+  const originalWrite = stdout.stream.write;
+  stdout.stream.write = chunk => {
+    const result = originalWrite(chunk);
+    signals.emit('SIGINT');
+    return result;
+  };
+  const nativeClient = {
+    async assertSimulationReady() {
+      return 'constant-create';
+    },
+  };
+
+  const exitCode = await run(['start'], {
+    environment: { TRON_PRIVATE_KEY: PRIVATE_KEY, TRON_RPC_URL: rpcUrl },
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    signalTarget: signals,
+    parseConfig: () => config,
+    runtimeFactory(_receivedConfig, options) {
+      assert.equal(typeof options.reportError, 'function');
+      options.reportError?.(
+        `descriptor capture failed for deployment ${PREDICTED_A}`,
+        Object.assign(new Error(`write failed for ${PRIVATE_KEY} via ${rpcUrl}`), {
+          stack: `must-not-emit ${PRIVATE_KEY}`,
+        }),
+      );
+      return { server, nativeClient, upstream: matchingUpstream(config.chainId, []) };
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const diagnostics = stderr.read();
+  assert.match(diagnostics, /descriptor capture failed for deployment/);
+  assert.match(diagnostics, /write failed for \[REDACTED\] via \[REDACTED\]/);
+  assert.doesNotMatch(diagnostics, new RegExp(PRIVATE_KEY));
+  assert.doesNotMatch(diagnostics, /secret\.example\.test|must-not-emit/);
 });
 
 test('keeps both signal handlers installed throughout draining and still stops only once', async () => {
@@ -441,10 +499,49 @@ test('resolve is read-only, credential-free, and stable for predicted and actual
   }
 });
 
+test('init creates the state file explicitly and refuses to overwrite an existing one', async t => {
+  const directory = temporaryDirectory(t);
+  const stateFile = path.join(directory, 'nested', 'state.json');
+  const environment = readOnlyEnvironment(stateFile);
+
+  const first = output();
+  assert.equal(await run(['init'], { environment, stdout: first.stream, stderr: output().stream }), 0);
+  assert.equal(fs.existsSync(stateFile), true);
+  assert.equal(fs.statSync(stateFile).mode & 0o777, 0o600);
+  const initialized = JSON.parse(first.read());
+  assert.equal(initialized.stateFile, stateFile);
+
+  // The freshly initialized file is immediately usable by the read-only commands.
+  assert.equal(await run(['mappings'], { environment, stdout: output().stream, stderr: output().stream }), 0);
+
+  const second = output();
+  assert.equal(await run(['init'], { environment, stdout: output().stream, stderr: second.stream }), 1);
+  assert.match(second.read(), /already exists/i);
+});
+
+test('start, resolve, and mappings fail loudly when the state file has not been initialized', async t => {
+  const directory = temporaryDirectory(t);
+  const stateFile = path.join(directory, 'state.json');
+  // A TRE environment resolves a full configuration from defaults, so the missing state file is the
+  // only failure the start path can hit before it would otherwise open a listener.
+  const environment = { TRON_STATE_FILE: stateFile };
+
+  for (const argv of [['start'], ['resolve', PREDICTED_A], ['mappings']]) {
+    const stderr = output();
+    const exitCode = await run(argv, { environment, stdout: output().stream, stderr: stderr.stream });
+    assert.equal(exitCode, 1, argv.join(' '));
+    assert.match(stderr.read(), /not found/i, argv.join(' '));
+    assert.ok(stderr.read().includes(stateFile), argv.join(' '));
+    assert.match(stderr.read(), /init/i, argv.join(' '));
+  }
+  assert.equal(fs.existsSync(stateFile), false);
+});
+
 test('resolve fails clearly for an unknown nonzero address but permits the zero-address identity', async t => {
   const directory = temporaryDirectory(t);
   const stateFile = path.join(directory, 'state.json');
   const environment = readOnlyEnvironment(stateFile);
+  assert.equal(await run(['init'], { environment, stdout: output().stream, stderr: output().stream }), 0);
   const unknown = output();
 
   assert.equal(

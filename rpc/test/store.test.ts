@@ -5,7 +5,7 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import { acquireStateLock, assertStateLockHeld } from '../../dist/rpc/state-lock.js';
-import { JsonStore, STORE_VERSION } from '../../dist/rpc/store.js';
+import { JsonStore, STORE_VERSION, createStateFile } from '../../dist/rpc/store.js';
 
 function temporaryState(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-tron-store-'));
@@ -200,4 +200,44 @@ test('rejects unsafe chain identities', t => {
   for (const chain of ['', ' chain', '__proto__', 'constructor']) {
     assert.throws(() => store.transaction(chain, () => {}), /chain identity/i);
   }
+});
+
+test('refuses to open a missing state file when createIfMissing is false, naming the path', t => {
+  const statePath = temporaryState(t);
+
+  assert.throws(() => new JsonStore(statePath, { createIfMissing: false }), error => {
+    const message = (error as Error).message;
+    assert.match(message, /not found/i);
+    assert.ok(message.includes(statePath), 'error names the missing state path');
+    assert.match(message, /init/i);
+    return true;
+  });
+  assert.equal(fs.existsSync(statePath), false);
+});
+
+test('opens an existing state file normally when createIfMissing is false', t => {
+  const statePath = temporaryState(t);
+  new JsonStore(statePath, { createIfMissing: true }).transaction('chain-a', chain => {
+    chain.value = 5;
+  });
+
+  const store = new JsonStore(statePath, { createIfMissing: false });
+  assert.deepEqual(store.readChain('chain-a'), { value: 5 });
+});
+
+test('createStateFile writes an empty 0600 state file and refuses to overwrite an existing one', t => {
+  const statePath = temporaryState(t);
+
+  const created = createStateFile(statePath);
+  assert.equal(created, statePath);
+  assert.deepEqual(JSON.parse(fs.readFileSync(statePath, 'utf8')), { version: STORE_VERSION, chains: {} });
+  assert.equal(fs.statSync(statePath).mode & 0o777, 0o600);
+
+  // A store may open the freshly initialized file even under the strict refuse-on-missing mode.
+  assert.deepEqual(new JsonStore(statePath, { createIfMissing: false }).read(), {
+    version: STORE_VERSION,
+    chains: {},
+  });
+
+  assert.throws(() => createStateFile(statePath), /already exists/i);
 });
