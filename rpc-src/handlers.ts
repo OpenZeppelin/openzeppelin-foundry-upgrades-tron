@@ -470,6 +470,22 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         if (typeof (handle as JsonAny)?.unref === 'function') (handle as JsonAny).unref();
       }));
 
+  // Non-fatal failures are reported here and never thrown; a sink that itself fails is ignored, so
+  // diagnosability can never break the fail-not-throw contract of a confirmed deployment.
+  const reportError = typeof options.reportError === 'function' ? options.reportError : undefined;
+  function reportBestEffortFailure(subject: string, error: unknown): void {
+    if (reportError === undefined) return;
+    try {
+      reportError(subject, error);
+    } catch {
+      // A broken sink must not fail a deployment.
+    }
+  }
+
+  function deploymentSubject(predicted: JsonAny, provenanceHash: JsonAny): string {
+    return `deployment ${String(predicted)} (provenance ${String(provenanceHash)})`;
+  }
+
   function nonceBaselineFor(signer: JsonAny): bigint {
     if (typeof addressMap.resolveNonceBaseline !== 'function') return 0n;
     return addressMap.resolveNonceBaseline(signer) ?? 0n;
@@ -1085,25 +1101,36 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     kind: JsonAny,
     ownActual: JsonAny,
     deployedBytecode: JsonAny,
+    subject: string,
   ): Promise<{ status: 'pending' | 'complete'; descriptors: ImmutableDescriptor[] }> {
     let ranges;
     try {
       ranges = immutableRanges(extractImmutableReferences(deployedBytecode));
-    } catch {
+    } catch (error) {
       // A malformed reference map is an UNRESOLVABLE source, not proof of "no immutables": completing
       // empty would durably assert nothing-to-project for a deployment whose immutables are unknown
       // (and repair skips complete records). Pending keeps it repairable from a valid artifact.
+      reportBestEffortFailure(
+        `descriptor capture left pending for ${subject}; the artifact immutable reference map is malformed`,
+        error,
+      );
       return { status: 'pending', descriptors: [] };
     }
     if (!ranges.some(range => range.length >= 20)) return { status: 'complete', descriptors: [] };
+    let lastError: unknown;
     for (let attempt = 1; attempt <= DESCRIPTOR_CAPTURE_ATTEMPTS; attempt += 1) {
       try {
         const code = await readActualRuntimeCode(actualTarget);
         return { status: 'complete', descriptors: buildDescriptorsFromRanges(kind, ownActual, code, ranges) };
-      } catch {
+      } catch (error) {
+        lastError = error;
         if (attempt < DESCRIPTOR_CAPTURE_ATTEMPTS) await delay(captureRetryDelayMs);
       }
     }
+    reportBestEffortFailure(
+      `descriptor capture left pending for ${subject} after ${DESCRIPTOR_CAPTURE_ATTEMPTS} runtime-code read attempts`,
+      lastError,
+    );
     return { status: 'pending', descriptors: [] };
   }
 
@@ -1115,13 +1142,15 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   function persistDeploymentDescriptor(
     predicted: JsonAny,
     capture: { status: 'pending' | 'complete'; descriptors: ImmutableDescriptor[] },
+    subject: string,
   ): void {
     if (predicted === undefined || predicted === null) return;
     try {
       if (addressMap.resolvePredicted(predicted) === undefined) return;
       addressMap.setDeploymentDescriptor({ predicted, status: capture.status, descriptors: capture.descriptors });
-    } catch {
+    } catch (error) {
       // Best-effort: never fail an already-confirmed deployment on descriptor persistence.
+      reportBestEffortFailure(`descriptor persistence failed for ${subject}`, error);
     }
   }
 
@@ -1167,11 +1196,13 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     // immutable offsets), so a confirmed deployment never loses its ABI-orphan protection to a transient
     // post-confirmation read failure. The per-deployment descriptor is written separately, keyed by
     // predicted address.
+    const subject = deploymentSubject(operation.predictedContractAddress, operation.provenanceHash);
     const capture = await captureDescriptorsBestEffort(
       operation.actualTarget,
       operation.contractKind,
       operation.actualTarget,
       verified.artifact?.deployedBytecode,
+      subject,
     );
     const references = snapshotImmutableReferences(verified.artifact?.deployedBytecode);
     try {
@@ -1212,12 +1243,13 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         // reconciles) so a descriptor completed by this recovery resolves durable offsets on later reads.
         addressMap.setArtifactSnapshot({ ...existingSnapshot, immutableReferences: references });
       }
-    } catch {
+    } catch (error) {
       // Recovery is per-record best effort: a snapshot that cannot land must not abort the sweep, and
       // a descriptor whose offsets are not durable must not be marked complete.
+      reportBestEffortFailure(`artifact snapshot rebuild failed for ${subject}`, error);
       return;
     }
-    persistDeploymentDescriptor(operation.predictedContractAddress, capture);
+    persistDeploymentDescriptor(operation.predictedContractAddress, capture, subject);
   }
 
   async function resumePrepared(record: JsonAny): Promise<JsonAny> {
@@ -1329,18 +1361,20 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
       // dropping the base snapshot; a later read then fails closed for a proxy (signaling re-adopt) as
       // an absent snapshot does.
       if (deploymentCapture !== undefined) {
+        const subject = deploymentSubject(operationContext.predictedContractAddress, operationContext.provenanceHash);
         const capture = await captureDescriptorsBestEffort(
           operationContext.actualTarget,
           operationContext.contractKind,
           operationContext.actualTarget,
           deploymentCapture.deployedBytecode,
+          subject,
         );
         const references = snapshotImmutableReferences(deploymentCapture.deployedBytecode);
         addressMap.setArtifactSnapshot({
           ...deploymentCapture.base,
           ...(references === undefined ? {} : { immutableReferences: references }),
         });
-        persistDeploymentDescriptor(operationContext.predictedContractAddress, capture);
+        persistDeploymentDescriptor(operationContext.predictedContractAddress, capture, subject);
       }
       return sourceHash;
     } catch (error) {

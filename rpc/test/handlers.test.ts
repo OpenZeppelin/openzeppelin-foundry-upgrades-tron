@@ -248,6 +248,7 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
     rewriteDeployment: overrides.rewriteDeployment ?? (async (match: JsonAny) => ({ ...match, initcode: '0x6000' })),
     rewriteCall: overrides.rewriteCall ?? (async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL })),
     ...(overrides.delay === undefined ? {} : { delay: overrides.delay }),
+    ...(overrides.reportError === undefined ? {} : { reportError: overrides.reportError }),
     ...(overrides.descriptorCaptureRetryDelayMs === undefined
       ? {}
       : { descriptorCaptureRetryDelayMs: overrides.descriptorCaptureRetryDelayMs }),
@@ -2391,6 +2392,137 @@ test('a deploy persists its base snapshot and a pending descriptor when the capt
     status: 'pending',
     descriptors: [],
   });
+});
+
+// The three descriptor-failure swallows are correct behavior (a confirmed deployment must never fail
+// on capture), but each must report a sanitizable one-line diagnostic naming the deployment, or a
+// later fail-closed read cannot be traced back to the write that caused it.
+test('a deploy reports the exhausted descriptor-capture retries through the error reporter', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const selfWord = `0x6080${'00'.repeat(12)}${ACTUAL_TARGET.slice(2)}6000`;
+  const reports: { context: string; error: unknown }[] = [];
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    delay: async () => {},
+    reportError: (context: string, error: unknown) => {
+      reports.push({ context, error });
+    },
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        deployedBytecode: { object: selfWord, immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+      },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: false,
+    }),
+    upstream: {
+      async request(method: JsonAny) {
+        if (method === 'eth_getCode') throw new Error('upstream getCode unavailable');
+        return `${method}:result`;
+      },
+    },
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'3c'.repeat(32)}`,
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].context, new RegExp(predicted, 'i'));
+  assert.match(reports[0].context, new RegExp(`0x${'55'.repeat(32)}`, 'i'));
+  assert.match(reports[0].context, /3 runtime-code read attempts/);
+  assert.equal((reports[0].error as Error)?.message, 'upstream getCode unavailable');
+});
+
+test('a deploy reports a malformed immutable reference map through the error reporter', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const reports: string[] = [];
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    reportError: (context: string) => {
+      reports.push(context);
+    },
+    matchDeploymentArtifact: () => ({
+      abi: [{ type: 'constructor', inputs: [] }],
+      artifact: {
+        abi: [{ type: 'constructor', inputs: [] }],
+        deployedBytecode: { object: '0x6001', immutableReferences: { '1': [{ start: -2, length: 32 }] } },
+      },
+      creationBytecode: '0x6000',
+      constructorData: '0x',
+      ...ARTIFACT_IDENTITY,
+      provenanceHash: `0x${'55'.repeat(32)}`,
+      requiresLinking: false,
+    }),
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'3c'.repeat(32)}`,
+  });
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  assert.equal(reports.filter(context => /immutable reference map is malformed/.test(context)).length, 1);
+  assert.equal(result.addressMap.resolveDeploymentDescriptor(predicted)?.status, 'pending');
+});
+
+test('a deploy reports a descriptor persistence failure through the error reporter', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const reports: { context: string; error: unknown }[] = [];
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    reportError: (context: string, error: unknown) => {
+      reports.push({ context, error });
+    },
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'3c'.repeat(32)}`,
+  });
+  result.addressMap.setDeploymentDescriptor = () => {
+    throw new Error('descriptor store failed');
+  };
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].context, /descriptor persistence failed/);
+  assert.match(reports[0].context, new RegExp(predicted, 'i'));
+  assert.equal((reports[0].error as Error)?.message, 'descriptor store failed');
+});
+
+test('a throwing error reporter never fails a confirmed deployment', async (t: TestContext) => {
+  const raw = await signedTransaction();
+  const result = fixture(t, {
+    nonceBaseline: 3,
+    reportError: () => {
+      throw new Error('sink down');
+    },
+  });
+  const predicted = getCreateAddress({ from: WALLET.address, nonce: 3 }).toLowerCase();
+  result.addressMap.set({
+    predicted,
+    actual: ACTUAL_TARGET,
+    creator: WALLET.address,
+    sender: WALLET.address,
+    sourceTransaction: `0x${'3c'.repeat(32)}`,
+  });
+  result.addressMap.setDeploymentDescriptor = () => {
+    throw new Error('descriptor store failed');
+  };
+  assert.equal((await send(result.handlers, raw)).result, keccak256(raw));
 });
 
 // A deployment whose runtime bytecode still carries unresolved external-library link placeholders

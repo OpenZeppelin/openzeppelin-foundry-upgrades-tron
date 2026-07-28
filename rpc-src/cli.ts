@@ -158,11 +158,15 @@ export interface CliSignalTarget {
   removeListener?(event: string, listener: () => void): unknown;
 }
 
+/** A one-line diagnostic sink for the adapter's non-fatal (swallowed) failures; never throws upward. */
+export type ErrorReporter = (context: string, error: unknown) => void;
+
 /** Options accepted by {@link buildRuntime}. */
 export interface BuildRuntimeOptions {
   host?: string;
   port?: number;
   fetch?: typeof fetch;
+  reportError?: ErrorReporter;
 }
 
 /** The composed adapter runtime returned by {@link buildRuntime}. */
@@ -423,7 +427,15 @@ function buildRuntime(config: Config, options: BuildRuntimeOptions = {}): Adapte
   const upstream = createUpstreamClient(config.jsonRpcEndpoint, {
     ...(resolvedOptions.fetch !== undefined ? { fetch: resolvedOptions.fetch } : {}),
   });
-  const handlers = createRpcHandlers({ config, journal, addressMap, reconciler, nativeClient, upstream });
+  const handlers = createRpcHandlers({
+    config,
+    journal,
+    addressMap,
+    reconciler,
+    nativeClient,
+    upstream,
+    ...(resolvedOptions.reportError === undefined ? {} : { reportError: resolvedOptions.reportError }),
+  });
   const server = createRpcServer({
     handlers,
     host: resolvedOptions.host ?? DEFAULT_HOST,
@@ -484,6 +496,11 @@ async function startCommand(parsed: StartArguments, context: ResolvedRunContext)
     host: parsed.host,
     port: parsed.port,
     ...(context.fetch === undefined ? {} : { fetch: context.fetch }),
+    // The sink reuses the CLI's fatal-error redaction (TRON_PRIVATE_KEY / TRON_RPC_URL values) and
+    // emits the error's `.message` only — never a stack, cause chain, or serialized error object.
+    reportError: (label, error) => {
+      context.stderr.write(`Warning: ${label}: ${sanitizedMessage(error, context.environment)}\n`);
+    },
   });
   if (!isObject(runtime) || !isObject(runtime.server) || !isObject(runtime.nativeClient)) {
     throw new Error('Adapter runtime did not provide a server and native client');
