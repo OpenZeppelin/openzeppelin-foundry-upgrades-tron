@@ -125,16 +125,7 @@ test('every supported legacy library function has adjacent NatSpec', () => {
 });
 
 test('public documentation covers the supported modern TVM workflow and intentional divergences', () => {
-  const files = [
-    'README.md',
-    'CONTRIBUTING.md',
-    'CHANGELOG.md',
-    'docs/modules/pages/foundry-upgrades-tron.adoc',
-    'docs/modules/api/pages/api-foundry-upgrades-tron.adoc',
-    'docs/modules/api/pages/Options.adoc',
-    'docs/modules/api/pages/Upgrades.adoc',
-    'docs/modules/api/pages/LegacyUpgrades.adoc',
-  ];
+  const files = ['README.md', 'CONTRIBUTING.md', 'CHANGELOG.md'];
   const documentation = files.map(file => fs.readFileSync(file, 'utf8')).join('\n');
 
   for (const required of [
@@ -154,12 +145,26 @@ test('public documentation covers the supported modern TVM workflow and intentio
     /forking[^.]{0,80}(?:unsupported|not supported)/iu,
     /LegacyUpgrades\.sol/iu,
     /v4\.9\.6/u,
-    /external[^.]{0,120}(?:evidence|lifecycle)[^.]{0,120}(?:genuine|pinned)[^.]{0,80}v4\.9\.6/iu,
+    /v4\.9\.6[^.]{0,160}(?:pending|not yet confirmed)/iu,
     /actual[^.]{0,80}(?:TVM|TRON)[^.]{0,80}address/iu,
     /ETH_RPC_TIMEOUT=300/u,
+    /`Box\.sol`[\s\S]{0,200}`Box\.sol:Box`[\s\S]{0,200}`out\/Box\.sol\/Box\.json`/u,
+    /`tryCaller`[\s\S]{0,120}(?:tests|test-only)/iu,
+    /`TRC1967InitializationRequired`/u,
+    /`unsafeAllow`[\s\S]{0,120}comma-separated/iu,
+    /`exclude`[\s\S]{0,160}glob[\s\S]{0,160}reference contracts/iu,
+    /`referenceBuildInfoDir`[\s\S]{0,120}(?:absolute|project-relative)/iu,
   ]) {
     assert.match(documentation, required);
   }
+
+  // The deprecated Antora sources are deleted; user docs live in the README and the docs-site repo.
+  assert.equal(fs.existsSync(path.resolve(__dirname, '..', 'docs')), false);
+  // The external stock-TRE v4 lifecycle is not confirmed; documentation must not claim it as evidence.
+  assert.doesNotMatch(
+    documentation,
+    /external[^.]{0,120}(?:evidence|lifecycle)[^.]{0,120}(?:genuine|pinned)[^.]{0,80}v4\.9\.6/iu,
+  );
 });
 
 test('published package contains runtime RPC files but no tests or fixture build output', () => {

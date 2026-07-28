@@ -180,7 +180,11 @@ import { LinkedLibrary, Options } from 'openzeppelin-foundry-upgrades-tron/Optio
 
 The validated `Upgrades` library supports UUPS, transparent, and beacon proxies
 using OpenZeppelin Contracts for TRON v5. The following examples assume an
-implementation contract named `Box` with an `initialize` function.
+implementation contract named `Box` with an `initialize` function. A
+`contractName` — and a `referenceContract` without a historical build-info
+directory — accepts a Solidity filename (`Box.sol`), a fully qualified name
+(`Box.sol:Box`), or an artifact path relative to the project root
+(`out/Box.sol/Box.json`).
 
 Deploy a UUPS proxy:
 
@@ -213,7 +217,8 @@ address proxy = Upgrades.deployBeaconProxy(
 ```
 
 TVM's `TRC1967Proxy` requires a non-empty initializer call for UUPS and
-transparent deployments. Beacon proxies may intentionally use empty
+transparent deployments; a violating deployment reverts with
+`TRC1967InitializationRequired`. Beacon proxies may intentionally use empty
 initializer data.
 
 Before an upgrade, identify the previous implementation with either
@@ -226,8 +231,9 @@ Upgrades.upgradeProxy(proxy, "BoxV2.sol:BoxV2", bytes(""), opts);
 // Or: Upgrades.upgradeBeacon(beacon, "BoxV2.sol:BoxV2", opts);
 ```
 
-For a historical build, set `referenceBuildInfoDir` and prefix the reference
-with that directory's unique short name, for example
+For a historical build, set `referenceBuildInfoDir` — an absolute path, or a
+path relative to the Foundry project root — and prefix the reference with that
+directory's unique short name, for example
 `build-info-v1:contracts/Box.sol:Box`. Historical build-info is trusted release
 input and should be retained and reviewed like source code.
 
@@ -236,16 +242,18 @@ write. `deployImplementation` validates and deploys a standalone
 implementation. `prepareUpgrade` validates against a reference and deploys the
 implementation for an administrator-controlled later upgrade. The TRC1967
 admin, implementation, and beacon slots are exposed through the three
-`get*Address` helpers.
+`get*Address` helpers. The overloads ending in `tryCaller` are for tests;
+broadcast scripts configure the sender through Forge instead.
 
 ### Options and linked libraries
 
 `constructorData` contains implementation constructor arguments; it is not
-proxy initializer data. `exclude` controls source globs passed to
-upgrades-core. `unsafeAllow`, `unsafeAllowRenames`,
-`unsafeSkipProxyAdminCheck`, and `unsafeSkipStorageCheck` waive individual
-safety checks. `unsafeSkipAllChecks` also bypasses compiler provenance binding
-and should be a last resort.
+proxy initializer data. `exclude` controls source-path glob patterns passed to
+upgrades-core; reference contracts are not excluded. `unsafeAllow` — a
+comma-separated list of upgrades-core validation errors to waive —
+`unsafeAllowRenames`, `unsafeSkipProxyAdminCheck`, and `unsafeSkipStorageCheck`
+waive individual safety checks. `unsafeSkipAllChecks` also bypasses compiler
+provenance binding and should be a last resort.
 
 Unlinked artifacts require an exact `LinkedLibrary` for every compiler link
 reference:
