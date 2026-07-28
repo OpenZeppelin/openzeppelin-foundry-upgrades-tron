@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 
-import { keccak256 } from 'ethers';
+import { keccak256, toUtf8Bytes } from 'ethers';
 
 import { AddressMap } from '../../dist/rpc/address-map.js';
 import { TransactionJournal } from '../../dist/rpc/journal.js';
@@ -86,6 +86,12 @@ function repairOptions(context: JsonAny, overrides: JsonAny = {}): JsonAny {
       (() => {
         throw new Error('no on-disk artifact');
       }),
+    ...(overrides.decodeLegacyTransaction === undefined
+      ? {}
+      : { decodeLegacyTransaction: overrides.decodeLegacyTransaction }),
+    ...(overrides.matchDeploymentArtifact === undefined
+      ? {}
+      : { matchDeploymentArtifact: overrides.matchDeploymentArtifact }),
   };
 }
 
@@ -128,7 +134,14 @@ function seedProxy(
 // (exactly how a gateway deployment records provenance). The artifact snapshot is keyed by that
 // journaled provenance and holds the immutable offsets. Returns the journal record hash so callers can
 // key the mapping and metadata at the same source transaction the journal is keyed by.
-function seedNormalProxy(stateFile: string, { withReferences = true }: { withReferences?: boolean } = {}): string {
+function seedNormalProxy(
+  stateFile: string,
+  {
+    withReferences = true,
+    withSnapshot = true,
+    confirm = false,
+  }: { withReferences?: boolean; withSnapshot?: boolean; confirm?: boolean } = {},
+): string {
   const store = new JsonStore(stateFile, { createIfMissing: false });
   const journal = new TransactionJournal(store, CHAIN, { ownerId: 'seed-owner', allowRecovery: false });
   const raw = `0x02${'42'.repeat(80)}`;
@@ -161,6 +174,10 @@ function seedNormalProxy(stateFile: string, { withReferences = true }: { withRef
       },
     },
   );
+  if (confirm) {
+    journal.recordBroadcast(sourceHash);
+    journal.recordConfirmed(sourceHash, { status: '0x1' });
+  }
 
   const map = new AddressMap(store, CHAIN);
   map.set({ predicted: PREDICTED, actual: ACTUAL, creator: SENDER, sender: SENDER, sourceTransaction: sourceHash });
@@ -170,15 +187,17 @@ function seedNormalProxy(stateFile: string, { withReferences = true }: { withRef
     artifactIdentity: IDENTITY,
     sourceTransaction: sourceHash,
   });
-  map.setArtifactSnapshot({
-    provenanceHash: PROVENANCE,
-    artifactIdentity: IDENTITY,
-    contractKind: 'transparent-proxy',
-    abi: [],
-    creationBytecodeHash: `0x${'88'.repeat(32)}`,
-    runtimeBytecodeHash: `0x${'99'.repeat(32)}`,
-    ...(withReferences ? { immutableReferences: [{ start: 2, length: 32 }] } : {}),
-  });
+  if (withSnapshot) {
+    map.setArtifactSnapshot({
+      provenanceHash: PROVENANCE,
+      artifactIdentity: IDENTITY,
+      contractKind: 'transparent-proxy',
+      abi: [],
+      creationBytecodeHash: `0x${'88'.repeat(32)}`,
+      runtimeBytecodeHash: `0x${'99'.repeat(32)}`,
+      ...(withReferences ? { immutableReferences: [{ start: 2, length: 32 }] } : {}),
+    });
+  }
   return sourceHash;
 }
 
@@ -530,6 +549,155 @@ test('repair leaves a proxy pending when disk offsets cannot be persisted to a s
     ),
     0,
   );
+  assert.equal(freshMap(context.stateFile).resolveDeploymentDescriptor(PREDICTED)?.status, 'pending');
+  assert.deepEqual(JSON.parse(out.read()), { status: 'repaired', completed: 0, pending: 1 });
+  // Scoped to journal provenance: an adopt-shaped record (its own provenanceHash) writes mapping,
+  // metadata, and snapshot in ONE transaction, so a missing snapshot here is not the crash window.
+  assert.equal(freshMap(context.stateFile).resolveArtifactSnapshot(PROVENANCE), undefined);
+});
+
+// The confirm flow commits mapping + metadata durably and the artifact snapshot in a later
+// transaction; a crash between them leaves a confirmed deployment no read path can recover after a
+// recompile. Repair rebuilds the snapshot from the provenance-matched on-disk artifact, hashing the
+// linked creation prefix recovered from the journaled initcode so the envelope matches the deploy path.
+test('repair rebuilds a crash-lost artifact snapshot for a confirmed journal deployment', async t => {
+  const context = fixture(t);
+  seedNormalProxy(context.stateFile, { withSnapshot: false, confirm: true });
+  assert.equal(freshMap(context.stateFile).resolveArtifactSnapshot(PROVENANCE), undefined);
+
+  const linkedCreation = `0x6001${'33'.repeat(20)}6002`;
+  const linkedRuntime = `0x6001__$${'a'.repeat(34)}$__6002`;
+  const verifyArtifactProvenance = () => ({
+    artifact: {
+      abi: [],
+      bytecode: { object: `0x6001__$${'b'.repeat(34)}$__6002` },
+      deployedBytecode: { object: linkedRuntime, immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+    },
+    ...IDENTITY,
+    artifactPath: '/out/T.sol/T.json',
+    provenanceHash: PROVENANCE,
+  });
+
+  const decoderOptionsSeen: JsonAny[] = [];
+  const out = output();
+  assert.equal(
+    await run(
+      ['repair'],
+      repairOptions(context, {
+        stdout: out.stream,
+        code: { [ACTUAL]: proxyRuntimeCode(ADMIN_ACTUAL) },
+        findArtifactPaths: () => ['/out/T.sol/T.json'],
+        verifyArtifactProvenance,
+        decodeLegacyTransaction: (_raw: JsonAny, options: JsonAny) => {
+          decoderOptionsSeen.push(options);
+          return { kind: 'deployment', data: linkedCreation };
+        },
+        matchDeploymentArtifact: () => ({
+          ...verifyArtifactProvenance(),
+          creationBytecode: linkedCreation,
+          constructorData: '0x',
+        }),
+      }),
+    ),
+    0,
+  );
+
+  assert.deepEqual(freshMap(context.stateFile).resolveArtifactSnapshot(PROVENANCE), {
+    provenanceHash: PROVENANCE,
+    artifactIdentity: IDENTITY,
+    contractKind: 'transparent-proxy',
+    abi: [],
+    creationBytecodeHash: keccak256(linkedCreation),
+    runtimeBytecodeHash: keccak256(toUtf8Bytes(linkedRuntime)),
+    immutableReferences: [{ start: 2, length: 32 }],
+  });
+  assert.deepEqual(freshMap(context.stateFile).resolveDeploymentDescriptor(PREDICTED), {
+    predicted: PREDICTED,
+    status: 'complete',
+    descriptors: [{ role: 'admin', start: 2, length: 32, expectedActual: ADMIN_ACTUAL }],
+  });
+  assert.deepEqual(JSON.parse(out.read()), { status: 'repaired', completed: 1, pending: 0 });
+  // The production decoder throws before parsing when these options are absent; a stub ignoring them
+  // would mask repair silently declining every rebuild in production.
+  assert.equal(decoderOptionsSeen.length, 1);
+  assert.equal(decoderOptionsSeen[0]?.expectedSender, SENDER);
+  assert.equal(decoderOptionsSeen[0]?.expectedChainId, CHAIN_ID);
+});
+
+// Reconstruction succeeds only while the on-disk artifact still provenance-matches the journaled
+// deployment; a drifted (recompiled) artifact is declined and the record stays pending, retryable.
+test('repair does not rebuild a snapshot from a drifted on-disk artifact', async t => {
+  const context = fixture(t);
+  seedNormalProxy(context.stateFile, { withSnapshot: false, confirm: true });
+
+  const out = output();
+  assert.equal(
+    await run(
+      ['repair'],
+      repairOptions(context, {
+        stdout: out.stream,
+        code: { [ACTUAL]: proxyRuntimeCode(ADMIN_ACTUAL) },
+        findArtifactPaths: () => ['/out/T.sol/T.json'],
+        verifyArtifactProvenance: () => ({
+          artifact: {
+            abi: [],
+            bytecode: { object: '0x6000' },
+            deployedBytecode: { object: '0x6001', immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+          },
+          ...IDENTITY,
+          artifactPath: '/out/T.sol/T.json',
+          provenanceHash: `0x${'88'.repeat(32)}`,
+        }),
+        decodeLegacyTransaction: () => ({ kind: 'deployment', data: '0x6000' }),
+        matchDeploymentArtifact: () => {
+          throw new Error('no artifact matches the initcode');
+        },
+      }),
+    ),
+    0,
+  );
+  assert.equal(freshMap(context.stateFile).resolveArtifactSnapshot(PROVENANCE), undefined);
+  assert.equal(freshMap(context.stateFile).resolveDeploymentDescriptor(PREDICTED)?.status, 'pending');
+  assert.deepEqual(JSON.parse(out.read()), { status: 'repaired', completed: 0, pending: 1 });
+});
+
+// The crash window closes at confirmation: an unconfirmed journal record is startup recovery's job
+// (it may still broadcast), not repair's, so no snapshot is rebuilt for it.
+test('repair does not rebuild a snapshot for an unconfirmed journal deployment', async t => {
+  const context = fixture(t);
+  seedNormalProxy(context.stateFile, { withSnapshot: false, confirm: false });
+
+  const out = output();
+  assert.equal(
+    await run(
+      ['repair'],
+      repairOptions(context, {
+        stdout: out.stream,
+        code: { [ACTUAL]: proxyRuntimeCode(ADMIN_ACTUAL) },
+        findArtifactPaths: () => ['/out/T.sol/T.json'],
+        verifyArtifactProvenance: () => ({
+          artifact: {
+            abi: [],
+            bytecode: { object: '0x6000' },
+            deployedBytecode: { object: '0x6001', immutableReferences: { '1': [{ start: 2, length: 32 }] } },
+          },
+          ...IDENTITY,
+          artifactPath: '/out/T.sol/T.json',
+          provenanceHash: PROVENANCE,
+        }),
+        decodeLegacyTransaction: () => ({ kind: 'deployment', data: '0x6000' }),
+        matchDeploymentArtifact: () => ({
+          artifact: { abi: [], bytecode: { object: '0x6000' }, deployedBytecode: { object: '0x6001' } },
+          ...IDENTITY,
+          provenanceHash: PROVENANCE,
+          creationBytecode: '0x6000',
+          constructorData: '0x',
+        }),
+      }),
+    ),
+    0,
+  );
+  assert.equal(freshMap(context.stateFile).resolveArtifactSnapshot(PROVENANCE), undefined);
   assert.equal(freshMap(context.stateFile).resolveDeploymentDescriptor(PREDICTED)?.status, 'pending');
   assert.deepEqual(JSON.parse(out.read()), { status: 'repaired', completed: 0, pending: 1 });
 });

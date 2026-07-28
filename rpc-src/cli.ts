@@ -12,7 +12,8 @@ import {
 } from './address-map.js';
 import { normalizeAddress, toEvmAddress } from './address-codec.js';
 import { derivedTronProxyAdminIdentity } from './artifact-identities.js';
-import { findArtifactPaths, verifyArtifactProvenance } from './artifacts.js';
+import { findArtifactPaths, matchDeploymentArtifact, verifyArtifactProvenance } from './artifacts.js';
+import type { DeploymentMatchResult, MatchDeploymentArtifactOptions } from './artifacts.js';
 import {
   buildDescriptorsFromRanges,
   buildImmutableDescriptors,
@@ -34,6 +35,8 @@ import type { RpcServer, RpcServerHandlers } from './server.js';
 import { acquireStateLock, assertStateLockHeld } from './state-lock.js';
 import type { StateLockCapability } from './state-lock.js';
 import { JsonStore, createStateFile } from './store.js';
+import { decodeLegacyTransaction } from './transactions.js';
+import type { DecodeLegacyTransactionOptions, DecodedLegacyTransaction } from './transactions.js';
 import { TronClient } from './tron-client.js';
 import { createUpstreamClient } from './upstream.js';
 import type { UpstreamClient } from './upstream.js';
@@ -257,6 +260,8 @@ export interface RunOptions {
   fetch?: typeof fetch;
   verifyArtifactProvenance?: (options: { outputDirectory: string; artifactPath: string }) => JsonAny;
   findArtifactPaths?: (outputDirectory: string, reference: string) => string[];
+  decodeLegacyTransaction?: (raw: string, options?: DecodeLegacyTransactionOptions) => DecodedLegacyTransaction;
+  matchDeploymentArtifact?: (options: MatchDeploymentArtifactOptions) => DeploymentMatchResult;
   upstreamClient?: UpstreamClient;
   acquireStateLock?: (statePath: string) => Promise<StateLockCapability>;
 }
@@ -273,6 +278,8 @@ interface ResolvedRunContext {
   fetch: typeof fetch | undefined;
   verifyArtifactProvenance: (options: { outputDirectory: string; artifactPath: string }) => JsonAny;
   findArtifactPaths: (outputDirectory: string, reference: string) => string[];
+  decodeLegacyTransaction: (raw: string, options?: DecodeLegacyTransactionOptions) => DecodedLegacyTransaction;
+  matchDeploymentArtifact: (options: MatchDeploymentArtifactOptions) => DeploymentMatchResult;
   adoptUpstream: (config: JsonAny) => UpstreamClient;
   acquireStateLock: (statePath: string) => Promise<StateLockCapability>;
 }
@@ -940,7 +947,7 @@ function repairImmutableRanges(
   journal: TransactionJournal,
   metadata: ContractMetadataRecord,
 ): ImmutableSource | undefined {
-  function ownDiskSource(expectedProvenance?: string): ImmutableSource | undefined {
+  function ownDiskSource(expectedProvenance?: string): (ImmutableSource & { verified: JsonAny }) | undefined {
     try {
       const matches = context.findArtifactPaths(config.foundryOut, metadata.artifactIdentity.fullyQualifiedName);
       if (matches.length !== 1) return undefined;
@@ -951,6 +958,7 @@ function repairImmutableRanges(
       return {
         ranges: immutableRanges(extractImmutableReferences(verified.artifact?.deployedBytecode)),
         runtimeTemplateHash: runtimeBytecodeTemplateHash(verified.artifact?.deployedBytecode, 'runtime bytecode'),
+        verified,
       };
     } catch {
       return undefined;
@@ -985,7 +993,52 @@ function repairImmutableRanges(
   // offsets-only enrichment the snapshot store reconciles in place), then treat the source as resolved
   // ONLY if that persistence is durable — no snapshot to enrich, or a write refusal, leaves the record
   // pending (retryable) rather than completing it from a value that cannot survive artifact removal.
-  if (snapshot === undefined) return undefined;
+  if (snapshot === undefined) {
+    // The confirm flow writes mapping/metadata and the artifact snapshot in two separate durable
+    // transactions; a crash between them leaves a confirmed deployment with no snapshot that no read
+    // path recovers once the artifact drifts. Rebuild the full envelope exactly as the deploy path
+    // derives it (the creation hash covers the linked prefix recovered from the journaled initcode).
+    // Scoped to journal-provenance deployments: an adopted record commits its snapshot with its mapping.
+    if (metadata.provenanceHash !== undefined) return undefined;
+    const record = journal.get(metadata.sourceTransaction);
+    const operation = record?.operationContext;
+    if (
+      record?.state !== 'confirmed' ||
+      operation?.kind !== 'deployment' ||
+      operation.predictedContractAddress !== metadata.predicted ||
+      operation.artifactIdentity?.fullyQualifiedName !== metadata.artifactIdentity?.fullyQualifiedName
+    ) {
+      return undefined;
+    }
+    try {
+      const decoded = context.decodeLegacyTransaction(record.signedEthereumTransaction, {
+        expectedSender: config.expectedSender,
+        expectedChainId: config.chainId,
+      });
+      if (decoded.kind !== 'deployment') return undefined;
+      const match = context.matchDeploymentArtifact({ outputDirectory: config.foundryOut, initcode: decoded.data });
+      if (
+        match.fullyQualifiedName !== metadata.artifactIdentity.fullyQualifiedName ||
+        match.provenanceHash?.toLowerCase() !== String(recordedProvenance).toLowerCase()
+      ) {
+        return undefined;
+      }
+      addressMap.setArtifactSnapshot({
+        provenanceHash: recordedProvenance,
+        artifactIdentity: metadata.artifactIdentity,
+        contractKind: operation.contractKind,
+        abi: disk.verified.artifact?.abi,
+        creationBytecodeHash: bytecodeHexHash(match.creationBytecode, 'creation bytecode'),
+        runtimeBytecodeHash: disk.runtimeTemplateHash,
+        immutableReferences: disk.ranges,
+      });
+    } catch {
+      // A decode, rematch, or write failure leaves the deployment snapshot-less exactly as before,
+      // repairable once the matching artifact (or a writable snapshot slot) is back.
+      return undefined;
+    }
+    return disk;
+  }
   try {
     addressMap.setArtifactSnapshot({ ...snapshot, immutableReferences: disk.ranges });
   } catch {
@@ -1127,6 +1180,8 @@ async function run(argv: string[] = process.argv.slice(2), options: RunOptions =
     fetch: options.fetch,
     verifyArtifactProvenance: options.verifyArtifactProvenance ?? verifyArtifactProvenance,
     findArtifactPaths: options.findArtifactPaths ?? findArtifactPaths,
+    decodeLegacyTransaction: options.decodeLegacyTransaction ?? decodeLegacyTransaction,
+    matchDeploymentArtifact: options.matchDeploymentArtifact ?? matchDeploymentArtifact,
     acquireStateLock: options.acquireStateLock ?? acquireStateLock,
     adoptUpstream:
       options.upstreamClient !== undefined
