@@ -426,6 +426,56 @@ test('honors an adopted nonce-baseline floor for the configured sender and rejec
   );
 });
 
+test('a queue-rejected source fails in the journal and answers the same rejection on resend', async (t: TestContext) => {
+  const result = fixture(t);
+  result.addressMap.setNonceBaseline({ sender: WALLET.address, nonce: 5n });
+  const stale = await signedTransaction({ nonce: 3 });
+
+  await assert.rejects(
+    result.handlers.dispatch('eth_sendRawTransaction', [stale]),
+    (error: JsonAny) => error.code === 'NONCE_TOO_LOW',
+  );
+
+  // The admission rejection never ran the work, so nothing downstream could
+  // record an outcome — the catch on the queue promise must have. A record
+  // left 'received' here is the startup-recovery rebroadcast bug.
+  const record = result.journal.get(keccak256(stale));
+  assert.equal(record.state, 'failed');
+  assert.equal(record.failure.code, 'NONCE_TOO_LOW');
+
+  // A resend answers the recorded failure deterministically, no reprocessing.
+  await assert.rejects(
+    result.handlers.dispatch('eth_sendRawTransaction', [stale]),
+    (error: JsonAny) => error.code === 'NONCE_TOO_LOW',
+  );
+  assert.equal(result.calls.filter((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall').length, 0);
+});
+
+test('startup recovery never rebroadcasts a source the queue rejected before the restart', async (t: TestContext) => {
+  const before = fixture(t);
+  before.addressMap.setNonceBaseline({ sender: WALLET.address, nonce: 5n });
+  const stale = await signedTransaction({ nonce: 3 });
+  await assert.rejects(
+    before.handlers.dispatch('eth_sendRawTransaction', [stale]),
+    (error: JsonAny) => error.code === 'NONCE_TOO_LOW',
+  );
+
+  // A new boot over the same durable store: the rejected source must be
+  // invisible to recovery — before the fix it sat in 'received' and was
+  // reprocessed straight through processClaimed, bypassing the nonce queue
+  // and broadcasting a transaction the caller was told was rejected.
+  const rebooted = fixture(t, {
+    journal: new TransactionJournal(before.store, CHAIN, { ownerId: 'boot-after-reject', allowRecovery: true }),
+  });
+  const capability = await acquireStateLock(rebooted.statePath);
+  t.after(() => capability.release());
+  const recovered = await rebooted.handlers.recoverStartup(capability);
+
+  assert.deepEqual(recovered, []);
+  assert.equal(rebooted.calls.filter((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall').length, 0);
+  assert.equal(rebooted.journal.get(keccak256(stale)).state, 'failed');
+});
+
 test('normalizes the stock TRE empty state root before Forge deserializes a block', async (t: TestContext) => {
   const hash = `0x${'12'.repeat(32)}`;
   const block = {

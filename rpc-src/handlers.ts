@@ -1403,6 +1403,12 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   // it only when it is the signer's next expected nonce. A transaction that cannot be decoded has no
   // orderable nonce, so it bypasses the queue and processes immediately, recording the same
   // deterministic decode failure it would have before.
+  // The queue's admission rejections: the entry's work never ran, and the
+  // caller was answered with the rejection. Closed set on purpose — a run
+  // failure carries the run's own error and must keep the journal outcome
+  // processClaimed already decided for it.
+  const QUEUE_ADMISSION_CODES = new Set(['NONCE_TOO_LOW', 'NONCE_GAP_TIMEOUT', 'NONCE_ALREADY_QUEUED']);
+
   function enqueueBuild(rawTransaction: JsonAny, hash: JsonAny): Promise<JsonAny> {
     let routing;
     try {
@@ -1410,9 +1416,27 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
     } catch {
       return runTracked(hash, () => processClaimed(rawTransaction, hash));
     }
-    return queue.enqueue(routing.from, BigInt(routing.nonce), hash, () =>
-      runTracked(hash, () => processClaimed(rawTransaction, hash)),
-    );
+    return queue
+      .enqueue(routing.from, BigInt(routing.nonce), hash, () =>
+        runTracked(hash, () => processClaimed(rawTransaction, hash)),
+      )
+      .catch((error: JsonAny) => {
+        // An admission rejection settles WITHOUT running the work, so nothing
+        // downstream ever updates the journal and the source would sit there
+        // as 'received' forever. Startup recovery replays every unsettled
+        // record straight through processClaimed — no queue, no nonce check —
+        // so a restart would broadcast a transaction the caller was already
+        // told was rejected, and TRON has no native nonce to stop the double
+        // execution. Record the rejection the caller saw. Guarded twice: only
+        // a record still in 'received' (a run failure already decided its own
+        // outcome inside processClaimed), and only the queue's own admission
+        // codes (a retryable transport failure deliberately stays replayable).
+        const current = journal.get(hash);
+        if (current?.state === 'received' && QUEUE_ADMISSION_CODES.has(error?.code)) {
+          journal.recordFailed(hash, { code: error.code, message: error.message });
+        }
+        throw error;
+      });
   }
 
   async function sendRawTransaction(raw: JsonAny): Promise<JsonAny> {
