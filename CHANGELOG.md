@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file. The
 project follows Semantic Versioning.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-08-21)
 
 - Add validated and unsafe modern UUPS, transparent, and beacon deployment and
   upgrade APIs for OpenZeppelin Contracts for TRON v5.

@@ -24,7 +24,7 @@ test('package exposes Solidity sources and the RPC adapter', () => {
   assert.equal(pkg.scripts['rpc:start'], 'node dist/rpc/cli.js start');
   assert.equal(pkg.scripts['rpc:resolve'], 'node dist/rpc/cli.js resolve');
   assert.equal(pkg.scripts['rpc:mappings'], 'node dist/rpc/cli.js mappings');
-  assert.deepEqual(pkg.bin, { 'openzeppelin-foundry-upgrades-tron': 'dist/rpc/cli.js' });
+  assert.deepEqual(pkg.bin, { 'foundry-upgrades-tron': 'dist/rpc/cli.js' });
 
   assert.match(foundryConfig, /^ffi = true$/m);
   assert.match(foundryConfig, /^ast = true$/m);

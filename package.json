@@ -17,7 +17,7 @@
     "node": ">=22"
   },
   "bin": {
-    "openzeppelin-foundry-upgrades-tron": "dist/rpc/cli.js"
+    "foundry-upgrades-tron": "dist/rpc/cli.js"
   },
   "scripts": {
     "compile": "forge build",
@@ -41,9 +41,9 @@
     "prepack": "npm run build:rpc && node scripts/require-package-contents.cjs"
   },
   "dependencies": {
-    "@openzeppelin/tron-runtime": "0.1.0-alpha.1",
+    "@openzeppelin/tron-runtime": "0.1.0",
     "ethers": "6.17.0",
-    "tronweb": "6.4.0"
+    "tronweb": "6.5.0"
   },
   "devDependencies": {
     "@openzeppelin/upgrades-core": "1.46.0",
@@ -56,5 +56,8 @@
   },
   "peerDependencies": {
     "@openzeppelin/upgrades-core": "^1.46.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

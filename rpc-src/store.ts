@@ -29,7 +29,7 @@ export interface CreateStateFileOptions {
 }
 
 const MISSING_STATE_HINT =
-  'Initialize it with "openzeppelin-foundry-upgrades-tron init" or restore it from a backup';
+  'Initialize it with "npx @openzeppelin/foundry-upgrades-tron init" or restore it from a backup';
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
