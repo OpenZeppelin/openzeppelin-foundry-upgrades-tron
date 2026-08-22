@@ -75,8 +75,8 @@ contract Deploy is Script {
 **4 · Start the adapter** (defaults to a local TRE node):
 
 ```sh
-npm run rpc:init     # once — creates the durable state file
-npm run rpc:start    # listens on http://127.0.0.1:8545
+npx openzeppelin-foundry-upgrades-tron init    # once — creates the durable state file
+npx openzeppelin-foundry-upgrades-tron start   # listens on http://127.0.0.1:8545
 ```
 
 **5 · Broadcast through the adapter:**
@@ -90,8 +90,8 @@ ETH_RPC_TIMEOUT=300 forge script script/Deploy.s.sol \
 **6 · See the predicted ↔ actual mapping:**
 
 ```sh
-npm run rpc:resolve -- <predicted-address>
-npm run rpc:mappings
+npx openzeppelin-foundry-upgrades-tron resolve <predicted-address>
+npx openzeppelin-foundry-upgrades-tron mappings
 ```
 
 **To upgrade**, run the same flow with an upgrade script — identify the previous
@@ -376,7 +376,7 @@ Public networks never inherit the TRE endpoint or development key. To bind the
 adapter beyond loopback, pass both the host and the explicit acknowledgement:
 
 ```sh
-npm run rpc:start -- --host 0.0.0.0 --port 8545 --allow-non-loopback
+npx openzeppelin-foundry-upgrades-tron start --host 0.0.0.0 --port 8545 --allow-non-loopback
 ```
 
 Only expose the adapter behind controls appropriate for a signing service. It
