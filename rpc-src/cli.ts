@@ -117,14 +117,14 @@ const ADOPT_FLAGS = [
   '--nonce-baseline',
 ];
 const USAGE = `Usage:
-  openzeppelin-foundry-upgrades-tron init
-  openzeppelin-foundry-upgrades-tron start [--host HOST] [--port PORT] [--allow-non-loopback]
-  openzeppelin-foundry-upgrades-tron resolve ADDRESS
-  openzeppelin-foundry-upgrades-tron mappings
-  openzeppelin-foundry-upgrades-tron adopt --predicted EVM --actual TRON --artifact FQN --kind KIND
-                                           [--impl ADDR] [--admin ADDR] [--beacon ADDR] [--owner ADDR]
-                                           [--nonce-baseline N]
-  openzeppelin-foundry-upgrades-tron repair
+  npx @openzeppelin/foundry-upgrades-tron init
+  npx @openzeppelin/foundry-upgrades-tron start [--host HOST] [--port PORT] [--allow-non-loopback]
+  npx @openzeppelin/foundry-upgrades-tron resolve ADDRESS
+  npx @openzeppelin/foundry-upgrades-tron mappings
+  npx @openzeppelin/foundry-upgrades-tron adopt --predicted EVM --actual TRON --artifact FQN --kind KIND
+                                                [--impl ADDR] [--admin ADDR] [--beacon ADDR] [--owner ADDR]
+                                                [--nonce-baseline N]
+  npx @openzeppelin/foundry-upgrades-tron repair
 
 Run init once to create the state file, then back it up like a keystore. Every
 other command refuses to run against a missing state file rather than presenting
