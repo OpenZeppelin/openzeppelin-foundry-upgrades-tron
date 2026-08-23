@@ -1403,11 +1403,15 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
   // it only when it is the signer's next expected nonce. A transaction that cannot be decoded has no
   // orderable nonce, so it bypasses the queue and processes immediately, recording the same
   // deterministic decode failure it would have before.
-  // The queue's admission rejections: the entry's work never ran, and the
-  // caller was answered with the rejection. Closed set on purpose — a run
-  // failure carries the run's own error and must keep the journal outcome
-  // processClaimed already decided for it.
-  const QUEUE_ADMISSION_CODES = new Set(['NONCE_TOO_LOW', 'NONCE_GAP_TIMEOUT', 'NONCE_ALREADY_QUEUED']);
+  // The queue's one admission rejection that can never become admissible
+  // again: the entry's work never ran, the caller was answered with the
+  // rejection, and the signer cursor only advances, so this nonce stays below
+  // it. Closed set on purpose — a run failure carries the run's own error and
+  // must keep the journal outcome processClaimed already decided for it.
+  // NONCE_GAP_TIMEOUT and NONCE_ALREADY_QUEUED are deliberately absent: both
+  // describe conditions that clear on their own, and a record recorded failed
+  // here can never be retried or cleared.
+  const QUEUE_ADMISSION_CODES = new Set(['NONCE_TOO_LOW']);
 
   function enqueueBuild(rawTransaction: JsonAny, hash: JsonAny): Promise<JsonAny> {
     let routing;
@@ -1429,8 +1433,9 @@ function createRpcHandlers(rawOptions: JsonAny): JsonAny {
         // told was rejected, and TRON has no native nonce to stop the double
         // execution. Record the rejection the caller saw. Guarded twice: only
         // a record still in 'received' (a run failure already decided its own
-        // outcome inside processClaimed), and only the queue's own admission
-        // codes (a retryable transport failure deliberately stays replayable).
+        // outcome inside processClaimed), and only the one terminal admission
+        // code (anything transient — a retryable transport failure, a gap
+        // timeout, a contested nonce — deliberately stays replayable).
         const current = journal.get(hash);
         if (current?.state === 'received' && QUEUE_ADMISSION_CODES.has(error?.code)) {
           journal.recordFailed(hash, { code: error.code, message: error.message });

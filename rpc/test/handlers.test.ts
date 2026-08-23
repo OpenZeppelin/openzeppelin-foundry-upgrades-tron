@@ -248,6 +248,8 @@ function fixture(t: TestContext, overrides: JsonAny = {}): JsonAny {
     rewriteDeployment: overrides.rewriteDeployment ?? (async (match: JsonAny) => ({ ...match, initcode: '0x6000' })),
     rewriteCall: overrides.rewriteCall ?? (async (decoded: JsonAny) => ({ ...decoded, to: TARGET_ACTUAL })),
     ...(overrides.delay === undefined ? {} : { delay: overrides.delay }),
+    ...(overrides.scheduleTimeout === undefined ? {} : { scheduleTimeout: overrides.scheduleTimeout }),
+    ...(overrides.cancelTimeout === undefined ? {} : { cancelTimeout: overrides.cancelTimeout }),
     ...(overrides.reportError === undefined ? {} : { reportError: overrides.reportError }),
     ...(overrides.descriptorCaptureRetryDelayMs === undefined
       ? {}
@@ -474,6 +476,42 @@ test('startup recovery never rebroadcasts a source the queue rejected before the
   assert.deepEqual(recovered, []);
   assert.equal(rebooted.calls.filter((call: JsonAny) => call.type === 'buildCreate' || call.type === 'buildCall').length, 0);
   assert.equal(rebooted.journal.get(keccak256(stale)).state, 'failed');
+});
+
+test('a gap-timeout rejection stays replayable and the resend succeeds once the gap fills', async (t: TestContext) => {
+  // Deterministic gap deadline: capture the queue's timer instead of waiting
+  // 30 real seconds, and fire it by hand while the entry still waits.
+  const pendingDeadlines: Array<() => void> = [];
+  const result = fixture(t, {
+    scheduleTimeout: (callback: () => void) => pendingDeadlines.push(callback),
+    cancelTimeout: () => {},
+  });
+  result.addressMap.setNonceBaseline({ sender: WALLET.address, nonce: 5n });
+  const ahead = await signedTransaction({ nonce: 6 });
+
+  const rejected = assert.rejects(
+    result.handlers.dispatch('eth_sendRawTransaction', [ahead]),
+    (error: JsonAny) => error.code === 'NONCE_GAP_TIMEOUT',
+  );
+  for (let i = 0; i < 50 && pendingDeadlines.length === 0; i += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(pendingDeadlines.length, 1);
+  pendingDeadlines.splice(0).forEach(fire => fire());
+  await rejected;
+
+  // The rejection is transient — the gap clears on its own — so the journal
+  // must NOT record it as terminal: a 'failed' record here answers the stored
+  // failure on every future resend with no supported way back.
+  const record = result.journal.get(keccak256(ahead));
+  assert.equal(record.state, 'received');
+  assert.equal(record.failure, undefined);
+
+  // Fill the gap, then resend the timed-out source: it re-enters the queue
+  // and completes like any first send.
+  await result.handlers.dispatch('eth_sendRawTransaction', [await signedTransaction({ nonce: 5 })]);
+  await result.handlers.dispatch('eth_sendRawTransaction', [ahead]);
+  assert.equal(result.journal.get(keccak256(ahead)).state, 'confirmed');
 });
 
 test('normalizes the stock TRE empty state root before Forge deserializes a block', async (t: TestContext) => {
