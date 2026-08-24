@@ -19,6 +19,11 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
+      # `npm test` includes test:solidity, which shells out to forge. CI runs
+      # that suite in a job of its own that installs the toolchain; this
+      # single-job workflow has to install it here or the run fails ENOENT.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
       # Same suite CI runs: the live-TRE test is opt-in and not enabled here,
       # so this deterministically exercises the unit-style tests.
       - run: npm test
