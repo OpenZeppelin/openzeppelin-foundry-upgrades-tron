@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file. The
 project follows Semantic Versioning.
 
+## Unreleased
+
+- Move the bundled `lib/openzeppelin-tron-solidity` submodule and the
+  documented `forge install` pin from commit `06d69bc` (2026-06-30, before
+  the audit fixes) to the `v5.6.0` release tag of `OpenZeppelin/tron-contracts`,
+  the same release `@openzeppelin/tron-contracts@5.6.0` on npm was cut from.
+  Between the two, the proxy sources under `proxy/` and `utils/StorageSlot.sol`
+  differ only in header and natspec comments, so the compiled proxy logic is
+  unchanged; only the compiler metadata hash appended to the bytecode moves.
+
 ## 0.1.0 (2026-08-21)
 
 - Add validated and unsafe modern UUPS, transparent, and beacon deployment and
