@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file. The
 project follows Semantic Versioning.
 
-## Unreleased
+## 0.1.1 (2026-09-11)
 
 - When installed with `forge install OpenZeppelin/openzeppelin-foundry-upgrades-tron`,
   the bundled OpenZeppelin Contracts for TRON is now the `v5.6.0` release
