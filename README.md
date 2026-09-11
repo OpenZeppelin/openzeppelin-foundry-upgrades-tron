@@ -136,7 +136,7 @@ OpenZeppelin Contracts for TRON and forge-std as Forge dependencies:
 ```sh
 npm install @openzeppelin/foundry-upgrades-tron @openzeppelin/upgrades-core@1.46.0
 forge install foundry-rs/forge-std@v1.9.5
-forge install OpenZeppelin/tron-contracts@06d69bcfc94ff7ba6824290959b75baf86d91f6c
+forge install OpenZeppelin/tron-contracts
 ```
 
 ```text
@@ -145,8 +145,12 @@ openzeppelin-tron-solidity/=lib/tron-contracts/
 forge-std/=lib/forge-std/src/
 ```
 
-The npm package does not vendor mutable Forge dependencies. Pin the TRON
-contracts commit in the consuming repository. Node.js 22 or newer, Bash, and
+The npm package does not vendor mutable Forge dependencies. `forge install`
+checks out the latest tagged release of OpenZeppelin Contracts for TRON
+(`v5.6.0` at the time of writing, the version this library is tested against).
+Use tagged releases only: `master` is the development branch. Note that a
+later `forge update` moves the dependency to `master`, leaving the release
+you installed. Node.js 22 or newer, Bash, and
 forge-std 1.9.5 or newer are required. On Windows, set
 `OPENZEPPELIN_BASH_PATH` to the absolute forward-slash path of a trusted Bash
 executable.
